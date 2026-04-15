@@ -1,0 +1,846 @@
+"","ticker","name","cik","occurrence","date_added","date_removed","name_when_added","name_when_removed"
+"1","MMM","3M",66740,1,NA,NA,NA,NA
+"2","ABT","Abbott Laboratories",1800,1,NA,NA,NA,NA
+"3","ABBV","AbbVie",1551152,1,2012-12-31,NA,"AbbVie",NA
+"4","ABMD","Abiomed",815094,1,2018-05-31,2022-12-22,"Abiomed","Abiomed"
+"5","ACN","Accenture",1467373,1,2011-07-05,NA,"Accenture",NA
+"6","ATVI","Activision Blizzard",718877,1,2015-08-28,2023-10-18,"Activision Blizzard","Activision Blizzard"
+"7","ADBE","Adobe",796343,1,NA,NA,NA,NA
+"8","AMD","Advanced Micro Devices",2488,2,2017-03-20,NA,"Advanced Micro Devices",NA
+"9","AAP","Advance Auto Parts",1158449,1,2015-07-08,2023-08-25,"Advance Auto Parts","Advance Auto Parts"
+"10","AES","AES Corp",874761,1,NA,NA,NA,NA
+"11","AFL","Aflac",4977,1,NA,NA,NA,NA
+"12","A","Agilent Technologies",1090872,1,NA,NA,NA,NA
+"13","APD","Air Products & Chemicals",2969,1,NA,NA,NA,NA
+"14","AKAM","Akamai Technologies",1086222,1,NA,NA,NA,NA
+"15","ALK","Alaska Air Group",766421,1,2016-05-13,2023-12-18,"Alaska Air Group","Alaska Air Group"
+"16","ALB","Albemarle Corporation",915913,1,2016-07-01,NA,"Albemarle Corporation",NA
+"17","ARE","Alexandria Real Estate Equities",1035443,1,2017-03-20,NA,"Alexandria Real Estate Equities",NA
+"18","ALGN","Align Technology",1097149,1,2017-06-19,NA,"Align Technology",NA
+"19","ALLE","Allegion",1579241,1,2013-12-02,NA,"Allegion",NA
+"20","LNT","Alliant Energy",352541,1,2016-07-01,NA,"Alliant Energy Corp",NA
+"21","ALL","Allstate Corp",899051,1,NA,NA,NA,NA
+"22","GOOGL","Alphabet (Class A)",1652044,1,2014-04-03,NA,"Google",NA
+"23","GOOG","Alphabet (Class C)",1652044,1,NA,NA,NA,NA
+"24","MO","Altria Group",764180,1,NA,NA,NA,NA
+"25","AMZN","Amazon",1018724,1,NA,NA,NA,NA
+"26","AMCR","Amcor",1748790,1,NA,NA,NA,NA
+"27","AEE","Ameren Corp",1002910,1,NA,NA,NA,NA
+"28","AAL","American Airlines Group",6201,1,2015-03-23,2024-09-23,"American Airlines Group","American Airlines Group"
+"29","AEP","American Electric Power",4904,1,NA,NA,NA,NA
+"30","AXP","American Express",4962,1,NA,NA,NA,NA
+"31","AIG","American International Group",5272,1,NA,NA,NA,NA
+"32","AMT","American Tower",1053507,1,NA,NA,NA,NA
+"33","AWK","American Water Works",1410636,1,2016-03-04,NA,"American Water Works",NA
+"34","AMP","Ameriprise Financial",820027,1,NA,NA,NA,NA
+"35","ABC","AmerisourceBergen",1140859,1,NA,NA,NA,NA
+"36","AME","Ametek",1037868,1,2013-09-20,NA,"Ametek",NA
+"37","AMGN","Amgen",318154,1,NA,NA,NA,NA
+"38","APH","Amphenol Corp",820313,1,NA,NA,NA,NA
+"39","ADI","Analog Devices",6281,1,NA,NA,NA,NA
+"40","ANSS","Ansys",1013462,1,2017-06-19,2025-07-18,"Ansys","Ansys"
+"41","ANTM","Anthem",1156039,1,NA,NA,NA,NA
+"42","AON","Aon",315293,1,NA,NA,NA,NA
+"43","AOS","A. O. Smith",91142,1,2017-07-26,NA,"AO Smith",NA
+"44","APA","APA Corporation",6769,1,NA,NA,NA,NA
+"45","AAPL","Apple",320193,1,NA,NA,NA,NA
+"46","AMAT","Applied Materials",6951,1,NA,NA,NA,NA
+"47","APTV","Aptiv",1521332,1,2017-11-30,NA,"Aptiv",NA
+"48","DLPH",NA,NA,1,2012-12-24,2017-11-29,"Delphi Automotive","Delphi Automotive"
+"49","ADM","ADM",7084,1,NA,NA,NA,NA
+"50","ANET","Arista Networks",1596532,1,2018-08-28,NA,"Arista Networks",NA
+"51","AJG","Arthur J. Gallagher & Co.",354190,1,2016-05-31,NA,"Arthur J. Gallagher & Co.",NA
+"52","AIZ","Assurant",1267238,1,NA,NA,NA,NA
+"53","T","AT&T",732717,1,NA,NA,NA,NA
+"54","ATO","Atmos Energy",731802,1,2019-02-15,NA,"Atmos Energy",NA
+"55","ADSK","Autodesk",769397,1,NA,NA,NA,NA
+"56","ADP","Automatic Data Processing",8670,1,NA,NA,NA,NA
+"57","AZO","AutoZone",866787,1,NA,NA,NA,NA
+"58","AVB","AvalonBay Communities",915912,1,2007-01-10,NA,"AvalonBay Communities",NA
+"59","AVY","Avery Dennison",8818,1,NA,NA,NA,NA
+"60","BKR","Baker Hughes",1701605,1,NA,NA,NA,NA
+"61","BLL","Ball Corp",9389,1,NA,NA,NA,NA
+"62","BAC","Bank of America",70858,1,NA,NA,NA,NA
+"63","BK","BNY Mellon",1390777,1,NA,NA,NA,NA
+"64","BAX","Baxter International",10456,1,NA,NA,NA,NA
+"65","BDX","Becton Dickinson",10795,1,NA,NA,NA,NA
+"66","BRK.B","Berkshire Hathaway",1067983,1,NA,NA,NA,NA
+"67","BBY","Best Buy",764478,1,NA,NA,NA,NA
+"68","BIO","Bio-Rad Laboratories",12208,1,2020-06-22,2024-09-23,"Bio-Rad Laboratories","Bio-Rad Laboratories"
+"69","BIIB","Biogen",875045,1,NA,NA,NA,NA
+"70","BLK","BlackRock",1364742,1,2011-04-01,NA,"BlackRock",NA
+"71","BA","Boeing Company",12927,1,NA,NA,NA,NA
+"72","BKNG","Booking Holdings",1075531,1,2018-02-17,NA,"Booking Holdings",NA
+"73","PCLN",NA,NA,1,2009-11-03,2018-02-16,"Priceline.com","Priceline.com"
+"74","BWA","BorgWarner",908255,1,2011-12-16,2025-03-24,"BorgWarner","BorgWarner"
+"75","BXP","Boston Properties",1037540,1,NA,NA,NA,NA
+"76","BSX","Boston Scientific",885725,1,NA,NA,NA,NA
+"77","BMY","Bristol-Myers Squibb",14272,1,NA,NA,NA,NA
+"78","AVGO","Broadcom",1730168,1,2014-05-08,NA,"Avago Technologies",NA
+"79","BR","Broadridge Financial Solutions",1383312,1,2018-06-18,NA,"Broadridge Financial Solutions",NA
+"80","BF.B","Brown–Forman",14693,1,NA,NA,NA,NA
+"81","CHRW","C. H. Robinson",1043277,1,NA,NA,NA,NA
+"82","COG","Cabot Oil & Gas",858470,1,NA,NA,NA,NA
+"83","CDNS","Cadence Design Systems",813672,1,2017-09-18,NA,"Cadence Design Systems",NA
+"84","CZR","Caesars Entertainment",1590895,1,2021-03-22,NA,"Caesars Entertainment",NA
+"85","CPB","Campbell Soup",16732,1,NA,NA,NA,NA
+"86","COF","Capital One Financial",927628,1,NA,NA,NA,NA
+"87","CAH","Cardinal Health",721371,1,NA,NA,NA,NA
+"88","KMX","CarMax",1170010,1,2010-06-28,NA,"CarMax",NA
+"89","CCL","Carnival Corporation",815097,1,NA,NA,NA,NA
+"90","CARR","Carrier Global",1783180,1,2020-04-03,NA,"Carrier Global",NA
+"91","CTLT","Catalent",1596783,1,2020-09-21,2024-12-23,"Catalent","Catalent"
+"92","CAT","Caterpillar",18230,1,NA,NA,NA,NA
+"93","CBOE","Cboe Global Markets",1374310,1,2017-03-01,NA,"Cboe Holdings",NA
+"94","CBRE","CBRE",1138118,1,NA,NA,NA,NA
+"95","CDW","CDW",1402057,1,2019-09-23,NA,"CDW",NA
+"96","CE","Celanese",1306830,1,2018-12-24,2025-03-24,"Celanese","Celanese"
+"97","CNC","Centene Corporation",1071739,1,2016-03-30,NA,"Centene Corporation",NA
+"98","CNP","CenterPoint Energy",1130310,1,NA,NA,NA,NA
+"99","CERN","Cerner",804753,1,2010-04-29,2022-06-08,"Cerner","Cerner"
+"100","CF","CF Industries",1324404,1,NA,NA,NA,NA
+"101","CRL","Charles River Laboratories",1100682,1,2021-05-14,NA,"Charles River Laboratories",NA
+"102","SCHW","Charles Schwab Corporation",316709,1,NA,NA,NA,NA
+"103","CHTR","Charter Communications",1091667,1,2016-09-08,NA,"Charter Communications",NA
+"104","CVX","Chevron Corporation",93410,1,NA,NA,NA,NA
+"105","CMG","Chipotle Mexican Grill",1058090,1,2011-04-27,NA,"Chipotle Mexican Grill",NA
+"106","CB","Chubb",896159,1,NA,NA,NA,NA
+"107","ACE",NA,NA,1,2010-07-14,2016-01-19,"Ace","Ace"
+"108","CHD","Church & Dwight",313927,1,2015-12-29,NA,"Church & Dwight",NA
+"109","CI","Cigna",1739940,1,NA,NA,NA,NA
+"110","CINF","Cincinnati Financial",20286,1,NA,NA,NA,NA
+"111","CTAS","Cintas Corporation",723254,1,NA,NA,NA,NA
+"112","CSCO","Cisco Systems",858877,1,NA,NA,NA,NA
+"113","C","Citigroup",831001,1,NA,NA,NA,NA
+"114","CFG","Citizens Financial Group",759944,1,2016-02-01,NA,"Citizens Financial Group",NA
+"115","CTXS","Citrix Systems",877890,1,NA,2022-10-03,NA,"Citrix Systems"
+"116","CLX","Clorox",21076,1,NA,NA,NA,NA
+"117","CME","CME Group",1156375,1,NA,NA,NA,NA
+"118","CMS","CMS Energy",811156,1,NA,NA,NA,NA
+"119","KO","Coca-Cola Company",21344,1,NA,NA,NA,NA
+"120","CTSH","Cognizant Technology Solutions",1058290,1,NA,NA,NA,NA
+"121","CL","Colgate-Palmolive",21665,1,NA,NA,NA,NA
+"122","CMCSA","Comcast",1166691,1,NA,NA,NA,NA
+"123","CMA","Comerica",28412,1,NA,2024-06-24,NA,"Comerica"
+"124","CAG","Conagra Brands",23217,1,NA,NA,NA,NA
+"125","COP","ConocoPhillips",1163165,1,NA,NA,NA,NA
+"126","ED","Consolidated Edison",1047862,1,NA,NA,NA,NA
+"127","STZ","Constellation Brands",16918,1,2005-07-01,NA,"Constellation Brands",NA
+"128","COO","The Cooper Companies",711404,1,2016-09-22,NA,"The Cooper Companies",NA
+"129","CPRT","Copart",900075,1,2018-07-02,NA,"Copart",NA
+"130","GLW","Corning",24741,1,NA,NA,NA,NA
+"131","CTVA","Corteva",1755672,1,2019-06-03,NA,"Corteva",NA
+"132","COST","Costco",909832,1,NA,NA,NA,NA
+"133","CCI","Crown Castle",1051470,1,2012-03-13,NA,"Crown Castle",NA
+"134","CSX","CSX",277948,1,NA,NA,NA,NA
+"135","CMI","Cummins",26172,1,NA,NA,NA,NA
+"136","CVS","CVS Health",64803,1,NA,NA,NA,NA
+"137","DHI","D. R. Horton",882184,1,NA,NA,NA,NA
+"138","DHR","Danaher Corporation",313616,1,NA,NA,NA,NA
+"139","DRI","Darden Restaurants",940944,1,NA,NA,NA,NA
+"140","DVA","DaVita",927066,1,NA,NA,NA,NA
+"141","DE","Deere & Co.",315189,1,NA,NA,NA,NA
+"142","DAL","Delta Air Lines",27904,1,2013-09-10,NA,"Delta Air Lines",NA
+"143","XRAY","Dentsply Sirona",818479,1,NA,2024-04-03,NA,"Dentsply Sirona"
+"144","DVN","Devon Energy",1090012,1,NA,NA,NA,NA
+"145","DXCM","DexCom",1093557,1,2020-05-12,NA,"Dexcom",NA
+"146","FANG","Diamondback Energy",1539838,1,2018-12-03,NA,"Diamondback Energy",NA
+"147","DLR","Digital Realty Trust",1297996,1,2016-05-18,NA,"Digital Realty Trust",NA
+"148","DFS","Discover Financial Services",1393612,1,NA,2025-05-19,NA,"Discover Financial"
+"149","DISCA","Discovery (Series A)",1437107,1,NA,2022-04-11,NA,"Discovery, Inc."
+"150","DISCK","Discovery (Series C)",1437107,1,2014-08-06,2022-04-11,"Discovery Communications","Discovery, Inc."
+"151","DISH","Dish Network",1001082,1,2017-03-13,2023-06-20,"Dish Network","Dish Network"
+"152","DG","Dollar General",29534,1,2012-12-03,NA,"Dollar General",NA
+"153","DLTR","Dollar Tree",935703,1,2011-12-16,NA,"Dollar Tree",NA
+"154","D","Dominion Energy",715957,1,NA,NA,NA,NA
+"155","DPZ","Domino's Pizza",1286681,1,2020-05-12,NA,"Domino's Pizza",NA
+"156","DOV","Dover Corporation",29905,1,NA,NA,NA,NA
+"157","DOW","Dow",1751788,2,2019-04-02,NA,"Dow",NA
+"158","DTE","DTE Energy",936340,1,NA,NA,NA,NA
+"159","DUK","Duke Energy",1326160,1,NA,NA,NA,NA
+"160","DRE","Duke Realty Corp",783280,1,2017-07-26,2022-10-03,"Duke Realty Corp","Duke Realty"
+"161","DD","DuPont",1666700,2,2019-06-03,NA,"DuPont",NA
+"162","DXC","DXC Technology",1688568,1,2017-04-04,2023-10-03,"DXC Technology","DXC Technology"
+"163","EMN","Eastman Chemical",915389,1,NA,NA,NA,NA
+"164","ETN","Eaton Corporation",1551182,1,NA,NA,NA,NA
+"165","EBAY","eBay",1065088,1,NA,NA,NA,NA
+"166","ECL","Ecolab",31462,1,NA,NA,NA,NA
+"167","EIX","Edison International",827052,1,NA,NA,NA,NA
+"168","EW","Edwards Lifesciences",1099800,1,2011-03-31,NA,"Edwards Lifesciences",NA
+"169","EA","Electronic Arts",712515,1,NA,NA,NA,NA
+"170","EMR","Emerson Electric Company",32604,1,NA,NA,NA,NA
+"171","ENPH","Enphase Energy",1463101,1,2021-01-07,NA,"Enphase Energy",NA
+"172","ETR","Entergy",65984,1,NA,NA,NA,NA
+"173","EOG","EOG Resources",821189,1,NA,NA,NA,NA
+"174","EFX","Equifax",33185,1,NA,NA,NA,NA
+"175","EQIX","Equinix",1101239,1,2015-03-23,NA,"Equinix",NA
+"176","EQR","Equity Residential",906107,1,NA,NA,NA,NA
+"177","ESS","Essex Property Trust",920522,1,2014-04-02,NA,"Essex Property Trust",NA
+"178","EL","Estée Lauder Companies",1001250,1,NA,NA,NA,NA
+"179","ETSY","Etsy",1370637,1,2020-09-21,2024-09-23,"Etsy","Etsy"
+"180","EVRG","Evergy",1711269,1,2018-06-05,NA,"Evergy",NA
+"181","ES","Eversource Energy",72741,1,NA,NA,NA,NA
+"182","RE","Everest Re",1095073,1,2017-06-19,NA,"Everest Re",NA
+"183","EXC","Exelon",1109357,1,NA,NA,NA,NA
+"184","EXPE","Expedia Group",1324424,1,2007-10-02,NA,"Expedia",NA
+"185","EXPD","Expeditors",746515,1,NA,NA,NA,NA
+"186","EXR","Extra Space Storage",1289490,1,2016-01-19,NA,"Extra Space Storage",NA
+"187","XOM","ExxonMobil",34088,1,NA,NA,NA,NA
+"188","FFIV","F5 Networks",1048695,1,2010-12-17,NA,"F5 Networks.",NA
+"189","FB","Facebook",1326801,1,2013-12-23,NA,"Facebook",NA
+"190","FAST","Fastenal",815556,1,2008-09-12,NA,"Fastenal",NA
+"191","FRT","Federal Realty Investment Trust",34903,1,2016-02-01,NA,"Federal Realty Investment Trust",NA
+"192","FDX","FedEx",1048911,1,NA,NA,NA,NA
+"193","FIS","Fidelity National Information Services",1136893,1,NA,NA,NA,NA
+"194","FITB","Fifth Third Bancorp",35527,1,NA,NA,NA,NA
+"195","FE","FirstEnergy",1031296,1,NA,NA,NA,NA
+"196","FRC","First Republic Bank",1132979,1,2019-01-02,2023-05-04,"First Republic Bank","First Republic Bank"
+"197","FISV","Fiserv",798354,1,NA,NA,NA,NA
+"198","FLT","Fleetcor",1175454,1,2018-06-20,NA,"FleetCor Technologies",NA
+"199","FMC","FMC Corporation",37785,1,NA,2025-03-24,NA,"FMC Corporation"
+"200","F","Ford",37996,1,NA,NA,NA,NA
+"201","FTNT","Fortinet",1262039,1,2018-10-11,NA,"Fortinet",NA
+"202","FTV","Fortive",1659166,1,2016-07-05,NA,"Fortive Corp",NA
+"203","FBHS","Fortune Brands Home & Security",1519751,1,2016-06-22,2022-12-19,"Fortune Brands Home & Security","Fortune Brands Home & Security"
+"204","FOXA","Fox Corporation (Class A)",1754301,1,2013-06-28,NA,"21st Century Fox",NA
+"205","FOX","Fox Corporation (Class B)",1754301,1,2015-09-18,NA,"Twenty-First Century Fox Class B",NA
+"206","BEN","Franklin Resources",38777,1,NA,NA,NA,NA
+"207","FCX","Freeport-McMoRan",831259,1,NA,NA,NA,NA
+"208","GPS","Gap",39911,1,NA,2022-02-03,NA,"Gap"
+"209","GRMN","Garmin",1121788,1,2012-12-11,NA,"Garmin",NA
+"210","IT","Gartner",749251,1,2017-04-05,NA,"Gartner",NA
+"211","GNRC","Generac Holdings",1474735,1,2021-03-22,NA,"Generac Holdings",NA
+"212","GD","General Dynamics",40533,1,NA,NA,NA,NA
+"213","GE","General Electric",40545,1,NA,NA,NA,NA
+"214","GIS","General Mills",40704,1,NA,NA,NA,NA
+"215","GM","General Motors",1467858,1,2013-06-06,NA,"General Motors",NA
+"216","GPC","Genuine Parts",40987,1,NA,NA,NA,NA
+"217","GILD","Gilead Sciences",882095,1,NA,NA,NA,NA
+"218","GL","Globe Life",320335,1,NA,NA,NA,NA
+"219","GPN","Global Payments",1123360,1,2016-04-25,NA,"Global Payments",NA
+"220","GS","Goldman Sachs",886982,1,NA,NA,NA,NA
+"221","GWW","W. W. Grainger",277135,1,NA,NA,NA,NA
+"222","HAL","Halliburton",45012,1,NA,NA,NA,NA
+"223","HBI","Hanesbrands",1359841,1,2015-03-23,2021-12-20,"Hanesbrands","Hanesbrands"
+"224","HIG","The Hartford",874766,1,NA,NA,NA,NA
+"225","HAS","Hasbro",46080,1,NA,NA,NA,NA
+"226","HCA","HCA Healthcare",860730,1,2015-01-27,NA,"HCA Holdings",NA
+"227","PEAK","Healthpeak Properties",765880,1,NA,NA,NA,NA
+"228","HSIC","Henry Schein",1000228,1,2015-03-18,NA,"Henry Schein",NA
+"229","HSY","The Hershey Company",47111,1,NA,NA,NA,NA
+"230","HES","Hess Corporation",4447,1,NA,2025-07-23,NA,"Hess Corporation"
+"231","HPE","Hewlett Packard Enterprise",1645590,1,2015-11-02,NA,"Hewlett Packard Enterprise",NA
+"232","HLT","Hilton Worldwide",1585689,1,2017-06-19,NA,"Hilton Worldwide",NA
+"233","HOLX","Hologic",859737,1,2016-03-30,NA,"Hologic",NA
+"234","HD","Home Depot",354950,1,NA,NA,NA,NA
+"235","HON","Honeywell",773840,1,NA,NA,NA,NA
+"236","HRL","Hormel",48465,1,2009-03-03,NA,"Hormel Foods",NA
+"237","HST","Host Hotels & Resorts",1070750,1,NA,NA,NA,NA
+"238","HWM","Howmet Aerospace",4281,1,2020-03-27,NA,"Howmet Aerospace",NA
+"239","HPQ","HP",47217,1,NA,NA,NA,NA
+"240","HUM","Humana",49071,1,NA,NA,NA,NA
+"241","HBAN","Huntington Bancshares",49196,1,NA,NA,NA,NA
+"242","HII","Huntington Ingalls Industries",1501585,1,2018-01-03,NA,"Huntington Ingalls Industries",NA
+"243","IEX","IDEX Corporation",832101,1,2019-08-09,NA,"IDEX Corporation",NA
+"244","IDXX","Idexx Laboratories",874716,1,2017-01-05,NA,"Idexx Laboratories",NA
+"245","INFO","IHS Markit",1598014,1,2017-06-02,2022-03-02,"IHS Markit","IHS Markit"
+"246","ITW","Illinois Tool Works",49826,1,NA,NA,NA,NA
+"247","ILMN","Illumina",1110803,1,2015-11-19,2024-06-24,"Illumina","Illumina, Inc."
+"248","INCY","Incyte",879169,1,2017-02-28,NA,"Incyte",NA
+"249","IR","Ingersoll Rand",1699150,1,2010-11-17,NA,"Ingersoll-Rand",NA
+"250","INTC","Intel",50863,1,NA,NA,NA,NA
+"251","ICE","Intercontinental Exchange",1571949,1,2007-09-26,NA,"Intercontinental Exchange",NA
+"252","IBM","IBM",51143,1,NA,NA,NA,NA
+"253","IP","International Paper",51434,1,NA,NA,NA,NA
+"254","IPG","Interpublic Group",51644,1,NA,NA,NA,NA
+"255","IFF","International Flavors & Fragrances",51253,1,NA,NA,NA,NA
+"256","INTU","Intuit",896878,1,2000-12-05,NA,"Intuit",NA
+"257","ISRG","Intuitive Surgical",1035267,1,NA,NA,NA,NA
+"258","IVZ","Invesco",914208,1,NA,NA,NA,NA
+"259","IPGP","IPG Photonics",1111928,1,2018-03-07,2022-06-21,"IPG Photonics","IPG Photonics"
+"260","IQV","IQVIA",1478242,1,2017-11-15,NA,"IQVIA",NA
+"261","IRM","Iron Mountain",1020569,1,NA,NA,NA,NA
+"262","JKHY","Jack Henry & Associates",779152,1,2018-11-13,NA,"Jack Henry & Associates",NA
+"263","J","Jacobs Engineering Group",52988,1,2019-12-10,NA,"Jacobs Engineering Group",NA
+"264","JEC",NA,NA,1,2007-10-26,2019-12-09,"Jacobs Engineering Group","Jacobs Engineering Group"
+"265","JBHT","J. B. Hunt",728535,1,2015-07-01,NA,"JB Hunt",NA
+"266","SJM","JM Smucker",91419,1,NA,NA,NA,NA
+"267","JNJ","Johnson & Johnson",200406,1,NA,NA,NA,NA
+"268","JCI","Johnson Controls",833444,1,NA,NA,NA,NA
+"269","JPM","JPMorgan Chase",19617,1,NA,NA,NA,NA
+"270","JNPR","Juniper Networks",1043604,1,2006-06-02,2025-07-09,"Juniper Networks","Juniper Networks"
+"271","KSU","Kansas City Southern",54480,1,2013-05-23,2021-12-14,"Kansas City Southern","Kansas City Southern"
+"272","K","Kellogg's",55067,1,NA,NA,NA,NA
+"273","KEY","KeyCorp",91576,1,NA,NA,NA,NA
+"274","KEYS","Keysight Technologies",1601046,1,2018-11-06,NA,"Keysight Technologies",NA
+"275","KMB","Kimberly-Clark",55785,1,NA,NA,NA,NA
+"276","KIM","Kimco Realty",879101,1,NA,NA,NA,NA
+"277","KMI","Kinder Morgan",1506307,1,2012-05-17,NA,"Kinder Morgan",NA
+"278","KLAC","KLA Corporation",319201,1,NA,NA,NA,NA
+"279","KHC","Kraft Heinz",1637459,1,2015-07-06,NA,"Kraft Heinz",NA
+"280","KR","Kroger",56873,1,NA,NA,NA,NA
+"281","BBWI","L Brands",701985,1,NA,2024-10-01,NA,"Bath & Body Works, Inc."
+"282","LHX","L3Harris Technologies",202058,1,2019-06-26,NA,"L3Harris Technologies",NA
+"283","HRS",NA,NA,1,2008-09-16,2019-06-25,"Harris Corporation","Harris Corporation"
+"284","LH","LabCorp",920148,1,NA,NA,NA,NA
+"285","LRCX","Lam Research",707549,1,2012-06-05,NA,"Lam Research",NA
+"286","LW","Lamb Weston",1679273,1,2018-12-03,NA,"Lamb Weston",NA
+"287","LVS","Las Vegas Sands",1300514,1,2019-10-03,NA,"Las Vegas Sands",NA
+"288","LEG","Leggett & Platt",58492,1,NA,2021-12-20,NA,"Leggett & Platt"
+"289","LDOS","Leidos",1336920,1,2019-08-09,NA,"Leidos",NA
+"290","LEN","Lennar",920760,1,NA,NA,NA,NA
+"291","LLY","Eli Lilly & Co",59478,1,NA,NA,NA,NA
+"292","LNC","Lincoln National",59558,1,NA,2023-09-18,NA,"Lincoln National Corporation"
+"293","LIN","Linde",1707925,1,NA,NA,NA,NA
+"294","LYV","Live Nation Entertainment",1335258,1,2019-12-23,NA,"Live Nation Entertainment",NA
+"295","LKQ","LKQ Corporation",1065696,1,2016-05-23,NA,"LKQ Corporation",NA
+"296","LMT","Lockheed Martin",936468,1,NA,NA,NA,NA
+"297","L","Loews Corporation",60086,1,NA,NA,NA,NA
+"298","LOW","Lowe's",60667,1,NA,NA,NA,NA
+"299","LUMN","Lumen Technologies",18926,1,NA,2023-03-20,NA,"Lumen Technologies"
+"300","LYB","LyondellBasell",1489393,1,2012-09-05,NA,"LyondellBasell",NA
+"301","MTB","M&T Bank",36270,1,NA,NA,NA,NA
+"302","MRO","Marathon Oil",101778,1,NA,2024-11-26,NA,"Marathon Oil"
+"303","MPC","Marathon Petroleum",1510295,1,2011-06-30,NA,"Marathon Oil",NA
+"304","MKTX","MarketAxess",1278021,1,2019-07-01,NA,"MarketAxess",NA
+"305","MAR","Marriott International",1048286,1,NA,NA,NA,NA
+"306","MMC","Marsh & McLennan",62709,1,NA,NA,NA,NA
+"307","MLM","Martin Marietta Materials",916076,1,2014-07-02,NA,"Martin Marietta Materials",NA
+"308","MAS","Masco",62996,1,NA,NA,NA,NA
+"309","MA","Mastercard",1141391,1,NA,NA,NA,NA
+"310","MKC","McCormick & Company",63754,1,NA,NA,NA,NA
+"311","MXIM","Maxim Integrated",743316,2,2018-12-03,2021-08-30,"Maxim Integrated","Maxim Integrated"
+"312","MCD","McDonald's",63908,1,NA,NA,NA,NA
+"313","MCK","McKesson Corporation",927653,1,NA,NA,NA,NA
+"314","MDT","Medtronic",1613103,1,NA,NA,NA,NA
+"315","MRK","Merck & Co.",310158,1,NA,NA,NA,NA
+"316","MET","MetLife",1099219,1,NA,NA,NA,NA
+"317","MTD","Mettler Toledo",1037646,1,2016-09-06,NA,"Mettler Toledo",NA
+"318","MGM","MGM Resorts International",789570,1,2017-07-26,NA,"MGM Resorts International",NA
+"319","MCHP","Microchip Technology",827054,1,NA,NA,NA,NA
+"320","MU","Micron Technology",723125,1,NA,NA,NA,NA
+"321","MSFT","Microsoft",789019,1,NA,NA,NA,NA
+"322","MAA","Mid-America Apartments",912595,1,2016-12-02,NA,"Mid-America Apartments",NA
+"323","MRNA","Moderna",1682852,1,2021-07-21,NA,"Moderna",NA
+"324","MHK","Mohawk Industries",851968,1,2013-12-23,NA,"Mohawk Industries",NA
+"325","TAP","Molson Coors Beverage Company",24545,1,NA,NA,NA,NA
+"326","MDLZ","Mondelez International",1103982,1,2012-10-02,NA,"Mondelez International",NA
+"327","MPWR","Monolithic Power Systems",1280452,1,2021-02-12,NA,"Monolithic Power Systems",NA
+"328","MNST","Monster Beverage",865752,1,2012-06-29,NA,"Monster Beverage",NA
+"329","MCO","Moody's Corporation",1059556,1,NA,NA,NA,NA
+"330","MS","Morgan Stanley",895421,1,NA,NA,NA,NA
+"331","MOS","The Mosaic Company",1285785,1,2011-09-23,NA,"The Mosaic Company",NA
+"332","MSI","Motorola Solutions",68505,1,NA,NA,NA,NA
+"333","MSCI","MSCI",1408198,1,2018-04-04,NA,"MSCI",NA
+"334","NDAQ","Nasdaq",1120193,1,NA,NA,NA,NA
+"335","NTAP","NetApp",1002047,1,NA,NA,NA,NA
+"336","NFLX","Netflix",1065280,1,2010-12-17,NA,"Netflix",NA
+"337","NWL","Newell Brands",814453,1,NA,2023-09-18,NA,"Newell Brands"
+"338","NEM","Newmont",1164727,1,NA,NA,NA,NA
+"339","NWSA","News Corp (Class A)",1564708,1,NA,NA,NA,NA
+"340","NWS","News Corp (Class B)",1564708,1,2015-09-18,NA,"News Corporation Class B",NA
+"341","NEE","NextEra Energy",753308,1,NA,NA,NA,NA
+"342","NLSN","Nielsen Holdings",1492633,1,2013-07-08,2022-10-12,"Nielsen Holdings","Nielsen Holdings"
+"343","NKE","Nike",320187,1,NA,NA,NA,NA
+"344","NI","NiSource",1111711,1,NA,NA,NA,NA
+"345","NSC","Norfolk Southern",702165,1,NA,NA,NA,NA
+"346","NTRS","Northern Trust",73124,1,NA,NA,NA,NA
+"347","NOC","Northrop Grumman",1133421,1,NA,NA,NA,NA
+"348","NLOK","NortonLifeLock",849399,1,NA,NA,NA,NA
+"349","NCLH","Norwegian Cruise Line Holdings",1513761,1,2017-10-13,NA,"Norwegian Cruise Line Holdings",NA
+"350","NOV","Nov",1021860,1,NA,2021-09-20,NA,"Nov"
+"351","NRG","NRG Energy",1013871,1,NA,NA,NA,NA
+"352","NUE","Nucor",73309,1,NA,NA,NA,NA
+"353","NVDA","Nvidia",1045810,1,NA,NA,NA,NA
+"354","NVR","NVR",906163,1,2019-09-26,NA,"NVR",NA
+"355","NXPI","NXP",1413447,1,2021-03-22,NA,"NXP",NA
+"356","ORLY","O'Reilly Automotive",898173,1,NA,NA,NA,NA
+"357","OXY","Occidental Petroleum",797468,1,NA,NA,NA,NA
+"358","ODFL","Old Dominion Freight Line",878927,1,2019-12-09,NA,"Old Dominion Freight Line",NA
+"359","OMC","Omnicom Group",29989,1,NA,NA,NA,NA
+"360","OKE","Oneok",1039684,1,NA,NA,NA,NA
+"361","ORCL","Oracle",1341439,1,NA,NA,NA,NA
+"362","OGN","Organon & Co.",1821825,1,2021-06-03,2023-10-18,"Organon & Co.","Organon & Co."
+"363","OTIS","Otis Worldwide",1781335,1,2020-04-03,NA,"Otis Worldwide",NA
+"364","PCAR","Paccar",75362,1,NA,NA,NA,NA
+"365","PKG","Packaging Corporation of America",75677,1,2017-07-26,NA,"Packaging Corporation of America",NA
+"366","PH","Parker-Hannifin",76334,1,NA,NA,NA,NA
+"367","PAYX","Paychex",723531,1,NA,NA,NA,NA
+"368","PAYC","Paycom",1590955,1,2020-01-28,NA,"Paycom",NA
+"369","PYPL","PayPal",1633917,1,2015-07-20,NA,"PayPal",NA
+"370","PENN","Penn National Gaming",921738,1,2021-03-22,2022-09-19,"Penn National Gaming","Penn Entertainment"
+"371","PNR","Pentair",77360,1,2012-10-01,NA,"Pentair",NA
+"372","PBCT","People's United Financial",1378946,1,NA,2022-04-04,NA,"People's United Financial"
+"373","PEP","PepsiCo",77476,1,NA,NA,NA,NA
+"374","PKI","PerkinElmer",31791,1,NA,NA,NA,NA
+"375","PRGO","Perrigo",1585364,1,2011-12-16,2021-09-20,"Perrigo","Perrigo"
+"376","PFE","Pfizer",78003,1,NA,NA,NA,NA
+"377","PM","Philip Morris International",1413329,1,NA,NA,NA,NA
+"378","PSX","Phillips 66",1534701,1,2012-04-23,NA,"Phillips 66",NA
+"379","PNW","Pinnacle West Capital",764622,1,NA,NA,NA,NA
+"380","PXD","Pioneer Natural Resources",1038357,1,NA,2024-05-08,NA,"Pioneer Natural Resources"
+"381","PNC","PNC Financial Services",713676,1,NA,NA,NA,NA
+"382","POOL","Pool Corporation",945841,1,2020-10-07,NA,"Pool Corporation",NA
+"383","PPG","PPG Industries",79879,1,NA,NA,NA,NA
+"384","PPL","PPL",922224,1,NA,NA,NA,NA
+"385","PFG","Principal Financial Group",1126328,1,NA,NA,NA,NA
+"386","PG","Procter & Gamble",80424,1,NA,NA,NA,NA
+"387","PGR","Progressive Corporation",80661,1,NA,NA,NA,NA
+"388","PLD","Prologis",1045609,1,NA,NA,NA,NA
+"389","PRU","Prudential Financial",1137774,1,NA,NA,NA,NA
+"390","PTC","PTC",857005,1,2021-04-20,NA,"PTC",NA
+"391","PEG","Public Service Enterprise Group",788784,1,NA,NA,NA,NA
+"392","PSA","Public Storage",1393311,1,NA,NA,NA,NA
+"393","PHM","PulteGroup",822416,1,NA,NA,NA,NA
+"394","PVH","PVH",78239,1,2013-02-15,2022-09-19,"PVH","PVH"
+"395","QRVO","Qorvo",1604778,1,2015-06-11,2024-12-23,"Qorvo","Qorvo"
+"396","PWR","Quanta Services",1050915,1,NA,NA,NA,NA
+"397","QCOM","Qualcomm",804328,1,NA,NA,NA,NA
+"398","DGX","Quest Diagnostics",1022079,1,NA,NA,NA,NA
+"399","RL","Ralph Lauren Corporation",1037038,1,NA,NA,NA,NA
+"400","RJF","Raymond James Financial",720005,1,2017-03-20,NA,"Raymond James Financial",NA
+"401","RTX","Raytheon Technologies",101829,1,NA,NA,NA,NA
+"402","O","Realty Income Corporation",726728,1,2015-04-07,NA,"Realty Income Corporation",NA
+"403","REG","Regency Centers",910606,1,2017-03-02,NA,"Regency Centers",NA
+"404","REGN","Regeneron Pharmaceuticals",872589,1,2013-04-30,NA,"Regeneron Pharmaceuticals",NA
+"405","RF","Regions Financial Corporation",1281761,1,NA,NA,NA,NA
+"406","RSG","Republic Services",1060391,1,NA,NA,NA,NA
+"407","RMD","ResMed",943819,1,2017-07-26,NA,"ResMed",NA
+"408","RHI","Robert Half International",315213,1,NA,2024-06-24,NA,"Robert Half"
+"409","ROK","Rockwell Automation",1024478,1,NA,NA,NA,NA
+"410","ROL","Rollins",84839,1,2018-10-01,NA,"Rollins",NA
+"411","ROP","Roper Technologies",882835,1,NA,NA,NA,NA
+"412","ROST","Ross Stores",745732,1,NA,NA,NA,NA
+"413","RCL","Royal Caribbean Group",884887,1,2014-12-05,NA,"Royal Caribbean Cruises",NA
+"414","SPGI","S&P Global",64040,1,NA,NA,NA,NA
+"415","CRM","Salesforce",1108524,1,2008-09-12,NA,"Salesforce",NA
+"416","SBAC","SBA Communications",1034054,1,2017-09-01,NA,"SBA Communications",NA
+"417","SLB","Schlumberger",87347,1,NA,NA,NA,NA
+"418","STX","Seagate Technology",1137789,1,2012-07-02,NA,"Seagate Technology",NA
+"419","SEE","Sealed Air",1012100,1,NA,2023-12-18,NA,"Sealed Air"
+"420","SRE","Sempra Energy",1032208,1,NA,NA,NA,NA
+"421","NOW","ServiceNow",1373715,1,2019-11-21,NA,"ServiceNow",NA
+"422","SHW","Sherwin-Williams",89800,1,NA,NA,NA,NA
+"423","SPG","Simon Property Group",1063761,1,NA,NA,NA,NA
+"424","SWKS","Skyworks Solutions",4127,1,2015-03-12,NA,"Skyworks Solutions",NA
+"425","SNA","Snap-on",91440,1,NA,NA,NA,NA
+"426","SO","Southern Company",92122,1,NA,NA,NA,NA
+"427","LUV","Southwest Airlines",92380,1,NA,NA,NA,NA
+"428","SWK","Stanley Black & Decker",93556,1,NA,NA,NA,NA
+"429","SBUX","Starbucks",829224,1,NA,NA,NA,NA
+"430","STT","State Street Corporation",93751,1,NA,NA,NA,NA
+"431","STE","Steris",1757898,1,2019-12-23,NA,"Steris",NA
+"432","SYK","Stryker Corporation",310764,1,NA,NA,NA,NA
+"433","SIVB","SVB Financial",719739,1,2018-03-19,2023-03-15,"SVB Financial","SVB Financial Group"
+"434","SYF","Synchrony Financial",1601712,1,2015-11-18,NA,"Synchrony Financial",NA
+"435","SNPS","Synopsys",883241,1,2017-03-16,NA,"Synopsys",NA
+"436","SYY","Sysco",96021,1,NA,NA,NA,NA
+"437","TMUS","T-Mobile US",1283699,1,2019-07-15,NA,"T-Mobile US",NA
+"438","TROW","T. Rowe Price",1113169,1,NA,NA,NA,NA
+"439","TTWO","Take-Two Interactive",946581,1,2018-03-19,NA,"Take-Two Interactive",NA
+"440","TPR","Tapestry",1116132,1,NA,NA,NA,NA
+"441","TGT","Target Corporation",27419,1,NA,NA,NA,NA
+"442","TEL","TE Connectivity",1385157,1,2011-10-14,NA,"TE Connectivity",NA
+"443","TDY","Teledyne Technologies",1094285,1,2020-06-22,NA,"Teledyne Technologies",NA
+"444","TFX","Teleflex",96943,1,2019-01-18,2025-03-24,"Teleflex","Teleflex"
+"445","TER","Teradyne",97210,2,2020-09-21,NA,"Teradyne",NA
+"446","TSLA","Tesla",1318605,1,2020-12-21,NA,"Tesla",NA
+"447","TXN","Texas Instruments",97476,1,NA,NA,NA,NA
+"448","TXT","Textron",217346,1,NA,NA,NA,NA
+"449","TMO","Thermo Fisher Scientific",97745,1,NA,NA,NA,NA
+"450","TJX","TJX Companies",109198,1,NA,NA,NA,NA
+"451","TSCO","Tractor Supply Company",916365,1,2014-01-24,NA,"Tractor Supply Company",NA
+"452","TT","Trane Technologies",1466258,1,2020-03-03,NA,"Trane Technologies",NA
+"453","TDG","TransDigm Group",1260221,1,2016-06-03,NA,"TransDigm Group",NA
+"454","TRV","The Travelers Companies",86312,1,NA,NA,NA,NA
+"455","TRMB","Trimble",864749,1,2021-01-21,NA,"Trimble",NA
+"456","TFC","Truist Financial",92230,1,NA,NA,NA,NA
+"457","TWTR","Twitter",1418091,1,2018-06-07,2022-11-01,"Twitter","Twitter"
+"458","TYL","Tyler Technologies",860731,1,2020-06-22,NA,"Tyler Technologies",NA
+"459","TSN","Tyson Foods",100493,1,NA,NA,NA,NA
+"460","UDR","UDR",74208,1,2016-03-07,NA,"UDR",NA
+"461","ULTA","Ulta Beauty",1403568,1,2016-04-18,NA,"Ulta Beauty",NA
+"462","USB","U.S. Bancorp",36104,1,NA,NA,NA,NA
+"463","UAA","Under Armour (Class A)",1336917,1,2014-05-01,2022-06-21,"Under Armour (Class A)","Under Armour (Class A)"
+"464","UA","Under Armour (Class C)",1336917,1,2016-04-08,2022-06-21,"Under Armour (Class C)","Under Armour (Class C)"
+"465","UNP","Union Pacific",100885,1,NA,NA,NA,NA
+"466","UAL","United Airlines",100517,1,2015-09-02,NA,"United Continental Holdings",NA
+"467","UNH","UnitedHealth Group",731766,1,NA,NA,NA,NA
+"468","UPS","United Parcel Service",1090727,1,NA,NA,NA,NA
+"469","URI","United Rentals",1067701,1,2014-09-20,NA,"United Rentals",NA
+"470","UHS","Universal Health Services",352915,1,2014-09-20,NA,"Universal Health Services",NA
+"471","UNM","Unum Group",5513,1,NA,2021-09-20,NA,"Unum"
+"472","VLO","Valero Energy",1035002,1,NA,NA,NA,NA
+"473","VTR","Ventas",740260,1,2009-03-03,NA,"Ventas",NA
+"474","VRSN","Verisign",1014473,1,NA,NA,NA,NA
+"475","VRSK","Verisk Analytics",1442145,1,2015-10-07,NA,"Verisk Analytics",NA
+"476","VZ","Verizon Communications",732712,1,NA,NA,NA,NA
+"477","VRTX","Vertex Pharmaceuticals",875320,1,2013-09-20,NA,"Vertex Pharmaceuticals",NA
+"478","VFC","VF Corporation",103379,1,NA,2024-04-03,NA,"VF Corporation"
+"479","VIAC","ViacomCBS",813828,1,NA,NA,NA,NA
+"480","VTRS","Viatris",1792044,1,NA,NA,NA,NA
+"481","V","Visa",1403161,1,2009-12-18,NA,"Visa",NA
+"482","VNO","Vornado Realty Trust",899689,1,NA,2023-01-05,NA,"Vornado Realty Trust"
+"483","VMC","Vulcan Materials",1396009,1,NA,NA,NA,NA
+"484","WRB","W. R. Berkley Corporation",11544,1,2019-12-05,NA,"W. R. Berkley Corporation",NA
+"485","WAB","Wabtec",943452,1,2019-02-27,NA,"Wabtec",NA
+"486","WMT","Walmart",104169,1,NA,NA,NA,NA
+"487","WBA","Walgreens Boots Alliance",1618921,1,NA,NA,NA,NA
+"488","DIS","The Walt Disney Company",1744489,1,NA,NA,NA,NA
+"489","WM","Waste Management",823768,1,NA,NA,NA,NA
+"490","WAT","Waters Corporation",1000697,1,NA,NA,NA,NA
+"491","WEC","WEC Energy Group",783325,1,NA,NA,NA,NA
+"492","WFC","Wells Fargo",72971,1,NA,NA,NA,NA
+"493","WELL","Welltower",766704,1,NA,NA,NA,NA
+"494","WST","West Pharmaceutical Services",105770,1,2020-05-22,NA,"West Pharmaceutical Services",NA
+"495","WDC","Western Digital",106040,1,NA,NA,NA,NA
+"496","WU","Western Union",1365135,1,NA,2021-12-20,NA,"Western Union"
+"497","WRK","WestRock",1732845,1,NA,NA,NA,NA
+"498","WY","Weyerhaeuser",106535,1,NA,NA,NA,NA
+"499","WHR","Whirlpool Corporation",106640,1,NA,2024-03-18,NA,"Whirlpool Corporation"
+"500","WMB","Williams Companies",107263,1,NA,NA,NA,NA
+"501","WLTW","Willis Towers Watson",1140536,1,2016-01-05,NA,"Willis Towers Watson",NA
+"502","WYNN","Wynn Resorts",1174922,1,NA,NA,NA,NA
+"503","XEL","Xcel Energy",72903,1,NA,NA,NA,NA
+"504","XLNX","Xilinx",743988,1,NA,2022-02-15,NA,"Xilinx"
+"505","XYL","Xylem",1524472,1,2011-10-31,NA,"Xylem",NA
+"506","YUM","Yum! Brands",1041061,1,NA,NA,NA,NA
+"507","ZBRA","Zebra Technologies",877212,1,2019-12-23,NA,"Zebra Technologies",NA
+"508","ZBH","Zimmer Biomet",1136869,1,NA,NA,NA,NA
+"509","ZION","Zions Bancorp",109380,1,NA,2024-03-18,NA,"Zions Bancorporation"
+"510","ZTS","Zoetis",1555280,1,2013-06-21,NA,"Zoetis",NA
+"511","ALXN",NA,NA,1,2012-05-21,2021-07-21,"Alexion Pharmaceuticals","Alexion Pharmaceuticals"
+"512","HFC",NA,NA,1,2018-06-18,2021-06-04,"HollyFrontier","HollyFrontier"
+"513","FLIR",NA,NA,1,NA,2021-05-14,NA,"FLIR Systems"
+"514","VAR",NA,NA,1,NA,2021-04-20,NA,"Varian Medical Systems"
+"515","FLS",NA,NA,1,NA,2021-03-22,NA,"Flowserve"
+"516","SLG",NA,NA,1,2015-03-23,2021-03-22,"SL Green Realty","SL Green Realty"
+"517","XRX",NA,NA,1,NA,2021-03-22,NA,"Xerox"
+"518","VNT",NA,NA,1,2020-10-09,2021-03-22,"Vontier","Vontier"
+"519","FTI",NA,NA,1,NA,2021-02-12,NA,"TechnipFMC"
+"520","CXO",NA,NA,1,2016-02-22,2021-01-21,"Concho Resources","Concho Resources"
+"521","TIF",NA,NA,1,NA,2021-01-07,NA,"Tiffany & Co"
+"522","AIV",NA,NA,1,NA,2020-12-21,NA,"Apartment Investment & Management"
+"523","NBL",NA,NA,1,NA,2020-10-12,NA,"Noble Energy"
+"524","ETFC",NA,NA,1,NA,2020-10-07,NA,"E-Trade"
+"525","HRB",NA,NA,1,NA,2020-09-21,NA,"H&R Block"
+"526","COTY",NA,NA,1,2016-09-30,2020-09-21,"Coty","Coty"
+"527","KSS",NA,NA,1,NA,2020-09-21,NA,"Kohl's"
+"528","ADS",NA,NA,1,2013-12-23,2020-06-22,"Alliance Data Systems","Alliance Data Systems"
+"529","HOG",NA,NA,1,NA,2020-06-22,NA,"Harley-Davidson"
+"530","JWN",NA,NA,1,NA,2020-06-22,NA,"Nordstrom"
+"531","HP",NA,NA,1,2010-02-26,2020-05-22,"Helmerich & Payne","Helmerich & Payne"
+"532","CPRI",NA,NA,1,2018-12-22,2020-05-12,"Capri Holdings","Capri Holdings"
+"533","AGN",NA,NA,2,2015-06-16,2020-05-12,"Allergan plc","Allergan plc"
+"534","AGN",NA,NA,1,NA,2015-03-23,NA,"Allergan"
+"535","ACT",NA,NA,1,2013-01-15,2015-06-15,"Actavis Inc","Actavis plc"
+"536","WPI",NA,NA,1,1999-04-07,2013-01-14,"Watson Pharmaceuticals","Watson Pharmaceuticals"
+"537","M",NA,NA,1,NA,2020-04-06,NA,"Macy's"
+"538","RTN",NA,NA,1,NA,2020-04-06,NA,"Raytheon Company"
+"539","XEC",NA,NA,1,2014-06-20,2020-03-03,"Cimarex Energy","Cimarex Energy"
+"540","WCG",NA,NA,1,2018-09-14,2020-01-28,"WellCare","WellCare"
+"541","AMG",NA,NA,1,2014-07-01,2019-12-23,"Affiliated Managers Group","Affiliated Managers Group"
+"542","TRIP",NA,NA,1,2011-12-20,2019-12-23,"TripAdvisor","TripAdvisor"
+"543","MAC",NA,NA,1,2013-05-08,2019-12-23,"Macerich","Macerich"
+"544","STI",NA,NA,1,NA,2019-12-09,NA,"SunTrust Banks"
+"545","VIAB",NA,NA,1,NA,2019-12-05,NA,"Viacom"
+"546","CELG",NA,NA,1,NA,2019-11-21,NA,"Celgene"
+"547","NKTR",NA,NA,1,2018-03-19,2019-10-03,"Nektar Therapeutics","Nektar Therapeutics"
+"548","JEF",NA,NA,1,2018-05-16,2019-09-26,"Jefferies Financial Group","Jefferies Financial Group"
+"549","LUK",NA,NA,1,2007-08-24,2018-05-15,"Leucadia National","Leucadia National"
+"550","TSS",NA,NA,1,NA,2019-09-23,NA,"TSYS"
+"551","APC",NA,NA,1,NA,2019-08-09,NA,"Anadarko Petroleum"
+"552","FL",NA,NA,1,2016-04-04,2019-08-09,"Foot Locker","Foot Locker"
+"553","RHT",NA,NA,1,NA,2019-07-15,NA,"Red Hat"
+"554","LLL",NA,NA,1,NA,2019-07-01,NA,"L3 Technologies"
+"555","MAT",NA,NA,1,NA,2019-06-07,NA,"Mattel"
+"556","DWDP",NA,NA,1,2017-09-01,2019-06-03,"DuPont","DuPont"
+"557","FLR",NA,NA,1,NA,2019-06-03,NA,"Fluor Corporation"
+"558","BHF",NA,NA,1,2017-08-08,2019-04-02,"Brighthouse Financial","Brighthouse Financial"
+"559","GT",NA,NA,1,NA,2019-02-27,NA,"The Goodyear Tire & Rubber Company"
+"560","NFX",NA,NA,1,2010-12-17,2019-02-15,"Newfield Exploration","Newfield Exploration"
+"561","PCG",NA,NA,1,NA,2019-01-18,NA,"Pacific Gas & Electric Company"
+"562","SCG",NA,NA,1,NA,2019-01-02,NA,"SCANA"
+"563","ESRX",NA,NA,1,2003-09-25,2018-12-24,"Express Scripts","Express Scripts"
+"564","COL",NA,NA,1,NA,2018-12-03,NA,"Rockwell Collins"
+"565","AET",NA,NA,1,NA,2018-12-03,NA,"Aetna"
+"566","SRCL",NA,NA,1,NA,2018-12-03,NA,"Stericycle"
+"567","EQT",NA,NA,1,NA,2018-11-13,NA,"EQT"
+"568","CA",NA,NA,1,NA,2018-11-06,NA,"CA Technologies"
+"569","EVHC",NA,NA,1,2016-12-02,2018-10-11,"Envision Healthcare","Envision Healthcare"
+"570","ANDV",NA,NA,1,2017-08-01,2018-10-01,"Andeavor","Andeavor"
+"571","TSO",NA,NA,1,2007-09-27,2017-07-31,"Tesoro Corporation","Tesoro Corporation"
+"572","XL",NA,NA,1,NA,2018-09-14,NA,"XL Group"
+"573","GGP",NA,NA,1,2013-12-10,2018-08-28,"General Growth Properties","GGP"
+"574","DPS",NA,NA,1,NA,2018-07-02,NA,"Dr Pepper Snapple Group"
+"575","TWX",NA,NA,1,NA,2018-06-20,NA,"Time Warner"
+"576","RRC",NA,NA,1,2007-12-20,2018-06-18,"Range Resources","Range Resources"
+"577","AYI",NA,NA,1,2016-05-03,2018-06-18,"Acuity Brands","Acuity Brands"
+"578","MON",NA,NA,1,NA,2018-06-07,NA,"Monsanto"
+"579","NAVI",NA,NA,1,2014-05-01,2018-06-05,"Navient","Navient"
+"580","WYN",NA,NA,1,NA,2018-05-31,NA,"Wyndham Worldwide"
+"581","CSRA",NA,NA,1,2015-12-01,2018-04-04,"CSRA","CSRA"
+"582","SIG",NA,NA,1,2015-07-29,2018-03-19,"Signet Jewelers","Signet Jewelers"
+"583","PDCO",NA,NA,1,NA,2018-03-19,NA,"Patterson Companies"
+"584","CHK",NA,NA,1,NA,2018-03-19,NA,"Chesapeake Energy"
+"585","SNI",NA,NA,1,NA,2018-03-07,NA,"Scripps Networks Interactive"
+"586","BCR",NA,NA,1,NA,2018-01-03,NA,"CR Bard"
+"587","LVLT",NA,NA,1,2014-11-05,2017-10-13,"Level 3 Communications","Level 3 Communications"
+"588","SPLS",NA,NA,1,NA,2017-09-18,NA,"Staples"
+"589","DOW",NA,NA,1,NA,2017-09-01,NA,"Dow Chemical Company"
+"590","DD",NA,NA,1,NA,2017-09-01,NA,"DuPont"
+"591","WFM",NA,NA,1,NA,2017-08-29,NA,"Whole Foods Market"
+"592","AN",NA,NA,1,NA,2017-08-08,NA,"AutoNation"
+"593","RIG",NA,NA,1,2013-10-29,2017-07-26,"Transocean","Transocean"
+"594","BBBY",NA,NA,1,NA,2017-07-26,NA,"Bed Bath & Beyond"
+"595","MUR",NA,NA,1,NA,2017-07-26,NA,"Murphy Oil"
+"596","MNK",NA,NA,1,2014-08-18,2017-07-26,"Mallinckrodt","Mallinckrodt"
+"597","RAI",NA,NA,1,NA,2017-07-26,NA,"Reynolds American"
+"598","YHOO",NA,NA,1,1999-12-07,2017-06-19,"Yahoo!","Yahoo!"
+"599","TDC",NA,NA,1,2007-10-01,2017-06-19,"Teradata","Teradata"
+"600","R",NA,NA,1,NA,2017-06-19,NA,"Ryder System"
+"601","MJN",NA,NA,1,2009-12-18,2017-06-19,"Mead Johnson Nutrition","Mead Johnson"
+"602","TGNA",NA,NA,1,NA,2017-06-02,NA,"Tegna"
+"603","DNB",NA,NA,1,NA,2017-04-05,NA,"Dun & Bradstreet"
+"604","SWN",NA,NA,1,NA,2017-04-04,NA,"Southwestern Energy"
+"605","URBN",NA,NA,1,NA,2017-03-20,NA,"Urban Outfitters"
+"606","FTR",NA,NA,1,NA,2017-03-20,NA,"Frontier Communications"
+"607","FSLR",NA,NA,1,NA,2017-03-20,NA,"First Solar"
+"608","HAR",NA,NA,1,NA,2017-03-16,NA,"Harman International"
+"609","LLTC",NA,NA,1,NA,2017-03-13,NA,"Linear Technology"
+"610","ENDP",NA,NA,1,2015-01-27,2017-03-02,"Endo International","Endo International"
+"611","PBI",NA,NA,1,NA,2017-03-01,NA,"Pitney Bowes"
+"612","SE",NA,NA,1,NA,2017-02-28,NA,"Spectra Energy"
+"613","STJ",NA,NA,1,NA,2017-01-05,NA,"St Jude Medical"
+"614","OI",NA,NA,2,2008-12-31,2016-12-02,"Owens-Illinois","Owens-Illinois"
+"615","LM",NA,NA,1,NA,2016-12-02,NA,"Legg Mason"
+"616","AA",NA,NA,1,NA,2016-11-01,NA,"Alcoa Inc"
+"617","DO",NA,NA,1,NA,2016-09-30,NA,"Diamond Offshore Drilling"
+"618","HOT",NA,NA,1,NA,2016-09-22,NA,"Starwood"
+"619","EMC",NA,NA,1,NA,2016-09-08,NA,"EMC Corporation"
+"620","CPGX",NA,NA,1,2015-07-02,2016-07-05,"Columbia Pipeline Group","Columbia Pipeline Group"
+"621","GAS",NA,NA,2,2011-12-12,2016-07-01,"AGL Resources.","AGL Resources"
+"622","TE",NA,NA,1,NA,2016-07-01,NA,"TECO Energy"
+"623","CVC",NA,NA,1,2010-12-17,2016-06-22,"Cablevision","Cablevision Systems"
+"624","BXLT",NA,NA,1,2015-07-01,2016-06-03,"Baxalta","Baxalta"
+"625","CCE",NA,NA,1,NA,2016-05-31,NA,"Coca-Cola Enterprises"
+"626","ARG",NA,NA,1,2009-09-28,2016-05-23,"Airgas","Airgas"
+"627","TWC",NA,NA,1,NA,2016-05-18,NA,"Time Warner Cable"
+"628","SNDK",NA,NA,1,NA,2016-05-13,NA,"SanDisk"
+"629","ADT",NA,NA,1,2012-10-01,2016-05-03,"ADT","ADT"
+"630","GME",NA,NA,1,2007-12-13,2016-04-25,"GameStop","GameStop"
+"631","THC",NA,NA,1,NA,2016-04-18,NA,"Tenet Healthcare"
+"632","CAM",NA,NA,1,NA,2016-04-04,NA,"Cameron International"
+"633","POM",NA,NA,1,NA,2016-03-30,NA,"Pepco Holdings"
+"634","ESV",NA,NA,1,2012-07-31,2016-03-30,"Ensco plc (now Valaris)","Ensco plc (now Valaris)"
+"635","GMCR",NA,NA,1,2014-03-21,2016-03-07,"Keurig Green Mountain","Keurig Green Mountain"
+"636","CNX",NA,NA,1,NA,2016-03-04,NA,"Consol Energy"
+"637","PCL",NA,NA,1,NA,2016-02-22,NA,"Plum Creek Timber"
+"638","PCP",NA,NA,1,NA,2016-02-01,NA,"Precision Castparts Corporation"
+"639","BRCM",NA,NA,1,NA,2016-02-01,NA,"Broadcom Corporation"
+"640","FOSL",NA,NA,1,2012-04-03,2016-01-05,"Fossil","Fossil Group"
+"641","ALTR",NA,NA,1,NA,2015-12-29,NA,"Altera"
+"642","CMCSK",NA,NA,1,2015-09-18,2015-12-15,"Comcast Class K Special","Comcast K Corp"
+"643","CSC",NA,NA,1,NA,2015-12-01,NA,"Computer Sciences Corporation"
+"644","SIAL",NA,NA,1,NA,2015-11-19,NA,"Sigma-Aldrich"
+"645","GNW",NA,NA,1,NA,2015-11-18,NA,"Genworth Financial"
+"646","HCBK",NA,NA,1,NA,2015-11-02,NA,"Hudson City Bancorp"
+"647","JOY",NA,NA,1,2011-02-25,2015-10-07,"Joy Global","Joy Global"
+"648","HSP",NA,NA,1,NA,2015-09-02,NA,"Hospira"
+"649","PLL",NA,NA,1,NA,2015-08-28,NA,"Pall Corporation"
+"650","DTV",NA,NA,1,NA,2015-07-29,NA,"DirecTV"
+"651","NE",NA,NA,1,NA,2015-07-20,NA,"Noble Corporation"
+"652","FDO",NA,NA,1,NA,2015-07-08,NA,"Family Dollar"
+"653","KRFT",NA,NA,1,2012-10-02,2015-07-06,"Kraft Foods","Kraft Foods"
+"654","KFT",NA,NA,1,2007-03-30,2012-10-01,"Kraft Foods","Kraft Foods"
+"655","ATI",NA,NA,1,NA,2015-07-02,NA,"Allegheny Technologies"
+"656","TEG",NA,NA,1,NA,2015-07-01,NA,"Integrys Energy Group"
+"657","QEP",NA,NA,1,2010-06-30,2015-07-01,"QEP Resources","QEP Resources"
+"658","LO",NA,NA,1,2008-06-10,2015-06-11,"Lorillard Tobacco Company","Lorillard Tobacco Company"
+"659","WIN",NA,NA,1,NA,2015-04-07,NA,"Windstream Communications"
+"660","DNR",NA,NA,1,NA,2015-03-23,NA,"Denbury Resources"
+"661","NBR",NA,NA,1,NA,2015-03-23,NA,"Nabors Industries"
+"662","AVP",NA,NA,1,NA,2015-03-23,NA,"Avon Products"
+"663","CFN",NA,NA,1,NA,2015-03-18,NA,"Carefusion"
+"664","PETM",NA,NA,1,2012-10-10,2015-03-12,"PetSmart","PetSmart"
+"665","SWY",NA,NA,1,NA,2015-01-27,NA,"Safeway"
+"666","COV",NA,NA,1,2011-02-28,2015-01-27,"Covidien","Covidien"
+"667","BMS",NA,NA,1,NA,2014-12-05,NA,"Bemis Company"
+"668","JBL",NA,NA,1,NA,2014-11-05,NA,"Jabil Circuit"
+"669","BTU",NA,NA,1,NA,2014-09-20,NA,"Peabody Energy"
+"670","GHC",NA,NA,1,NA,2014-09-20,NA,"Graham Holdings"
+"671","RDC",NA,NA,1,NA,2014-08-18,NA,"Rowan Companies"
+"672","X",NA,NA,1,NA,2014-07-02,NA,"United States Steel"
+"673","FRX",NA,NA,1,NA,2014-07-01,NA,"Forest Laboratories"
+"674","IGT",NA,NA,1,NA,2014-06-20,NA,"International Game Technology"
+"675","LSI",NA,NA,1,NA,2014-05-08,NA,"LSI Corporation"
+"676","BEAM",NA,NA,1,NA,2014-05-01,NA,"Beam Inc"
+"677","SLM",NA,NA,1,NA,2014-05-01,NA,"SLM Corporation"
+"678","CLF",NA,NA,1,2009-12-18,2014-04-02,"Cliffs Natural Resources","Cliffs Natural Resources"
+"679","WPX",NA,NA,1,2011-12-31,2014-03-21,"WPX Energy","WPX Energy"
+"680","LIFE",NA,NA,1,NA,2014-01-24,NA,"Life Technologies"
+"681","ANF",NA,NA,1,NA,2013-12-23,NA,"Abercrombie & Fitch"
+"682","JDSU",NA,NA,1,2000-07-27,2013-12-23,"JDS Uniphase","JDS Uniphase"
+"683","TER",NA,NA,1,NA,2013-12-23,NA,"Teradyne"
+"684","MOLX",NA,NA,1,NA,2013-12-10,NA,"Molex"
+"685","JCP",NA,NA,1,NA,2013-12-02,NA,"JCPenney"
+"686","NYX",NA,NA,1,NA,2013-11-13,NA,"NYSE Euronext"
+"687","DELL",NA,NA,1,NA,2013-10-29,NA,"Dell"
+"688","AMD",NA,NA,1,NA,2013-09-20,NA,"Advanced Micro Devices"
+"689","SAI",NA,NA,1,2009-12-18,2013-09-20,"SAIC","SAIC"
+"690","BMC",NA,NA,1,NA,2013-09-10,NA,"BMC Software"
+"691","S",NA,NA,1,NA,2013-07-08,NA,"Sprint Nextel"
+"692","APOL",NA,NA,1,NA,2013-06-28,NA,"Apollo Education Group"
+"693","FHN",NA,NA,1,NA,2013-06-21,NA,"First Horizon"
+"694","HNZ",NA,NA,1,NA,2013-06-06,NA,"Heinz"
+"695","DF",NA,NA,1,NA,2013-05-23,NA,"Dean Foods"
+"696","CVH",NA,NA,1,NA,2013-05-08,NA,"Coventry Health Care"
+"697","PCS",NA,NA,1,NA,2013-04-30,NA,"MetroPCS"
+"698","BIG",NA,NA,1,NA,2013-02-15,NA,"Big Lots"
+"699","FII",NA,NA,1,NA,2012-12-31,NA,"Federated Investors"
+"700","TIE",NA,NA,1,NA,2012-12-21,NA,"Titanium Metals"
+"701","RRD",NA,NA,1,NA,2012-12-11,NA,"RR Donnelley"
+"702","CBE",NA,NA,2,2011-11-18,2012-12-03,"Cooper Industries","Cooper Industries"
+"703","SUN",NA,NA,1,NA,2012-10-10,NA,"Sunoco"
+"704","ANR",NA,NA,1,2011-06-01,2012-10-02,"Alpha Natural Resources","Alpha Natural Resources"
+"705","LXK",NA,NA,1,NA,2012-10-01,NA,"Lexmark"
+"706","DV",NA,NA,1,NA,2012-10-01,NA,"DeVry"
+"707","SHLD",NA,NA,1,NA,2012-09-05,NA,"Sears Holdings"
+"708","GR",NA,NA,1,NA,2012-07-31,NA,"Goodrich Corporation"
+"709","PGN",NA,NA,1,NA,2012-07-02,NA,"Progress Energy"
+"710","SLE",NA,NA,1,NA,2012-06-29,NA,"Sara Lee Corporation"
+"711","NVLS",NA,NA,1,NA,2012-06-05,NA,"Novellus Systems"
+"712","MMI",NA,NA,1,NA,2012-05-21,NA,"Motorola Mobility"
+"713","EP",NA,NA,1,NA,2012-05-17,NA,"El Paso Corporation"
+"714","SVU",NA,NA,1,NA,2012-04-23,NA,"Supervalu"
+"715","MHS",NA,NA,1,NA,2012-04-03,NA,"Medco Health Solutions"
+"716","CEG",NA,NA,1,NA,2012-03-13,NA,"Constellation Energy Group"
+"717","CPWR",NA,NA,1,NA,2011-12-31,NA,"Compuware"
+"718","TLAB",NA,NA,1,NA,2011-12-20,NA,"Tellabs"
+"719","AKS",NA,NA,1,NA,2011-12-16,NA,"AK Steel"
+"720","MWW",NA,NA,1,NA,2011-12-16,NA,"Monster Worldwide"
+"721","WFR",NA,NA,1,NA,2011-12-16,NA,"MEMC Electronic Materials"
+"722","GAS",NA,NA,1,NA,2011-12-12,NA,"Nicor Gas"
+"723","JNS",NA,NA,1,NA,2011-11-18,NA,"Janus Capital Group"
+"724","ITT",NA,NA,1,NA,2011-10-31,NA,"ITT"
+"725","CEPH",NA,NA,1,NA,2011-10-14,NA,"Cephalon"
+"726","NSM",NA,NA,1,NA,2011-09-23,NA,"National Semiconductor"
+"727","MI",NA,NA,1,NA,2011-07-05,NA,"Marshall & Ilsley"
+"728","RSH",NA,NA,1,NA,2011-06-30,NA,"RadioShack"
+"729","MEE",NA,NA,1,NA,2011-06-01,NA,"Massey Energy Company"
+"730","NOVL",NA,NA,1,NA,2011-04-27,NA,"Novell"
+"731","GENZ",NA,NA,1,NA,2011-04-01,NA,"Genzyme"
+"732","Q",NA,NA,1,NA,2011-03-31,NA,"Qwest Communications"
+"733","MFE",NA,NA,1,NA,2011-02-28,NA,"McAfee"
+"734","AYE",NA,NA,1,2000-12-05,2011-02-25,"Allegheny Energy","Allegheny Energy"
+"735","KG",NA,NA,1,NA,2010-12-17,NA,"King Pharmaceuticals"
+"736","EK",NA,NA,1,NA,2010-12-17,NA,"Eastman Kodak"
+"737","ODP",NA,NA,1,NA,2010-12-17,NA,"Office Depot"
+"738","NYT",NA,NA,1,NA,2010-12-17,NA,"The New York Times Company"
+"739","PTV",NA,NA,1,NA,2010-11-17,NA,"Pactiv"
+"740","SII",NA,NA,1,NA,2010-08-26,NA,"Smith International"
+"741","MIL",NA,NA,1,NA,2010-07-14,NA,"Millipore"
+"742","STR",NA,NA,1,NA,2010-06-30,NA,"Questar"
+"743","XTO",NA,NA,1,NA,2010-06-28,NA,"XTO Energy"
+"744","BJS",NA,NA,1,NA,2010-04-29,NA,"BJ Services"
+"745","RX",NA,NA,1,NA,2010-02-26,NA,"IMS Health"
+"746","CIEN",NA,NA,1,NA,2009-12-18,NA,"Ciena"
+"747","DYN",NA,NA,1,NA,2009-12-18,NA,"Dynegy"
+"748","KBH",NA,NA,1,NA,2009-12-18,NA,"KB Home"
+"749","CVG",NA,NA,1,NA,2009-12-18,NA,"Convergys"
+"750","SGP",NA,NA,1,NA,2009-11-03,NA,"Schering-Plough"
+"751","CBE",NA,NA,1,NA,2009-09-28,NA,"Cooper Industries"
+"752","ACAS",NA,NA,1,NA,2009-03-03,NA,"American Capital"
+"753","JNY",NA,NA,1,NA,2009-03-03,NA,"Jones Apparel Group"
+"754","WB",NA,NA,1,NA,2008-12-31,NA,"Wachovia Bank"
+"755","LEH",NA,NA,1,NA,2008-09-16,NA,"Lehman Brothers"
+"756","FRE",NA,NA,1,NA,2008-09-12,NA,"Freddie Mac"
+"757","FNM",NA,NA,1,NA,2008-09-12,NA,"Fannie Mae"
+"758","ABK",NA,NA,1,2000-12-05,2008-06-10,"Ambac Financial","Ambac Financial"
+"759","TRB",NA,NA,1,NA,2007-12-20,NA,"Tribune Media"
+"760","DJ",NA,NA,1,NA,2007-12-13,NA,"Dow Jones"
+"761","AV",NA,NA,1,NA,2007-10-26,NA,"Avaya"
+"762","SLR",NA,NA,1,NA,2007-10-02,NA,"Solectron"
+"763","NCR",NA,NA,1,NA,2007-10-01,NA,"NCR Corporation"
+"764","MXIM",NA,NA,1,NA,2007-09-27,NA,"Maxim Integrated Products"
+"765","FDC",NA,NA,1,NA,2007-09-26,NA,"First Data"
+"766","KSE",NA,NA,1,NA,2007-08-24,NA,"KeySpan"
+"767","TSG",NA,NA,1,NA,2007-03-30,NA,"Sabre Corporation"
+"768","SBL",NA,NA,1,2000-12-05,2007-01-10,"Symbol Technologies","Symbol Technologies"
+"769","ABS",NA,NA,1,NA,2006-06-02,NA,"Albertsons"
+"770","GLK",NA,NA,1,NA,2005-07-01,NA,"Great Lakes Chemical"
+"771","QTRN",NA,NA,1,NA,2003-09-25,NA,"Quintiles Transnational"
+"772","BS",NA,NA,1,NA,2000-12-05,NA,"Bethlehem Steel"
+"773","OI",NA,NA,1,NA,2000-12-05,NA,"Owens-Illinois"
+"774","GRA",NA,NA,1,NA,2000-12-05,NA,"WR Grace"
+"775","CCK",NA,NA,1,NA,2000-12-05,NA,"Crown Holdings"
+"776","RAD",NA,NA,1,NA,2000-07-27,NA,"RiteAid"
+"777","LDW",NA,NA,1,NA,1999-12-07,NA,"Laidlaw"
+"778","TYC",NA,NA,1,2010-08-26,2016-09-06,"Tyco International","Tyco International"
+"779","Q",NA,NA,2,2017-08-29,2017-11-14,"QuintilesIMS","QuintilesIMS"
+"780","ARNC",NA,NA,1,2016-11-01,2020-03-26,"Arconic Inc","Arconic Inc"
+"781","KORS",NA,NA,1,2013-11-13,2018-12-21,"Michael Kors","Michael Kors"
+"782","TECH",NA,NA,1,2021-08-30,NA,"Bio-Techne",NA
+"783","BRO",NA,NA,1,2021-09-20,NA,"Brown & Brown",NA
+"784","CDAY",NA,NA,1,2021-09-20,NA,"Ceridian",NA
+"785","MTCH",NA,NA,1,2021-09-20,NA,"Match Group",NA
+"786","EPAM",NA,NA,1,2021-12-14,NA,"EPAM Systems",NA
+"787","FDS",NA,NA,1,2021-12-20,NA,"FactSet",NA
+"788","SEDG",NA,NA,1,2021-12-20,2023-12-18,"SolarEdge","SolarEdge"
+"789","SBNY",NA,NA,1,2021-12-20,2023-03-15,"Signature Bank","Signature Bank"
+"790","CEG",NA,NA,2,2022-02-02,NA,"Constellation Energy",NA
+"791","NDSN",NA,NA,1,2022-02-15,NA,"Nordson Corporation",NA
+"792","MOH",NA,NA,1,2022-03-02,NA,"Molina Healthcare",NA
+"793","CPT",NA,NA,1,2022-04-04,NA,"Camden Property Trust",NA
+"794","WBD",NA,NA,1,2022-04-11,NA,"Warner Bros. Discovery",NA
+"795","VICI",NA,NA,1,2022-06-08,NA,"Vici Properties",NA
+"796","ON",NA,NA,1,2022-06-21,NA,"ON Semiconductor",NA
+"797","KDP",NA,NA,1,2022-06-21,NA,"Keurig Dr Pepper",NA
+"798","INVH",NA,NA,1,2022-09-19,NA,"Invitation Homes",NA
+"799","CSGP",NA,NA,1,2022-09-19,NA,"CoStar Group",NA
+"800","EQT",NA,NA,2,2022-10-03,NA,"EQT Corporation",NA
+"801","PCG",NA,NA,2,2022-10-03,NA,"PG&E",NA
+"802","TRGP",NA,NA,1,2022-10-12,NA,"Targa Resources",NA
+"803","ACGL",NA,NA,1,2022-11-01,NA,"Arch Capital Group",NA
+"804","MBC",NA,NA,1,2022-12-15,2022-12-19,"MasterBrand","MasterBrand"
+"805","FSLR",NA,NA,2,2022-12-19,NA,"First Solar",NA
+"806","STLD",NA,NA,1,2022-12-22,NA,"Steel Dynamics",NA
+"807","GEHC",NA,NA,1,2023-01-04,NA,"GE HealthCare",NA
+"808","PODD",NA,NA,1,2023-03-15,NA,"Insulet",NA
+"809","BG",NA,NA,1,2023-03-15,NA,"Bunge Global",NA
+"810","FICO",NA,NA,1,2023-03-20,NA,"Fair Isaac",NA
+"811","AXON",NA,NA,1,2023-05-04,NA,"Axon Enterprise",NA
+"812","PANW",NA,NA,1,2023-06-20,NA,"Palo Alto Networks",NA
+"813","KVUE",NA,NA,1,2023-08-25,NA,"Kenvue",NA
+"814","ABNB",NA,NA,1,2023-09-18,NA,"Airbnb",NA
+"815","BX",NA,NA,1,2023-09-18,NA,"Blackstone",NA
+"816","VLTO",NA,NA,1,2023-10-02,NA,"Veralto",NA
+"817","LULU",NA,NA,1,2023-10-18,NA,"Lululemon Athletica",NA
+"818","HUBB",NA,NA,1,2023-10-18,NA,"Hubbell",NA
+"819","BLDR",NA,NA,1,2023-12-18,NA,"Builders FirstSource",NA
+"820","JBL",NA,NA,2,2023-12-18,NA,"Jabil",NA
+"821","UBER",NA,NA,1,2023-12-18,NA,"Uber",NA
+"822","DECK",NA,NA,1,2024-03-18,NA,"Deckers Brands",NA
+"823","SMCI",NA,NA,1,2024-03-18,NA,"Supermicro",NA
+"824","SOLV",NA,NA,1,2024-04-01,NA,"Solventum",NA
+"825","GEV",NA,NA,1,2024-04-02,NA,"GE Vernova",NA
+"826","VST",NA,NA,1,2024-05-08,NA,"Vistra",NA
+"827","GDDY",NA,NA,1,2024-06-24,NA,"GoDaddy",NA
+"828","CRWD",NA,NA,1,2024-06-24,NA,"CrowdStrike",NA
+"829","KKR",NA,NA,1,2024-06-24,NA,"KKR",NA
+"830","ERIE",NA,NA,1,2024-09-23,NA,"Erie Indemnity",NA
+"831","DELL",NA,NA,2,2024-09-23,NA,"Dell Technologies",NA
+"832","PLTR",NA,NA,1,2024-09-23,NA,"Palantir Technologies",NA
+"833","AMTM",NA,NA,1,2024-09-30,2024-12-23,"Amentum","Amentum"
+"834","TPL",NA,NA,1,2024-11-26,NA,"Texas Pacific Land Corporation",NA
+"835","LII",NA,NA,1,2024-12-23,NA,"Lennox International",NA
+"836","WDAY",NA,NA,1,2024-12-23,NA,"Workday, Inc.",NA
+"837","APO",NA,NA,1,2024-12-23,NA,"Apollo Global Management",NA
+"838","EXE",NA,NA,1,2025-03-24,NA,"Expand Energy",NA
+"839","WSM",NA,NA,1,2025-03-24,NA,"Williams-Sonoma, Inc.",NA
+"840","TKO",NA,NA,1,2025-03-24,NA,"TKO Group Holdings",NA
+"841","DASH",NA,NA,1,2025-03-24,NA,"DoorDash",NA
+"842","COIN",NA,NA,1,2025-05-19,NA,"Coinbase",NA
+"843","DDOG",NA,NA,1,2025-07-09,NA,"Datadog",NA
+"844","TTD",NA,NA,1,2025-07-18,NA,"Trade Desk (The)",NA
+"845","XYZ",NA,NA,1,2025-07-23,NA,"Block, Inc.",NA
