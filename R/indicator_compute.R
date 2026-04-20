@@ -36,6 +36,15 @@ suppressPackageStartupMessages({
   "capex_depreciation", "inventory_sales_change"
 )
 
+# XBRL tags that should not contribute to a concept when read from cache.
+# InterestIncomeExpenseNet is net of interest income and can be negative
+# for cash-rich firms; it is not a valid proxy for gross interest expense
+# and would flip the sign of interest_coverage. Caches built before this
+# alias was removed still contain these rows; drop them on read.
+.DEPRECATED_CONCEPT_TAGS <- list(
+  interest_expense = c("InterestIncomeExpenseNet")
+)
+
 # Canonical indicator names in output order (57 entries):
 # 36 baseline + 5 tier1 + 10 piotroski (9 components + composite) + 6 tier2
 .INDICATOR_NAMES <- c(
@@ -113,6 +122,77 @@ suppressPackageStartupMessages({
 }
 
 
+# -- De-cumulate YTD quarterly operating_cashflow into standalone-quarter values.
+# Input: q_rows, the wide-format quarterly slice with columns
+#   operating_cashflow, cfo_period_days, fiscal_year, period_type, total_assets.
+# Adds columns cfo_kind and cfo_std. cfo_std is the 3-month-standalone CFO
+# value; NA for rows whose duration does not match the fp label (stubs /
+# dedup mismatches) or whose prior-YTD sibling is missing from the history.
+# See docs/research/07_cfo_cumulation_issue.md for the rationale.
+.decumulate_cfo <- function(q_rows) {
+  if (is.null(q_rows) || nrow(q_rows) == 0) return(q_rows)
+  req <- c("operating_cashflow", "cfo_period_days",
+           "period_type", "fiscal_year")
+  if (!all(req %in% names(q_rows))) return(q_rows)
+
+  dt <- copy(q_rows)
+
+  # Q1-standalone upper bound is 120 (not 110) to accommodate 16-week Q1
+  # used by Kroger/AAP fiscal calendars (Q1=16wk, Q2-Q4=12wk each).
+  dt[, cfo_kind := fifelse(is.na(cfo_period_days), NA_character_,
+          fifelse(cfo_period_days >= 60  & cfo_period_days <= 120, "3mo",
+          fifelse(cfo_period_days >= 160 & cfo_period_days <= 200, "2Q",
+          fifelse(cfo_period_days >= 250 & cfo_period_days <= 290, "3Q",
+          fifelse(cfo_period_days >= 330 & cfo_period_days <= 380, "FY",
+                  NA_character_)))))]
+
+  expected_map <- c(Q1 = "3mo", Q2 = "2Q", Q3 = "3Q", Q4 = "FY")
+  dt[, expected_kind := expected_map[period_type]]
+
+  # Only rows whose duration matches the fp label are usable as YTD anchors
+  dt[, cfo_usable := fifelse(
+    !is.na(cfo_kind) & !is.na(expected_kind) & cfo_kind == expected_kind,
+    operating_cashflow, NA_real_)]
+
+  # Q1 YTD = Q1 standalone. Q2/Q3/Q4 need prior YTD in same fiscal_year.
+  setorder(dt, fiscal_year, period_type)
+  dt[, cfo_std := NA_real_]
+  dt[period_type == "Q1", cfo_std := cfo_usable]
+
+  prior_map <- c(Q2 = "Q1", Q3 = "Q2", Q4 = "Q3")
+  for (pt in names(prior_map)) {
+    prior_pt <- prior_map[[pt]]
+    curr_idx <- which(dt$period_type == pt & !is.na(dt$cfo_usable))
+    for (i in curr_idx) {
+      fy <- dt$fiscal_year[i]
+      prior_i <- which(dt$fiscal_year == fy &
+                       dt$period_type == prior_pt &
+                       !is.na(dt$cfo_usable))
+      if (length(prior_i) == 1L) {
+        dt$cfo_std[i] <- dt$cfo_usable[i] - dt$cfo_usable[prior_i]
+      }
+    }
+  }
+
+  dt
+}
+
+
+# -- Drop rows sourced from deprecated XBRL tags.
+# Applied at compute-time to cached fundamentals that may still contain
+# rows from tags that have been removed from the current alias map.
+.filter_deprecated_tags <- function(fund_dt) {
+  if (is.null(fund_dt) || nrow(fund_dt) == 0) return(fund_dt)
+  if (!all(c("concept", "tag") %in% names(fund_dt))) return(fund_dt)
+  dt <- fund_dt
+  for (cn in names(.DEPRECATED_CONCEPT_TAGS)) {
+    bad_tags <- .DEPRECATED_CONCEPT_TAGS[[cn]]
+    dt <- dt[!(concept == cn & tag %in% bad_tags)]
+  }
+  dt
+}
+
+
 # =============================================================================
 # SECTION 2: DATA PREPARATION -- PIVOT LONG TO WIDE
 # =============================================================================
@@ -145,11 +225,26 @@ pivot_fundamentals <- function(fund_dt) {
                  filed = max(filed, na.rm = TRUE)),
              by = .(fiscal_year, period_type)]
 
+  # Carry period_days of the operating_cashflow row separately. Needed by
+  # .compute_tier2 to distinguish 3mo-standalone from YTD-cumulative rows,
+  # because US 10-Q filings report CFO on a YTD basis (Q2 = 6mo, Q3 = 9mo).
+  # Synthetic/test inputs may lack period_start; emit NA in that case.
+  cfo_src <- dt[concept == "operating_cashflow"]
+  if ("period_start" %in% names(cfo_src)) {
+    cfo_meta <- cfo_src[, .(cfo_period_days =
+                             as.integer(period_end[1] - period_start[1])),
+                        by = .(fiscal_year, period_type)]
+  } else {
+    cfo_meta <- unique(cfo_src[, .(fiscal_year, period_type)])
+    cfo_meta[, cfo_period_days := NA_integer_]
+  }
+
   wide <- dcast(dt, fiscal_year + period_type ~ concept,
                 value.var = "value", fun.aggregate = function(x) x[1])
 
   # Merge metadata back
   wide <- merge(wide, meta, by = c("fiscal_year", "period_type"), all.x = TRUE)
+  wide <- merge(wide, cfo_meta, by = c("fiscal_year", "period_type"), all.x = TRUE)
 
   setorder(wide, fiscal_year, period_type)
   wide
@@ -438,40 +533,49 @@ pivot_fundamentals <- function(fund_dt) {
   p_gp     <- .col(prior, "gross_profit")
   p_rev    <- .col(prior, "revenue")
 
+  # Each component returns NA_integer_ when required inputs are missing,
+  # 0L/1L otherwise. Treating missing inputs as 0 would silently bias
+  # f_score downward for firms with limited prior-year data.
+  .bin <- function(cond) {
+    if (is.na(cond)) NA_integer_ else if (cond) 1L else 0L
+  }
+
   # ROA = NI / Assets
   roa   <- .safe_divide(ni, assets)
   p_roa <- .safe_divide(p_ni, p_assets)
 
   # Profitability signals
-  f_roa     <- if (!is.na(roa) && roa > 0) 1L else 0L
-  f_droa    <- if (!is.na(roa) && !is.na(p_roa) && roa > p_roa) 1L else 0L
-  f_cfo     <- if (!is.na(cfo) && !is.na(assets) && assets > 0 && cfo / assets > 0) 1L else 0L
-  f_accrual <- if (!is.na(cfo) && !is.na(ni) && cfo > ni) 1L else 0L
+  f_roa     <- .bin(roa > 0)
+  f_droa    <- .bin(roa > p_roa)
+  f_cfo     <- .bin(.safe_divide(cfo, assets) > 0)
+  f_accrual <- .bin(cfo > ni)
 
   # Leverage / Liquidity signals
   lt_ratio   <- .safe_divide(ltd, assets)
   p_lt_ratio <- .safe_divide(p_ltd, p_assets)
-  f_dlever   <- if (!is.na(lt_ratio) && !is.na(p_lt_ratio) && lt_ratio < p_lt_ratio) 1L else 0L
+  f_dlever   <- .bin(lt_ratio < p_lt_ratio)
 
   cr   <- .safe_divide(ca, cl)
   p_cr <- .safe_divide(p_ca, p_cl)
-  f_dliquid <- if (!is.na(cr) && !is.na(p_cr) && cr > p_cr) 1L else 0L
+  f_dliquid <- .bin(cr > p_cr)
 
-  f_eq_off <- if (!is.na(shares) && !is.na(p_shares) && shares <= p_shares) 1L else 0L
+  f_eq_off <- .bin(shares <= p_shares)
 
   # Operating efficiency signals
   gm   <- .safe_divide(gp, rev)
   p_gm <- .safe_divide(p_gp, p_rev)
-  f_dmargin <- if (!is.na(gm) && !is.na(p_gm) && gm > p_gm) 1L else 0L
+  f_dmargin <- .bin(gm > p_gm)
 
   at   <- .safe_divide(rev, assets)
   p_at <- .safe_divide(p_rev, p_assets)
-  f_dturn <- if (!is.na(at) && !is.na(p_at) && at > p_at) 1L else 0L
+  f_dturn <- .bin(at > p_at)
 
-  # Composite
+  # Composite: NA if any component is NA. Academic formulation requires
+  # all nine signals to be defined; downstream consumers can impute or
+  # filter as needed.
   components <- c(f_roa, f_droa, f_cfo, f_accrual, f_dlever,
                   f_dliquid, f_eq_off, f_dmargin, f_dturn)
-  f_score <- sum(components)
+  f_score <- if (anyNA(components)) NA_integer_ else sum(components)
 
   list(
     f_roa = f_roa, f_droa = f_droa, f_cfo = f_cfo, f_accrual = f_accrual,
@@ -521,17 +625,23 @@ pivot_fundamentals <- function(fund_dt) {
   }
   cash_based_op <- .safe_divide(cbop_base, assets)
 
-  # -- FCF Stability: SD(CFO/Assets) over trailing quarters --
+  # -- FCF Stability: SD(standalone-quarter CFO / Assets) over up to 16 quarters --
+  # US 10-Q filings report operating_cashflow on a YTD cumulative basis:
+  # Q1 ~= 3 months, Q2 ~= 6 months, Q3 ~= 9 months. We must de-cumulate
+  # before computing volatility, else the series is dominated by the
+  # intra-year build-up staircase (see docs/research/07_cfo_cumulation_issue.md).
   fcf_stability <- NA_real_
-  if (!is.null(quarterly_hist) && nrow(quarterly_hist) >= 8) {
-    cfo_vals <- quarterly_hist[["operating_cashflow"]]
-    asset_vals <- quarterly_hist[["total_assets"]]
-    if (!is.null(cfo_vals) && !is.null(asset_vals)) {
-      ratio <- cfo_vals / asset_vals
-      valid <- !is.na(ratio)
-      if (sum(valid) >= 8) {
-        fcf_stability <- sd(ratio[valid])
-      }
+  required_q_cols <- c("operating_cashflow", "total_assets",
+                       "cfo_period_days", "fiscal_year", "period_type")
+  if (!is.null(quarterly_hist) && nrow(quarterly_hist) > 0 &&
+      all(required_q_cols %in% names(quarterly_hist))) {
+    q_std <- .decumulate_cfo(quarterly_hist)
+    setorder(q_std, fiscal_year, period_type)
+    valid <- !is.na(q_std$cfo_std) &
+             !is.na(q_std$total_assets) & q_std$total_assets > 0
+    q_tail <- tail(q_std[valid], 16)
+    if (nrow(q_tail) >= 8) {
+      fcf_stability <- sd(q_tail$cfo_std / q_tail$total_assets)
     }
   }
 
@@ -674,6 +784,9 @@ compute_ticker_indicators <- function(fund_dt, price_on_filed, sector,
 
   result <- tryCatch({
 
+    # Drop rows sourced from deprecated XBRL tags (handles pre-existing caches)
+    fund_dt <- .filter_deprecated_tags(fund_dt)
+
     # Pivot to wide format
     wide <- pivot_fundamentals(fund_dt)
     if (is.null(wide)) return(all_na)
@@ -720,11 +833,10 @@ compute_ticker_indicators <- function(fund_dt, price_on_filed, sector,
       }
     }
 
-    # Quarterly history for FCF Stability (up to 16 quarters)
-    quarterly_hist <- NULL
-    if (nrow(q_rows) >= 8) {
-      quarterly_hist <- tail(q_rows, 16)
-    }
+    # Quarterly history for FCF Stability. Pass the full quarterly series
+    # so .decumulate_cfo can find each row's YTD sibling within the same
+    # fiscal year. Tail-to-16 happens after de-cumulation.
+    quarterly_hist <- if (nrow(q_rows) >= 8) q_rows else NULL
 
     # Extract key values
     shares <- .col(curr, "shares_outstanding")

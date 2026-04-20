@@ -401,6 +401,98 @@ test("piotroski: all components are 0 or 1", {
 })
 
 
+# ---- Piotroski NA propagation (Fix #2) ----
+
+test("piotroski NA: no prior -> all prior-dependent components NA", {
+  t_no_prior <- .compute_tier1(curr_row, NULL)
+  # Only current-only components (f_roa, f_cfo, f_accrual) are non-NA.
+  # f_eq_off needs p_shares (prior), so it is NA without prior.
+  is.na(t_no_prior$f_droa) && is.na(t_no_prior$f_dlever) &&
+    is.na(t_no_prior$f_dliquid) && is.na(t_no_prior$f_dmargin) &&
+    is.na(t_no_prior$f_dturn) && is.na(t_no_prior$f_eq_off)
+})
+
+test("piotroski NA: no prior -> f_score is NA", {
+  t_no_prior <- .compute_tier1(curr_row, NULL)
+  is.na(t_no_prior$f_score)
+})
+
+test("piotroski NA: current-only components still computed without prior", {
+  t_no_prior <- .compute_tier1(curr_row, NULL)
+  t_no_prior$f_roa == 1L && t_no_prior$f_cfo == 1L && t_no_prior$f_accrual == 1L
+})
+
+test("piotroski NA: missing net_income yields f_roa/f_droa/f_accrual NA", {
+  no_ni <- copy(curr_row)
+  no_ni[, net_income := NA_real_]
+  t <- .compute_tier1(no_ni, prior_row)
+  is.na(t$f_roa) && is.na(t$f_droa) && is.na(t$f_accrual) && is.na(t$f_score)
+})
+
+test("piotroski NA: missing prior shares only -> only f_eq_off NA", {
+  p_no_shares <- copy(prior_row)
+  p_no_shares[, shares_outstanding := NA_real_]
+  t <- .compute_tier1(curr_row, p_no_shares)
+  is.na(t$f_eq_off) && !is.na(t$f_roa) && !is.na(t$f_droa) &&
+    is.na(t$f_score)  # any NA component -> composite NA
+})
+
+test("piotroski NA: all inputs present -> components all 0 or 1, f_score integer", {
+  t <- .compute_tier1(curr_row, prior_row)
+  comps <- c(t$f_roa, t$f_droa, t$f_cfo, t$f_accrual,
+             t$f_dlever, t$f_dliquid, t$f_eq_off,
+             t$f_dmargin, t$f_dturn)
+  all(comps %in% c(0L, 1L)) && !is.na(t$f_score) &&
+    t$f_score == sum(comps)
+})
+
+
+# ---- Deprecated-tag filter (Fix #3) ----
+
+test("filter_deprecated_tags: drops InterestIncomeExpenseNet rows", {
+  dt <- data.table(
+    concept = c("interest_expense", "interest_expense", "revenue"),
+    tag     = c("InterestExpense", "InterestIncomeExpenseNet", "Revenues"),
+    value   = c(100, -50, 10000)
+  )
+  out <- .filter_deprecated_tags(dt)
+  nrow(out) == 2 &&
+    !("InterestIncomeExpenseNet" %in% out$tag)
+})
+
+test("filter_deprecated_tags: keeps same tag under a different concept", {
+  dt <- data.table(
+    concept = c("interest_expense", "other_concept"),
+    tag     = c("InterestIncomeExpenseNet", "InterestIncomeExpenseNet"),
+    value   = c(-50, 200)
+  )
+  out <- .filter_deprecated_tags(dt)
+  nrow(out) == 1 && out$concept == "other_concept"
+})
+
+test("filter_deprecated_tags: NULL and empty input are safe", {
+  is.null(.filter_deprecated_tags(NULL)) &&
+    nrow(.filter_deprecated_tags(data.table())) == 0
+})
+
+test("filter_deprecated_tags: no tag column -> pass-through", {
+  dt <- data.table(concept = "revenue", value = 1000)
+  out <- .filter_deprecated_tags(dt)
+  nrow(out) == 1 && identical(out, dt)
+})
+
+test("filter_deprecated_tags: does not mutate input", {
+  dt <- data.table(
+    concept = c("interest_expense", "interest_expense"),
+    tag     = c("InterestExpense", "InterestIncomeExpenseNet"),
+    value   = c(100, -50)
+  )
+  nrows_before <- nrow(dt)
+  .filter_deprecated_tags(dt)
+  nrow(dt) == nrows_before
+})
+
+
 # ============================================================================
 # UNIT TESTS: Tier 2 Research Indicators
 # ============================================================================
@@ -447,14 +539,236 @@ test("tier2: dso_change computed", {
 test("tier2: fcf_stability is NA without quarterly data",
      is.na(t2$fcf_stability))
 
-# Test FCF Stability with quarterly data
+# Test FCF Stability with quarterly data.
+# qhist must carry fiscal_year / period_type / cfo_period_days so the
+# de-cumulator can convert YTD-cumulative CFO into standalone-quarter values.
+# Build 12 quarters (4 fiscal years x Q1/Q2/Q3) of YTD-cumulative CFO.
+set.seed(123)
+q_fy   <- rep(2022:2025, each = 3)
+q_pt   <- rep(c("Q1", "Q2", "Q3"), 4)
+q_days <- rep(c(90L, 181L, 272L), 4)
+# Standalone-quarter CFO values (what the series "really" is)
+q_std_true <- rnorm(12, mean = 1000, sd = 100)
+# Convert to YTD-cumulative within each fiscal_year
+q_ytd <- ave(q_std_true, q_fy, FUN = cumsum)
+
 qhist <- data.table(
-  operating_cashflow = rnorm(12, mean = 1000, sd = 100),
-  total_assets = rep(50000, 12)
+  fiscal_year        = q_fy,
+  period_type        = q_pt,
+  cfo_period_days    = q_days,
+  operating_cashflow = q_ytd,
+  total_assets       = rep(50000, 12)
 )
 t2_q <- .compute_tier2(curr_row, prior_row, quarterly_hist = qhist)
 test("tier2: fcf_stability computed with 12 quarters",
      !is.na(t2_q$fcf_stability) && t2_q$fcf_stability > 0)
+
+# Minimal legacy qhist (no metadata): de-cumulator refuses, fcf_stability NA
+qhist_legacy <- data.table(
+  operating_cashflow = rnorm(12, mean = 1000, sd = 100),
+  total_assets = rep(50000, 12)
+)
+t2_legacy <- .compute_tier2(curr_row, prior_row, quarterly_hist = qhist_legacy)
+test("tier2: fcf_stability NA when quarterly metadata missing",
+     is.na(t2_legacy$fcf_stability))
+
+
+# ---- .decumulate_cfo unit tests ----
+
+test("decumulate: Q1 passes through unchanged (already 3mo)", {
+  q <- data.table(fiscal_year = 2024L, period_type = "Q1",
+                  cfo_period_days = 90L,
+                  operating_cashflow = 100, total_assets = 1000)
+  d <- .decumulate_cfo(q)
+  d$cfo_std == 100 && d$cfo_kind == "3mo"
+})
+
+test("decumulate: Q2_std = Q2_YTD - Q1_YTD", {
+  q <- data.table(
+    fiscal_year = c(2024L, 2024L),
+    period_type = c("Q1", "Q2"),
+    cfo_period_days = c(90L, 181L),
+    operating_cashflow = c(100, 250),
+    total_assets = c(1000, 1000)
+  )
+  d <- .decumulate_cfo(q)
+  d[period_type == "Q2", cfo_std] == 150
+})
+
+test("decumulate: Q3_std = Q3_YTD - Q2_YTD", {
+  q <- data.table(
+    fiscal_year = rep(2024L, 3),
+    period_type = c("Q1", "Q2", "Q3"),
+    cfo_period_days = c(90L, 181L, 272L),
+    operating_cashflow = c(100, 250, 450),
+    total_assets = rep(1000, 3)
+  )
+  d <- .decumulate_cfo(q)
+  d[period_type == "Q3", cfo_std] == 200
+})
+
+test("decumulate: Q2 with missing Q1 sibling -> NA", {
+  q <- data.table(
+    fiscal_year = 2024L, period_type = "Q2",
+    cfo_period_days = 181L, operating_cashflow = 250,
+    total_assets = 1000
+  )
+  d <- .decumulate_cfo(q)
+  is.na(d$cfo_std)
+})
+
+test("decumulate: mismatched duration (TTM under fp=Q2) dropped", {
+  q <- data.table(
+    fiscal_year = c(2024L, 2024L),
+    period_type = c("Q1", "Q2"),
+    cfo_period_days = c(90L, 365L),   # Q2 is wrong duration
+    operating_cashflow = c(100, 500),
+    total_assets = c(1000, 1000)
+  )
+  d <- .decumulate_cfo(q)
+  d[period_type == "Q1", cfo_std] == 100 &&
+    is.na(d[period_type == "Q2", cfo_std])
+})
+
+test("decumulate: Q4_std = Q4_YTD - Q3_YTD (non-calendar fiscal filer)", {
+  # Tickers like WMT/HD file fp=Q4 with a ~360-day period -- i.e. the annual
+  # value labelled as Q4. The de-cumulator should derive Q4 standalone as
+  # Q4_YTD - Q3_YTD, matching the last 3 months of the fiscal year.
+  q <- data.table(
+    fiscal_year = rep(2024L, 4),
+    period_type = c("Q1", "Q2", "Q3", "Q4"),
+    cfo_period_days = c(90L, 181L, 272L, 363L),
+    operating_cashflow = c(100, 250, 450, 700),   # YTD cumulative
+    total_assets = rep(1000, 4)
+  )
+  d <- .decumulate_cfo(q)
+  d[period_type == "Q4", cfo_std] == 250  # 700 - 450
+})
+
+test("decumulate: stubs across fiscal_year boundary don't contaminate", {
+  # Fiscal year 2024 has Q1/Q2; fiscal year 2025 has Q2 only -> 2025-Q2 is NA
+  q <- data.table(
+    fiscal_year = c(2024L, 2024L, 2025L),
+    period_type = c("Q1", "Q2", "Q2"),
+    cfo_period_days = c(90L, 181L, 181L),
+    operating_cashflow = c(100, 250, 300),
+    total_assets = rep(1000, 3)
+  )
+  d <- .decumulate_cfo(q)
+  d[fiscal_year == 2024 & period_type == "Q2", cfo_std] == 150 &&
+    is.na(d[fiscal_year == 2025 & period_type == "Q2", cfo_std])
+})
+
+test("decumulate: NULL / empty input returns input", {
+  is.null(.decumulate_cfo(NULL)) &&
+    nrow(.decumulate_cfo(data.table())) == 0
+})
+
+test("decumulate: missing required columns returns input unchanged", {
+  q <- data.table(fiscal_year = 1L, period_type = "Q1",
+                  operating_cashflow = 100)  # missing cfo_period_days
+  d <- .decumulate_cfo(q)
+  !("cfo_std" %in% names(d))
+})
+
+test("decumulate: 16-week Q1 (KR/AAP retail calendar) classified as 3mo", {
+  # Kroger and Advance Auto Parts use a 16/12/12/12 fiscal calendar where
+  # Q1 runs ~111 days. The 3mo band must include 111-120 to classify these
+  # rows as valid standalone quarters.
+  q <- data.table(fiscal_year = 2024L, period_type = "Q1",
+                  cfo_period_days = 111L,
+                  operating_cashflow = 100, total_assets = 1000)
+  d <- .decumulate_cfo(q)
+  d$cfo_std == 100 && d$cfo_kind == "3mo"
+})
+
+
+# ---- FCF Stability end-to-end correctness ----
+
+test("fcf_stability: value equals sd of true standalone series", {
+  # Build a deterministic standalone series, cumulate to YTD, feed in.
+  set.seed(777)
+  fy <- rep(2020:2025, each = 3)
+  pt <- rep(c("Q1", "Q2", "Q3"), 6)
+  dy <- rep(c(90L, 181L, 272L), 6)
+  std_true <- rnorm(18, 1000, 100)
+  ytd <- ave(std_true, fy, FUN = cumsum)
+  q <- data.table(fiscal_year = fy, period_type = pt, cfo_period_days = dy,
+                  operating_cashflow = ytd, total_assets = rep(50000, 18))
+  t <- .compute_tier2(curr_row, prior_row, quarterly_hist = q)
+  expected <- sd(std_true[(length(std_true)-15):length(std_true)] / 50000)
+  abs(t$fcf_stability - expected) < 1e-10
+})
+
+
+# ---- Dedup duration-match tie-break (fetcher) ----
+# Loaded here because the helper lives in R/fundamental_fetcher.R
+source("R/fundamental_fetcher.R")
+
+test("dedup: prefers YTD row over 12-month TTM at same period_end/fp", {
+  dt <- data.table(
+    ticker = "T", cik = "0", concept = "operating_cashflow",
+    tag = "NetCashProvidedByUsedInOperatingActivities",
+    value = c(60, 120),                                   # YTD, TTM
+    period_end  = as.Date(c("2024-06-30", "2024-06-30")),
+    period_start = as.Date(c("2024-01-01", "2023-07-01")), # 181d, 365d
+    filed = as.Date(c("2024-08-01", "2024-08-01")),
+    form = c("10-Q", "10-Q"), accession = c("A1", "A1"),
+    fiscal_year = c(2024L, 2024L), fiscal_qtr = c("Q2", "Q2"), unit = "USD"
+  )
+  out <- dedup_fundamentals(dt)
+  nrow(out) == 1 && out$value == 60
+})
+
+test("dedup: single row with mismatched duration still retained", {
+  # If only the TTM row exists, dedup must keep it (no alternative).
+  dt <- data.table(
+    ticker = "T", cik = "0", concept = "operating_cashflow",
+    tag = "NetCashProvidedByUsedInOperatingActivities",
+    value = 120,
+    period_end  = as.Date("2024-06-30"),
+    period_start = as.Date("2023-07-01"),
+    filed = as.Date("2024-08-01"),
+    form = "10-Q", accession = "A1",
+    fiscal_year = 2024L, fiscal_qtr = "Q2", unit = "USD"
+  )
+  out <- dedup_fundamentals(dt)
+  nrow(out) == 1 && out$value == 120
+})
+
+test("dedup: instant tag (NA period_start) unaffected by tie-break", {
+  # Balance-sheet tags have NA period_start. Ordering falls through to
+  # the existing accession chain; later accession (amendment) wins.
+  dt <- data.table(
+    ticker = "T", cik = "0", concept = "total_assets", tag = "Assets",
+    value = c(100, 101),
+    period_end  = as.Date(c("2024-06-30", "2024-06-30")),
+    period_start = as.Date(c(NA, NA)),
+    filed = as.Date(c("2024-08-01", "2024-08-01")),
+    form = c("10-Q", "10-Q"), accession = c("A1", "A2"),
+    fiscal_year = c(2024L, 2024L), fiscal_qtr = c("Q2", "Q2"), unit = "USD"
+  )
+  out <- dedup_fundamentals(dt)
+  nrow(out) == 1 && out$value == 101
+})
+
+test("dedup: .duration_match_rank returns 0 for NA inputs", {
+  identical(.duration_match_rank(c(NA_integer_, 181L), c("Q2", NA)),
+            c(0L, 0L))
+})
+
+test("dedup: .duration_match_rank flags out-of-band duration", {
+  # Q2 band is [160, 200]. 365 is out, 181 is in.
+  identical(.duration_match_rank(c(365L, 181L), c("Q2", "Q2")),
+            c(1L, 0L))
+})
+
+test("dedup: .duration_match_rank accepts 16-week Q1 (111-120 days)", {
+  # KR/AAP retail calendar: Q1 runs ~111 days. Q1 band must accept these.
+  identical(.duration_match_rank(c(90L, 111L, 119L, 125L),
+                                  rep("Q1", 4)),
+            c(0L, 0L, 0L, 1L))
+})
 
 
 # ============================================================================
@@ -732,8 +1046,10 @@ if (length(jpm_files) > 0) {
   test("JPM: pe_trailing computed",
        !is.na(jpm_result[["pe_trailing"]]))
 
-  test("JPM: f_score in [0, 9]",
-       jpm_result[["f_score"]] >= 0 && jpm_result[["f_score"]] <= 9)
+  test("JPM: f_score is NA or in [0, 9]", {
+    v <- jpm_result[["f_score"]]
+    is.na(v) || (v >= 0 && v <= 9)
+  })
 
   n_computed <- sum(!is.na(jpm_result))
   message(sprintf("  JPM: %d/%d indicators computed (%.0f%%)",

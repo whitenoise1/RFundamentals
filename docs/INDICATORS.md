@@ -476,6 +476,7 @@ Each component is binary (0 or 1). The composite `f_score` is the sum (0-9).
 |---|---|
 | **Formula** | Sum of 9 binary components above |
 | **Range** | 0 (all fail) to 9 (all pass) |
+| **NA policy** | Each component is NA when its required inputs are missing; `f_score` is NA if any component is NA. This avoids the downward bias that would arise if missing inputs were scored as failures (e.g., firms with no prior-year data). |
 | **Interpretation** | Comprehensive fundamental quality signal. Score >= 8 indicates strong, improving fundamentals. Interacts powerfully with valuation: long cheap + high F-Score, short expensive + low F-Score earned ~285% incremental return over 12 years (Piotroski and So, 2012). |
 
 ---
@@ -497,11 +498,13 @@ Practitioner signals requiring additional XBRL tags or multi-period computation.
 
 | | |
 |---|---|
-| **Formula** | SD(Operating Cash Flow / Total Assets) over trailing 8+ quarters |
-| **Guard** | Requires >= 8 quarters of data; otherwise NA |
+| **Formula** | SD(Standalone-quarter Operating Cash Flow / Total Assets) over trailing 8+ quarters |
+| **Guard** | Requires >= 8 quarters of standalone-quarter data; otherwise NA. Rows whose `period_days` do not match their `fp` label are defensively dropped (see Note). |
 | **Reference** | Huang (2009), *Journal of Empirical Finance* |
 | **XBRL** | NetCashProvidedByUsedInOperatingActivities, Assets (quarterly 10-Q filings) |
 | **Interpretation** | Lower volatility = more stable cash generation = higher quality. Market underprices cash flow stability relative to earnings stability. Sort ascending (lower SD = better). Uses quarterly data, not annualized. |
+
+**Note on YTD de-cumulation.** US 10-Q filings report CFO cumulatively within the fiscal year (Q1 = 3-month, Q2 = 6-month YTD, Q3 = 9-month YTD). `.decumulate_cfo` in `R/indicator_compute.R` converts to standalone-quarter values: Q1_std = Q1_YTD, Q2_std = Q2_YTD - Q1_YTD, Q3_std = Q3_YTD - Q2_YTD, Q4_std = FY - Q3_YTD. Rows whose `period_days` do not fall in the expected band for their `fp` label (Q1: 60-120, Q2: 160-200, Q3: 250-290, FY: 330-380) are dropped. The Q1 band upper of 120 accommodates the Kroger/AAP 16/12/12/12 fiscal calendar; all other 628 S&P 500 filers use 13-week standalone quarters. Full diagnostic: `docs/research/07_cfo_cumulation_issue.md`.
 
 ### 10.3 `sga_efficiency` -- SGA Efficiency Signal
 
@@ -555,7 +558,7 @@ resolution. This handles variation in how companies report the same item.
 | net_income | NetIncomeLoss |
 | eps_basic | EarningsPerShareBasic |
 | eps_diluted | EarningsPerShareDiluted |
-| interest_expense | InterestExpense, InterestExpenseDebt, InterestIncomeExpenseNet |
+| interest_expense | InterestExpense, InterestExpenseDebt |
 | sga | SellingGeneralAndAdministrativeExpense |
 | rnd | ResearchAndDevelopmentExpense, ResearchAndDevelopmentExpenseExcludingAcquiredInProcessCost |
 | depreciation | DepreciationDepletionAndAmortization, DepreciationAndAmortization, Depreciation |
@@ -574,7 +577,7 @@ resolution. This handles variation in how companies report the same item.
 | accrued_liabilities | AccruedLiabilitiesCurrent |
 | deferred_revenue | DeferredRevenueCurrent, ContractWithCustomerLiabilityCurrent, DeferredRevenueCurrentAndNoncurrent |
 | prepaid_expenses | PrepaidExpenseAndOtherAssetsCurrent, PrepaidExpenseAndOtherAssets, PrepaidExpenseCurrent |
-| operating_cashflow | NetCashProvidedByUsedInOperatingActivities, NetCashProvidedByOperatingActivities |
+| operating_cashflow | NetCashProvidedByUsedInOperatingActivities, NetCashProvidedByOperatingActivities, NetCashProvidedByUsedInOperatingActivitiesContinuingOperations |
 | capex | PaymentsToAcquirePropertyPlantAndEquipment, PaymentsToAcquireProductiveAssets |
 | buybacks | PaymentsForRepurchaseOfCommonStock, PaymentsForRepurchaseOfEquity |
 | dividends_paid | PaymentsOfDividendsCommonStock, PaymentsOfDividends, Dividends |

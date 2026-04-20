@@ -54,6 +54,36 @@ suppressPackageStartupMessages({
   "10-Q/A" = 2L
 )
 
+# Expected period_days bands per fp label. Used by dedup_fundamentals to
+# tie-break on duration match when multiple rows share (concept, period_end,
+# fp). Balance-sheet (instant) concepts have NA period_start -> NA period_days
+# and are handled by treating NA as a neutral match (rank 0).
+.FP_EXPECTED_DAYS <- list(
+  Q1 = c(60L, 120L),   # 3-month standalone; upper 120 accommodates 16-week
+                       # Q1 used by Kroger/AAP fiscal calendars (12-12-12-16)
+  Q2 = c(160L, 200L),  # 6-month YTD
+  Q3 = c(250L, 290L),  # 9-month YTD
+  Q4 = c(330L, 380L),  # 12-month (when filers tag annual as Q4)
+  FY = c(330L, 380L)
+)
+
+# Return 0L if period_days falls in the expected band for fp (preferred),
+# 1L otherwise. NA period_days -> 0L (balance-sheet instants). NA / unknown
+# fp -> 0L (no basis to discriminate).
+.duration_match_rank <- function(period_days, fp) {
+  out <- integer(length(period_days))
+  for (i in seq_along(period_days)) {
+    d <- period_days[i]; f <- fp[i]
+    if (is.na(d) || is.na(f) || is.null(.FP_EXPECTED_DAYS[[f]])) {
+      out[i] <- 0L
+    } else {
+      band <- .FP_EXPECTED_DAYS[[f]]
+      out[i] <- if (d >= band[1] && d <= band[2]) 0L else 1L
+    }
+  }
+  out
+}
+
 
 # =============================================================================
 # XBRL TAG ALIAS MAP
@@ -98,8 +128,7 @@ suppressPackageStartupMessages({
 
   interest_expense = c(
     "InterestExpense",
-    "InterestExpenseDebt",
-    "InterestIncomeExpenseNet"
+    "InterestExpenseDebt"
   ),
 
   sga = c(
@@ -199,7 +228,12 @@ suppressPackageStartupMessages({
   # --- Cash Flow Statement ---
   operating_cashflow = c(
     "NetCashProvidedByUsedInOperatingActivities",
-    "NetCashProvidedByOperatingActivities"
+    "NetCashProvidedByOperatingActivities",
+    # Filers with (current or historical) discontinued operations tag the
+    # continuing-operations line separately. Used by FMC, TFX, ITT, DRI and
+    # similar. Listed last so firms that report both the total and the
+    # continuing-ops line still resolve to the total.
+    "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations"
   ),
 
   capex = c(
@@ -394,6 +428,12 @@ parse_companyfacts <- function(facts, ticker, cik) {
 #'    sort picks the amendment (later accession number) over the original.
 #' 2. Within same form priority, keep most recent accession number (latest amendment).
 #' 3. Within same form and accession, prefer tag with lower alias rank.
+#' 4. When multiple rows still share the dedup key, prefer the row whose
+#'    period length matches the expected duration for its `fp` label
+#'    (Q1 ~ 3mo, Q2 ~ 6mo YTD, Q3 ~ 9mo YTD, FY/Q4 ~ 12mo). Companyfacts
+#'    JSON often includes prior-period or TTM comparatives under the same
+#'    (concept, period_end, fp) key; the duration-match tie-break keeps
+#'    the current-period value and discards the comparative.
 #'
 #' @param dt data.table from parse_companyfacts().
 #' @return Deduplicated data.table (one row per concept x period).
@@ -415,17 +455,24 @@ dedup_fundamentals <- function(dt) {
     if (is.na(idx)) 99L else idx
   }, concept, tag)]
 
-  # Sort: concept + period + fiscal_qtr, then form priority, then
-  # accession (desc so amendments beat originals), then tag rank
+  # Duration-match rank: 0 if period length matches fp-expected band, else 1.
+  # Instant tags (balance sheet) have NA period_start and are unaffected.
+  dt[, period_days := as.integer(period_end - period_start)]
+  dt[, duration_match := .duration_match_rank(period_days, fiscal_qtr)]
+
+  # Sort: concept + period + fiscal_qtr, duration-match first (so good rows
+  # win against TTM/prior-period comparatives), then form priority, accession
+  # (desc so amendments beat originals), then tag rank.
   setorder(dt, concept, period_end, fiscal_qtr,
-           form_priority, -accession, tag_rank)
+           duration_match, form_priority, -accession, tag_rank)
 
   # Keep first row per (concept, period_end, fiscal_qtr).
   # fiscal_qtr distinguishes FY from Q4 when period_end is the same.
   dt <- dt[!duplicated(dt[, .(concept, period_end, fiscal_qtr)])]
 
   # Clean up helper columns
-  dt[, c("form_priority", "tag_rank") := NULL]
+  dt[, c("form_priority", "tag_rank",
+         "period_days", "duration_match") := NULL]
 
   dt
 }
