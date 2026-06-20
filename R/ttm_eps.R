@@ -31,15 +31,38 @@ suppressPackageStartupMessages({
   library(arrow)
 })
 
+# Cumulative split-adjustment factor that maps an as-filed per-share value onto
+# the CURRENT split basis. GAAP restates EPS for splits across every period a
+# filing presents, so an as-filed value's split basis is the split state at its
+# FILING date. Multiply by the product of the ratios of all splits with
+# ex_date > filed (getSplits convention: an n:1 split is 1/n, e.g. 50:1 -> 0.02)
+# to express it on today's share count -- matching the split-adjusted price.
+# `splits`: data.frame/data.table with columns ex_date (Date), ratio (numeric).
+# NULL/empty splits, or NA filed, -> factor 1 (no adjustment).
+.split_factor <- function(filed, splits = NULL) {
+  if (is.null(splits) || !NROW(splits)) return(rep(1, length(filed)))
+  ex <- as.Date(splits$ex_date); rt <- as.numeric(splits$ratio)
+  vapply(filed, function(f) {
+    if (is.na(f)) return(1)
+    sel <- ex > f & !is.na(rt) & rt > 0
+    if (!any(sel)) 1 else prod(rt[sel])
+  }, numeric(1))
+}
+
 # --- quarterly TTM diluted-EPS series for one ticker -------------------------
 # fund_dt: raw long-format XBRL (cache/fundamentals/{cik}_{ticker}.parquet).
-# Returns data.table(qend, filed, eps_ttm) ordered by qend, or NULL.
-build_ttm_eps_series <- function(fund_dt) {
+# splits : per-ticker split events (ex_date, ratio); NULL = no split adjustment.
+# Returns data.table(qend, filed, eps_ttm) ordered by qend, or NULL. eps_ttm is
+# expressed on the CURRENT split basis so price/eps_ttm is consistent at every date.
+build_ttm_eps_series <- function(fund_dt, splits = NULL) {
   e <- fund_dt[concept == "eps_diluted" &
                  !is.na(period_start) & !is.na(period_end) & !is.na(value)]
   if (!nrow(e)) return(NULL)
   e[, `:=`(ps = as.Date(period_start), pe = as.Date(period_end),
            fd = as.Date(filed))]
+  # Normalize every as-filed EPS to the current split basis BEFORE de-cumulation,
+  # so a TTM window spanning a split never blends pre- and post-split quarters.
+  e[, value := value * .split_factor(fd, splits)]
   e[, dur := as.integer(pe - ps)]
   # classify cumulative period by duration
   e[, pt := fifelse(dur <= 135, "Q1",
@@ -109,13 +132,38 @@ build_ttm_eps_series <- function(fund_dt) {
   out
 }
 
+# --- per-ticker split events (cached) ----------------------------------------
+# cache/splits/{tk}.parquet (ex_date, ratio). If absent and fetch=TRUE, pull once
+# via quantmod::getSplits and cache -- including an EMPTY table for no-split
+# tickers, so we never refetch them. Returns data.table(ex_date, ratio); 0 rows
+# = no splits. Same Yahoo provider that split-adjusted the price, so the EPS and
+# price split bases stay consistent.
+load_ticker_splits <- function(tk, split_dir = "cache/splits", fetch = TRUE) {
+  cf <- file.path(split_dir, paste0(tk, ".parquet"))
+  if (file.exists(cf)) {
+    s <- tryCatch(as.data.table(arrow::read_parquet(cf)), error = function(e) NULL)
+    if (!is.null(s)) return(s)
+  }
+  empty <- data.table(ex_date = as.Date(character()), ratio = numeric())
+  if (!fetch || !requireNamespace("quantmod", quietly = TRUE)) return(empty)
+  sx <- tryCatch(quantmod::getSplits(tk), error = function(e) NULL)
+  s <- if (is.null(sx) || !length(sx)) empty else
+    data.table(ex_date = as.Date(zoo::index(sx)), ratio = as.numeric(sx))
+  s <- s[!is.na(ratio) & ratio > 0]
+  if (!dir.exists(split_dir)) dir.create(split_dir, recursive = TRUE)
+  tryCatch(arrow::write_parquet(s, cf), error = function(e) NULL)
+  s
+}
+
 # --- augment all _daily parquets in place with eps_ttm + pe_ttm --------------
 # fund_dir : raw XBRL cache (cik_ticker.parquet); ts_dir : timeseries cache.
 # Every _daily parquet gets both columns (NA where no positive-EPS TTM exists),
 # so the ingest's canonical column set always includes them.
-augment_daily_ttm <- function(fund_dir = "cache/fundamentals",
-                              ts_dir   = if (exists(".TS_DIR")) .TS_DIR else "cache/timeseries",
-                              verbose  = TRUE) {
+augment_daily_ttm <- function(fund_dir  = "cache/fundamentals",
+                              ts_dir    = if (exists(".TS_DIR")) .TS_DIR else "cache/timeseries",
+                              split_dir = "cache/splits",
+                              fetch_splits = TRUE,
+                              verbose   = TRUE) {
   daily_files <- list.files(ts_dir, pattern = "_daily\\.parquet$", full.names = TRUE)
   fund_files  <- list.files(fund_dir, pattern = "\\.parquet$", full.names = TRUE)
   # ticker -> fundamentals path via a NAMED VECTOR (not a keyed data.table: a
@@ -133,15 +181,23 @@ augment_daily_ttm <- function(fund_dir = "cache/fundamentals",
     }
     d[, date := as.Date(date)]
 
+    splits <- tryCatch(load_ticker_splits(tk, split_dir, fetch = fetch_splits),
+                       error = function(e) NULL)
+
     ttm <- NULL
     fp <- unname(path_by_tk[tk])           # NA if this ticker has no fundamentals file
     if (!is.na(fp) && file.exists(fp)) {
       fd <- tryCatch(as.data.table(arrow::read_parquet(fp)), error = function(e) NULL)
-      if (!is.null(fd)) ttm <- tryCatch(build_ttm_eps_series(fd), error = function(e) NULL)
+      if (!is.null(fd)) ttm <- tryCatch(build_ttm_eps_series(fd, splits), error = function(e) NULL)
     }
 
     eps_ttm <- .pit_eps_ttm(ttm, d$date)
-    pe_ttm  <- ifelse(!is.na(d$price) & !is.na(eps_ttm) & abs(eps_ttm) >= 0.01,
+    # P/E numerator = the _daily `price` (the same Adjusted close the modal displays),
+    # so Price / eps_ttm reconciles with the shown pe_ttm. eps_ttm is split-normalized
+    # to the current basis, matching the (split-adjusted) price at every date.
+    # Guard: positive trailing EPS only -- eps_ttm <= 0 (TTM loss) is "not meaningful"
+    # for P/E and is surfaced as N/M by the frontend (pe_ttm = NA).
+    pe_ttm  <- ifelse(!is.na(d$price) & !is.na(eps_ttm) & eps_ttm >= 0.01,
                       d$price / eps_ttm, NA_real_)
     set(d, j = "eps_ttm", value = eps_ttm)
     set(d, j = "pe_ttm",  value = pe_ttm)

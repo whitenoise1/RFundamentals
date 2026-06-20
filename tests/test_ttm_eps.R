@@ -54,5 +54,37 @@ ok(all(.pit_eps_ttm(r, as.Date("2020-01-01")) %in% NA), "date before any filing 
 single <- build_ttm_eps_series(fd[period_start == "2022-01-01"])
 ok(is.null(single) || nrow(single) == 1, "single fiscal year -> only its FY-end TTM (no interim anchor)")
 
+cat("\n=== split adjustment (CMG-style 50:1 mid-stream) ===\n")
+# .split_factor: as-filed value -> current basis (product of ratios, ex_date > filed)
+sp <- data.table(ex_date = as.Date("2023-03-01"), ratio = 0.02)   # 50:1 split
+ok(approx(.split_factor(as.Date("2023-02-15"), sp), 0.02), "split_factor: filed before split -> 0.02 (1/50)")
+ok(approx(.split_factor(as.Date("2023-05-01"), sp), 1.0),  "split_factor: filed after split -> 1")
+ok(approx(.split_factor(as.Date(NA), sp), 1.0),            "split_factor: NA filed -> 1")
+ok(approx(.split_factor(as.Date("2022-05-01"), NULL), 1.0),"split_factor: no splits -> 1")
+
+# Same FY1/FY2 economics, but FY1 filed PRE-split (values x50) and FY2 filed POST-split.
+# After normalization the series must equal the no-split fixture (4.0/4.2/4.4/4.6/5.0).
+fd_sp <- rbindlist(list(
+  mk("2022-01-01","2022-04-01", 50,  "2022-05-01"),            # pre-split (x50)
+  mk("2022-01-01","2022-07-01", 100, "2022-08-01"),
+  mk("2022-01-01","2022-10-01", 150, "2022-11-01"),
+  mk("2022-01-01","2022-12-31", 200, "2023-02-15","10-K"),     # pre-split 10-K
+  mk("2023-01-01","2023-04-01", 1.2, "2023-05-01"),            # post-split filings
+  mk("2023-01-01","2023-07-01", 2.4, "2023-08-01"),
+  mk("2023-01-01","2023-10-01", 3.6, "2023-11-01"),
+  mk("2023-01-01","2023-12-31", 5.0, "2024-02-15","10-K")
+))
+rs <- build_ttm_eps_series(fd_sp, sp)
+gs <- function(d) rs[as.character(qend) == d, eps_ttm]
+ok(approx(gs("2022-12-31"), 4.0), "split: FY1 annual normalized to current basis (200*0.02 = 4.0)")
+ok(approx(gs("2023-04-01"), 4.2), "split: FY2 Q1 TTM spans split, no blend (1.2 + 4.0 - 1.0 = 4.2)")
+ok(approx(gs("2023-10-01"), 4.6), "split: FY2 Q3 TTM consistent basis (4.6)")
+ok(approx(gs("2023-12-31"), 5.0), "split: FY2 annual (5.0)")
+
+# Bug repro: WITHOUT split adjustment the Q1 TTM blends pre+post-split (1.2+200-50=151.2)
+rb <- build_ttm_eps_series(fd_sp, NULL)
+ok(rb[as.character(qend) == "2023-04-01", eps_ttm] > 100,
+   "split: WITHOUT adjustment FY2 Q1 TTM blends bases (>100) -- the original CMG bug")
+
 cat(sprintf("\nResults: %d PASS, %d FAIL\n", np, nf))
 if (nf > 0L) quit(status = 1L)
