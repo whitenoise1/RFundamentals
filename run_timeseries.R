@@ -19,6 +19,7 @@ source("R/indicator_compute.R")
 source("R/pit_assembler.R")
 source("R/pipeline_runner.R")
 source("R/timeseries_builder.R")
+source("R/ttm_eps.R")   # enables the eps_ttm/pe_ttm augment hook in build/update
 
 args <- commandArgs(trailingOnly = TRUE)
 cmd  <- if (length(args) >= 1) args[1] else ""
