@@ -569,6 +569,19 @@ build_timeseries <- function(start_date  = "2010-01-04",
     "  daily layers: %d ok, %d failed (of %d)"),
     elapsed, n_fund_built, n_fund_cached, n_daily_ok, n_fail, n))
 
+  # -- Augment daily layer with split-adjusted trailing-TTM EPS + P/E -----------
+  # Existence-gated (no-op unless ttm_eps.R is sourced), mirroring the pipeline's
+  # build_all_features hook. Runs once, after every _daily parquet is (re)built,
+  # so the analytics ingest's eps_ttm/pe_ttm columns survive a full rebuild rather
+  # than needing a manual augment_daily_ttm() call. Split factors are cached
+  # (cache/splits), so re-runs hit no network. See ttm_eps.R.
+  if (exists("augment_daily_ttm", mode = "function")) {
+    message("\n  augmenting daily layer: eps_ttm / pe_ttm (split-adjusted)...")
+    tryCatch(augment_daily_ttm(fund_dir = fund_dir, ts_dir = ts_dir),
+             error = function(e)
+               warning(sprintf("augment_daily_ttm failed: %s", e$message), call. = FALSE))
+  }
+
   invisible(list(
     n_fund_built  = n_fund_built,
     n_fund_cached = n_fund_cached,
@@ -645,6 +658,19 @@ update_all_daily <- function(through_date   = Sys.Date(),
   elapsed <- round(as.numeric(difftime(Sys.time(), t0, units = "mins")), 1)
   message(sprintf("update_all_daily: done in %.1f min -- %d updated, %d failed",
                   elapsed, n_updated, n_fail))
+
+  # -- Re-augment daily layer with eps_ttm / pe_ttm (split-adjusted) ------------
+  # Existence-gated; keeps the analytics columns fresh after an incremental run.
+  # All-ticker (augment_daily_ttm is not per-ticker scoped); cheap on network
+  # because split factors are cached, the cost is re-reading/writing the _daily
+  # parquets. NOTE: a NEW split is only picked up once cache/splits/{tk}.parquet
+  # is refreshed (delete it, or it is fetched fresh for tickers with no cache).
+  if (exists("augment_daily_ttm", mode = "function")) {
+    message("  augmenting daily layer: eps_ttm / pe_ttm (split-adjusted)...")
+    tryCatch(augment_daily_ttm(fund_dir = fund_dir, ts_dir = ts_dir),
+             error = function(e)
+               warning(sprintf("augment_daily_ttm failed: %s", e$message), call. = FALSE))
+  }
 
   invisible(list(
     n_updated   = n_updated,
