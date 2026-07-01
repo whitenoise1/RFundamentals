@@ -1,11 +1,11 @@
 # RFundamentals
 
-Point-in-time fundamental database for S&P 500 constituents. Builds a daily-frequency matrix of 57 indicators for ~500 stocks from free public data (SEC EDGAR + Yahoo Finance). Designed as input to quantitative factor models.
+Point-in-time fundamental database for S&P 500 constituents. Builds a daily-frequency matrix of 59 indicators for ~500 stocks from free public data (SEC EDGAR + Yahoo Finance). Designed as input to quantitative factor models.
 
 ## What it does
 
 - Fetches XBRL financial statements from SEC EDGAR for all current and historical S&P 500 members
-- Computes 57 fundamental indicators per ticker per trading day (valuation, profitability, growth, leverage, efficiency, cash flow quality, shareholder return, size, plus academic anomaly factors)
+- Computes 59 fundamental indicators per ticker per trading day (valuation, profitability, growth, leverage, efficiency, cash flow quality, shareholder return, size, plus academic anomaly factors)
 - Maintains a two-layer storage system: sparse fundamentals (one row per fiscal year) and dense daily series (one row per trading day, price-sensitive ratios updated with market close)
 - Produces cross-sectional snapshots with raw values and z-scores, ready for factor model consumption
 - All data is stamped by SEC filing date (not period end) to prevent look-ahead bias
@@ -73,7 +73,7 @@ After the initial build, the library provides data as in-memory data.tables. Ful
 ### Load a single stock's time series
 
 ```r
-# data.table: date, price, pe_trailing, roe, ... (57 indicator columns)
+# data.table: date, price, pe_trailing, roe, ... (59 indicator columns)
 aapl <- load_ticker_timeseries("AAPL")
 
 # filter by date range
@@ -83,13 +83,13 @@ aapl_2024 <- load_ticker_timeseries("AAPL", from = "2024-01-01")
 ### Load a cross-section for one date
 
 ```r
-# list with $raw and $zscored data.tables (~500 tickers x 57 indicators)
+# list with $raw and $zscored data.tables (~500 tickers x 59 indicators)
 cs <- load_daily_cross_section("2024-06-28")
 
 # raw factor matrix
 cs$raw
 
-# z-scored version (cross-sectional, winsorized at [-3, 3])
+# z-scored version (cross-sectional, robust median/MAD, clipped at [-5, 5])
 cs$zscored
 ```
 
@@ -128,13 +128,13 @@ sector_profile <- model_input[, lapply(.SD, median, na.rm = TRUE),
 | `load_daily_cross_section(date, zscore)` | list ($raw, $zscored) | All tickers, one date |
 | `get_fundamentals(ticker)` | data.table | Raw SEC filings (long format) |
 | `list_timeseries_tickers()` | character vector | Available tickers |
-| `get_indicator_names()` | character vector | 57 indicator names |
+| `get_indicator_names()` | character vector | 59 indicator names |
 | `build_timeseries()` | (side effect) | Historical build, all tickers |
 | `update_all_daily()` | (side effect) | Daily incremental update |
 
 ## Indicators
 
-57 indicators across 10 categories. Full formulas, XBRL tags, academic references, and interpretation in [`docs/INDICATORS.md`](docs/INDICATORS.md).
+59 indicators across 10 categories. Full formulas, XBRL tags, academic references, and interpretation in [`docs/INDICATORS.md`](docs/INDICATORS.md).
 
 | Category | Count | Examples |
 |----------|-------|---------|
@@ -145,11 +145,11 @@ sector_profile <- model_input[, lapply(.SD, median, na.rm = TRUE),
 | Efficiency | 3 | Asset/Inventory/Receivables Turnover |
 | Cash Flow Quality | 3 | FCF/NI, OpCF/NI, CapEx/Revenue |
 | Shareholder Return | 3 | Dividend Yield, Payout Ratio, Buyback Yield |
-| Size | 3 | Market Cap, Enterprise Value, Revenue |
+| Size | 5 | Market Cap, Enterprise Value, Revenue, Shares Outstanding, Public Float |
 | Tier 1 Research | 15 | GP/A, Asset Growth, Sloan Accrual, Piotroski F-Score (9 components + composite) |
 | Tier 2 Research | 6 | Cash-Based OP, FCF Stability, SGA Efficiency, CapEx/DA, DSO Change, Inventory/Sales Change |
 
-12 indicators are price-sensitive (update daily with market close). 45 are fundamental-only (update when a new SEC filing appears).
+12 indicators are price-sensitive (update daily with market close). 47 are fundamental-only (update when a new SEC filing appears).
 
 ## Architecture
 
@@ -158,7 +158,7 @@ R/
   constituent_master.R     CIK resolution, roster cleanup
   fundamental_fetcher.R    EDGAR XBRL fetch, dedup, cache
   sector_classifier.R      Finviz sector/industry lookup
-  indicator_compute.R      Pure computation, 57 indicators
+  indicator_compute.R      Pure computation, 59 indicators
   pit_assembler.R          Point-in-time cross-sectional snapshots
   pipeline_runner.R        Orchestration, validation
   timeseries_builder.R     Daily time series builder

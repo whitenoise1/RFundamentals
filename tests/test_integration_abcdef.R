@@ -21,7 +21,7 @@
 #   8. Spot checks: AAPL, JPM, MSFT in snapshot
 #   9. load_snapshot round-trip
 #  10. list_snapshots
-#  11. Scale gate: 400+ tickers, 57 indicators
+#  11. Scale gate: 400+ tickers, 59 indicators
 # ============================================================================
 
 suppressPackageStartupMessages({
@@ -224,10 +224,10 @@ test("raw has industry column",
 test("raw has sector column",
      "sector" %in% names(raw))
 
-test("raw has all 57 indicator columns",
+test("raw has all indicator columns",
      all(get_indicator_names() %in% names(raw)))
 
-test("zscored has all 57 indicator columns",
+test("zscored has all indicator columns",
      all(get_indicator_names() %in% names(zsc)))
 
 test("raw and zscored same number of tickers",
@@ -285,7 +285,7 @@ cov <- summarize_coverage(test_date, output_dir = test_output_dir)
 test("coverage is data.table",
      is.data.table(cov))
 
-test("coverage covers all 57 indicators",
+test("coverage covers all indicators",
      nrow(cov) == length(get_indicator_names()))
 
 test("coverage has pct_valid column",
@@ -312,18 +312,20 @@ message("\n=== 5. Z-Score Properties ===")
 ind_names <- get_indicator_names()
 z_matrix <- as.matrix(zsc[, ..ind_names])
 
-# Bounded [-3, 3]
-test("z-scores bounded [-3, 3]",
-     all(is.na(z_matrix) | (z_matrix >= -3 & z_matrix <= 3)))
+# Bounded to the default clip [-5, 5]
+test("z-scores bounded to default clip [-5, 5]",
+     all(is.na(z_matrix) | (z_matrix >= -5 & z_matrix <= 5)))
 
-# Mean near 0 for well-populated indicators
-z_means <- colMeans(z_matrix, na.rm = TRUE)
-z_sds   <- apply(z_matrix, 2, sd, na.rm = TRUE)
+# Robust z-score centers on the median, so the per-indicator median (not the
+# mean) is what sits near 0; skewed indicators keep a non-zero mean by design.
+z_medians <- apply(z_matrix, 2, median, na.rm = TRUE)
+z_means   <- colMeans(z_matrix, na.rm = TRUE)
+z_sds     <- apply(z_matrix, 2, sd, na.rm = TRUE)
 
-well_pop <- !is.na(z_means) & !is.na(z_sds)
+well_pop <- !is.na(z_medians) & !is.na(z_sds)
 if (sum(well_pop) > 0) {
-  test("z-score means: all within [-0.5, 0.5]",
-       all(abs(z_means[well_pop]) < 0.5))
+  test("z-score medians: all within [-0.5, 0.5]",
+       all(abs(z_medians[well_pop]) < 0.5))
 
   # Some low-coverage indicators have compressed SD after winsorization
   n_low_sd <- sum(z_sds[well_pop] <= 0.1)
@@ -502,8 +504,8 @@ message("\n=== 11. Scale Gate ===")
 test("scale: >= 400 tickers in snapshot",
      nrow(raw) >= 400)
 
-test("scale: 57 indicator columns present",
-     sum(ind_names %in% names(raw)) == 57)
+test("scale: all indicator columns present",
+     sum(ind_names %in% names(raw)) == length(get_indicator_names()))
 
 # Coverage: at least 20 indicators with >= 70% non-NA
 na_rates <- sapply(ind_names, function(col) mean(is.na(raw[[col]])))

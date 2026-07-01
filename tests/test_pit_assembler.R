@@ -347,6 +347,151 @@ test("snapshot dates: sorted", {
 
 
 # ============================================================================
+# TEST 4b: zscore_expanding_window  (Task #4 of verification-report follow-up)
+# ============================================================================
+# Pure unit tests for the expanding-window z-score. Disk I/O is exercised in
+# the integration test further down (via assemble_snapshot).
+message("\n=== zscore_expanding_window ===")
+
+# Build a small synthetic raw snapshot + history. Indicator columns are a
+# subset of .INDICATOR_NAMES chosen to cover: a normal column (pe_trailing),
+# a financial-masked column (gpa), and a column with missing rows.
+.mk_raw <- function(date_str, pe_vals, gpa_vals, sectors,
+                     tickers = paste0("T", seq_along(pe_vals))) {
+  dt <- data.table(
+    date        = as.Date(date_str),
+    ticker      = tickers,
+    industry    = rep("Software", length(tickers)),
+    sector      = sectors,
+    pe_trailing = pe_vals,
+    gpa         = gpa_vals
+  )
+  dt
+}
+
+test("expanding_window: empty history behaves like cross-section z", {
+  # With history_dt_list = list(), pool = winsorized current. Result should
+  # closely match .robust_zscore on the non-financial values for pe_trailing.
+  set.seed(31)
+  vals <- rnorm(20, 20, 5)
+  raw <- .mk_raw("2024-03-31", vals, rnorm(20, 0.3, 0.05),
+                  rep("Technology", 20))
+  z <- zscore_expanding_window(raw, history_dt_list = list(), clip = NULL)
+  z_ref <- .robust_zscore(vals, clip = NULL)
+  all(abs(z$pe_trailing - z_ref) < 1e-10, na.rm = TRUE)
+})
+
+test("expanding_window: history shifts the calibration center", {
+  # Current cross-section sits well below historical center. With history
+  # much larger than current, the pool's median is dragged toward history
+  # and current values standardize to strongly negative z. Under single-
+  # snapshot cross-section z would be ~0 (all current values identical).
+  set.seed(32)
+  hist_list <- lapply(1:5, function(i) {
+    .mk_raw(sprintf("2023-%02d-28", i + 4),
+            rnorm(50, mean = 50, sd = 3),
+            rep(0.3, 50),
+            rep("Technology", 50))
+  })
+  curr_dt <- .mk_raw("2024-03-31",
+                      rep(15, 20),
+                      rep(0.3, 20),
+                      rep("Technology", 20))
+  z_exp <- zscore_expanding_window(curr_dt, history_dt_list = hist_list,
+                                   clip = NULL)
+  # 250 history values at ~50 dominate 20 current values at 15 in the pool;
+  # median ~ 50 and z for current is strongly negative.
+  !is.na(z_exp$pe_trailing[1]) && z_exp$pe_trailing[1] < -3
+})
+
+test("expanding_window: multi-snapshot history pooled correctly", {
+  # Three history snapshots + current. Each is winsorized at its own
+  # p2.5/p97.5, then all winsorized values are pooled for median/MAD.
+  set.seed(33)
+  h1 <- .mk_raw("2023-09-30", rnorm(30, 20, 3), rep(0.3, 30),
+                 rep("Technology", 30))
+  h2 <- .mk_raw("2023-12-31", rnorm(30, 22, 3), rep(0.3, 30),
+                 rep("Technology", 30))
+  h3 <- .mk_raw("2024-03-31", rnorm(30, 24, 3), rep(0.3, 30),
+                 rep("Technology", 30))
+  curr <- .mk_raw("2024-06-30", rnorm(30, 26, 3), rep(0.3, 30),
+                   rep("Technology", 30))
+  z <- zscore_expanding_window(curr, history_dt_list = list(h1, h2, h3),
+                               clip = NULL)
+  # Pool median roughly equals overall mean of four rnorm(30, mean in
+  # 20..26, sd=3) -> ~23. Current samples cluster around 26, so median
+  # z should be positive.
+  !is.na(median(z$pe_trailing)) && median(z$pe_trailing) > 0
+})
+
+test("expanding_window: financial masking is respected in pool", {
+  # Financial rows must not contribute to the pool for gpa, and must be NA
+  # in the output.
+  curr <- .mk_raw(
+    "2024-03-31",
+    pe_vals  = rnorm(10, 20, 3),
+    gpa_vals = c(rep(0.3, 5), rep(999, 5)),  # financial rows have nonsense
+    sectors  = c(rep("Technology", 5), rep("Financial", 5))
+  )
+  hist_dt <- .mk_raw(
+    "2023-12-31",
+    pe_vals  = rnorm(10, 20, 3),
+    gpa_vals = c(rep(0.32, 5), rep(999, 5)),
+    sectors  = c(rep("Technology", 5), rep("Financial", 5))
+  )
+  z <- zscore_expanding_window(curr, history_dt_list = list(hist_dt))
+  all(is.na(z$gpa[6:10])) && !any(is.na(z$gpa[1:5]))
+})
+
+test("expanding_window: NAs in raw preserved in output", {
+  curr <- .mk_raw(
+    "2024-03-31",
+    pe_vals  = c(rnorm(9, 20, 3), NA_real_),
+    gpa_vals = rep(0.3, 10),
+    sectors  = rep("Technology", 10)
+  )
+  z <- zscore_expanding_window(curr, history_dt_list = list())
+  is.na(z$pe_trailing[10]) && !all(is.na(z$pe_trailing[1:9]))
+})
+
+test("expanding_window: clip bound honored", {
+  curr <- .mk_raw("2024-03-31", c(rnorm(10, 20, 3), 1e6),
+                   rep(0.3, 11), rep("Technology", 11))
+  z <- zscore_expanding_window(curr, history_dt_list = list(),
+                               clip = c(-3, 3))
+  all(is.na(z$pe_trailing) | (z$pe_trailing >= -3 & z$pe_trailing <= 3))
+})
+
+test("expanding_window: metadata columns preserved", {
+  curr <- .mk_raw("2024-03-31", rnorm(10, 20, 3), rep(0.3, 10),
+                   rep("Technology", 10))
+  z <- zscore_expanding_window(curr, history_dt_list = list())
+  all(c("date", "ticker", "industry", "sector") %in% names(z)) &&
+    identical(z$ticker, curr$ticker)
+})
+
+test("expanding_window: NULL / empty raw input handled safely", {
+  is.null(zscore_expanding_window(NULL)) &&
+    nrow(zscore_expanding_window(data.table())) == 0
+})
+
+test(".load_history_snapshots: filters strictly < snapshot_date", {
+  # Create three fake raw files in a tmp dir; loader should return only
+  # the two with dates strictly before the target.
+  td <- file.path(tempdir(), "test_history_loader")
+  dir.create(td, recursive = TRUE, showWarnings = FALSE)
+  # Clean any stale files from prior runs so the assertion is deterministic.
+  file.remove(list.files(td, full.names = TRUE))
+  for (d in c("2024-01-31", "2024-02-29", "2024-03-31")) {
+    arrow::write_parquet(data.table(x = 1),
+      file.path(td, sprintf("pit_%s_raw.parquet", d)))
+  }
+  hist <- .load_history_snapshots("2024-03-31", output_dir = td)
+  length(hist) == 2L  # Jan and Feb; Mar (strict <) excluded
+})
+
+
+# ============================================================================
 # TEST 5: build_historical_snapshots resumability
 # ============================================================================
 message("\n=== build_historical_snapshots resumability ===")
@@ -483,8 +628,8 @@ if (has_cached) {
     test("z-scores have mean near 0",
          abs(mean(z_vals)) < 0.5)
 
-    test("z-scores bounded [-3, 3]",
-         all(z_vals >= -3 & z_vals <= 3))
+    test("z-scores bounded to default clip [-5, 5]",
+         all(z_vals >= -5 & z_vals <= 5))
 
     # Clean up
     unlink(raw_file)

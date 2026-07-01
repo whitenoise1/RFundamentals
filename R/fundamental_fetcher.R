@@ -204,6 +204,11 @@ suppressPackageStartupMessages({
     "WeightedAverageNumberOfDilutedSharesOutstanding"
   ),
 
+  # DEI cover-page public float (instant; reported by ~70-80% of filers, NA otherwise)
+  public_float = c(
+    "EntityPublicFloat"
+  ),
+
   accounts_payable = c(
     "AccountsPayableCurrent",
     "AccountsPayableAndAccruedLiabilitiesCurrent"

@@ -8,7 +8,7 @@
 #   Session A: constituent_master.parquet (roster, CIK, duplicates)
 #   Session B: sector_industry.parquet (finviz sectors)
 #   Session C+D: fundamental_fetcher.R (639+ tickers cached)
-#   Session E: indicator_compute.R (57 output fields per ticker)
+#   Session E: indicator_compute.R (59 output fields per ticker)
 #
 # Tests:
 #   1. Full pipeline: master -> sector -> fundamentals -> indicators
@@ -19,7 +19,7 @@
 #   6. Spot checks: AAPL, JPM, MSFT indicators against known values
 #   7. Growth indicator temporal consistency
 #   8. Piotroski F-Score distribution
-#   9. Scale gate: 500+ tickers, 57 indicators
+#   9. Scale gate: 500+ tickers, 59 indicators
 # ============================================================================
 
 suppressPackageStartupMessages({
@@ -155,10 +155,10 @@ test("raw has correct row count",
 test("zscored has correct row count",
      nrow(cs$zscored) == length(indicator_list))
 
-test("raw has all 57 indicator columns",
+test("raw has all indicator columns",
      all(get_indicator_names() %in% names(cs$raw)))
 
-test("zscored has all 57 indicator columns",
+test("zscored has all indicator columns",
      all(get_indicator_names() %in% names(cs$zscored)))
 
 test("raw has ticker column",
@@ -255,19 +255,21 @@ message("\n=== 5. Z-Score Properties ===")
 
 z_matrix <- as.matrix(cs$zscored[, ..pi_cols])
 
-# Z-scores should be bounded [-3, 3]
-test("all z-scores bounded [-3, 3]", {
-  all(is.na(z_matrix) | (z_matrix >= -3 & z_matrix <= 3))
+# Z-scores should be bounded to the default clip [-5, 5]
+test("all z-scores bounded to default clip [-5, 5]", {
+  all(is.na(z_matrix) | (z_matrix >= -5 & z_matrix <= 5))
 })
 
-# For well-populated indicators, mean should be near 0
+# Robust z-score centers on the median (median/MAD standardization), so the
+# median -- not the mean -- is the quantity that should sit near 0. Skewed
+# indicators legitimately carry a non-zero mean after robust centering.
 for (ind in c("gross_margin", "roe", "roa", "current_ratio", "asset_turnover")) {
   if (ind %in% colnames(z_matrix)) {
     vals <- z_matrix[, ind]
     vals <- vals[!is.na(vals)]
     if (length(vals) >= 50) {
-      m <- abs(mean(vals))
-      test(sprintf("z-score mean near 0: %s (|mean|=%.3f)", ind, m), m < 0.15)
+      m <- abs(median(vals))
+      test(sprintf("z-score median near 0: %s (|median|=%.3f)", ind, m), m < 0.15)
     }
   }
 }
@@ -354,8 +356,12 @@ if (!is.na(jpm_idx)) {
   test("JPM: roe between 0.05 and 0.30 (typical bank)",
        !is.na(jpm[["roe"]]) && jpm[["roe"]] > 0.05 && jpm[["roe"]] < 0.30)
 
-  test("JPM: f_score in [0, 9]",
-       jpm[["f_score"]] >= 0 && jpm[["f_score"]] <= 9)
+  # f_score follows the strict C-2/C-3 NA-propagation policy: it is NA when
+  # any of the 9 Piotroski component inputs is missing (common for financials).
+  # Accept NA; if computed, it must be a valid 0-9 count.
+  test("JPM: f_score is NA or in [0, 9]",
+       is.na(jpm[["f_score"]]) ||
+         (jpm[["f_score"]] >= 0 && jpm[["f_score"]] <= 9))
 
   test("JPM: net_margin > 0 (profitable bank)",
        !is.na(jpm[["net_margin"]]) && jpm[["net_margin"]] > 0)
@@ -390,8 +396,13 @@ if (!is.na(msft_idx)) {
   test("MSFT: gpa > 0",
        !is.na(msft[["gpa"]]) && msft[["gpa"]] > 0)
 
-  test("MSFT: f_score >= 5 (healthy company)",
-       msft[["f_score"]] >= 5)
+  # Under the strict NA-propagation policy f_score may be NA even for a
+  # healthy company if a single Piotroski input is missing that year. Accept
+  # NA; if computed it should reflect a healthy score.
+  message(sprintf("  MSFT: f_score = %s",
+                  ifelse(is.na(msft[["f_score"]]), "NA", msft[["f_score"]])))
+  test("MSFT: f_score is NA or >= 5 (healthy company)",
+       is.na(msft[["f_score"]]) || msft[["f_score"]] >= 5)
 
 } else {
   message("  SKIP  MSFT not in computed set")
@@ -489,13 +500,17 @@ test("scale: raw matrix dimensions match",
 test("scale: zscored matrix dimensions match",
      nrow(cs$zscored) >= 450 && ncol(cs$zscored) >= 57)
 
-# At least 30 price-independent indicators should be non-NA for > 80% of tickers
+# Coverage floor for price-independent indicators at 80%+ non-NA.
+# The C-3 NA-vs-zero fix (stops fabricating zeros for absent debt/capex/depr/
+# cash tags) deliberately lowered coverage from ~15 to ~14 indicators; this is
+# accepted as financially correct. Threshold set to 13 to still catch any
+# material further regression.
 non_na_rates <- colMeans(!is.na(as.matrix(cs$raw[, ..pi_cols])))
 well_covered <- sum(non_na_rates >= 0.80)
 message(sprintf("  Indicators with >= 80%% coverage: %d / %d price-independent",
                 well_covered, length(pi_cols)))
-test("scale: >= 15 price-independent indicators with 80%+ coverage",
-     well_covered >= 15)
+test("scale: >= 13 price-independent indicators with 80%+ coverage (post C-3)",
+     well_covered >= 13)
 
 
 # ============================================================================

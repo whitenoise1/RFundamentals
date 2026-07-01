@@ -20,6 +20,7 @@ How to handle three standardization dimensions:
 | 03_sector_neutralization.md | Within-sector construction, double sort |
 | 04_regime_conditional_factors.md | Interaction with regime models |
 | 05_practitioner_methodologies.md | Barra, AQR, Robeco approaches + pitfalls |
+| 08_cross_sectional_signal_extraction.md | **Deferred** research branch: per-stock signal from the 57-indicator cross-section. Literature + open questions. |
 
 ## Key Conclusions
 

@@ -45,8 +45,9 @@ suppressPackageStartupMessages({
   interest_expense = c("InterestIncomeExpenseNet")
 )
 
-# Canonical indicator names in output order (57 entries):
-# 36 baseline + 5 tier1 + 10 piotroski (9 components + composite) + 6 tier2
+# Canonical indicator names in output order (59 entries):
+# 36 baseline + 2 size (shares_outstanding, public_float) + 5 tier1 +
+# 10 piotroski (9 components + composite) + 6 tier2
 .INDICATOR_NAMES <- c(
   # Valuation (8)
   "pe_trailing", "peg", "pb", "ps", "pfcf",
@@ -66,8 +67,9 @@ suppressPackageStartupMessages({
   "fcf_ni", "opcf_ni", "capex_revenue",
   # Shareholder Return (3)
   "dividend_yield", "payout_ratio", "buyback_yield",
-  # Size (3)
+  # Size (5)
   "market_cap", "enterprise_value", "revenue_raw",
+  "shares_outstanding", "public_float",
   # Tier 1 Research (6 + 10 Piotroski)
   "gpa", "asset_growth", "sloan_accrual", "pct_accruals",
   "net_operating_assets",
@@ -78,6 +80,60 @@ suppressPackageStartupMessages({
   "cash_based_op", "fcf_stability", "sga_efficiency",
   "capex_depreciation", "dso_change", "inventory_sales_change"
 )
+
+# Family-to-indicator mapping (canonical groupings, 10 families)
+.INDICATOR_FAMILIES <- list(
+  valuation         = c("pe_trailing", "peg", "pb", "ps", "pfcf",
+                         "ev_ebitda", "ev_revenue", "earnings_yield"),
+  profitability     = c("gross_margin", "operating_margin", "net_margin",
+                         "roe", "roa", "roic"),
+  growth            = c("revenue_growth_yoy", "revenue_growth_qoq",
+                         "eps_growth_yoy", "opinc_growth_yoy", "ebitda_growth"),
+  leverage          = c("debt_equity", "net_debt_ebitda", "interest_coverage",
+                         "current_ratio", "quick_ratio"),
+  efficiency        = c("asset_turnover", "inventory_turnover",
+                         "receivables_turnover"),
+  cashflow_quality  = c("fcf_ni", "opcf_ni", "capex_revenue"),
+  shareholder       = c("dividend_yield", "payout_ratio", "buyback_yield"),
+  size              = c("market_cap", "enterprise_value", "revenue_raw",
+                         "shares_outstanding", "public_float"),
+  piotroski         = c("f_roa", "f_droa", "f_cfo", "f_accrual",
+                         "f_dlever", "f_dliquid", "f_eq_off",
+                         "f_dmargin", "f_dturn", "f_score"),
+  research          = c("gpa", "asset_growth", "sloan_accrual", "pct_accruals",
+                         "net_operating_assets", "cash_based_op", "fcf_stability",
+                         "sga_efficiency", "capex_depreciation", "dso_change",
+                         "inventory_sales_change")
+)
+
+
+#' Return indicator names belonging to one or more families.
+#'
+#' @param families Character vector of family slugs, e.g. "valuation" or
+#'   c("valuation", "growth"). NULL returns all 59 indicator names.
+#'   Matching is case-insensitive.
+#' @return Character vector of indicator names, in canonical order.
+#'
+#' @examples
+#'   indicator_names("valuation")
+#'   indicator_names(c("valuation", "growth"))
+#'   indicator_names()  # all 59
+indicator_names <- function(families = NULL) {
+  if (is.null(families)) return(.INDICATOR_NAMES)
+
+  families <- tolower(families)
+  unknown  <- setdiff(families, names(.INDICATOR_FAMILIES))
+  if (length(unknown) > 0L) {
+    stop("indicator_names: unknown family: ",
+         paste(shQuote(unknown), collapse = ", "),
+         ". Valid: ", paste(names(.INDICATOR_FAMILIES), collapse = ", "),
+         call. = FALSE)
+  }
+
+  # Preserve canonical order across selected families
+  selected <- unlist(.INDICATOR_FAMILIES[families], use.names = FALSE)
+  .INDICATOR_NAMES[.INDICATOR_NAMES %in% selected]
+}
 
 
 # -- Assertion helper (same pattern as other modules) --
@@ -106,10 +162,75 @@ suppressPackageStartupMessages({
 
 
 # -- Winsorize to percentile bounds --
-.winsorize <- function(x, probs = c(0.01, 0.99)) {
+.winsorize <- function(x, probs = c(0.025, 0.975)) {
   if (all(is.na(x))) return(x)
   q <- quantile(x, probs, na.rm = TRUE)
   pmin(pmax(x, q[1]), q[2])
+}
+
+
+# -- Robust cross-sectional standardization --
+#
+# Pipeline (see docs/research/06_indicator_verification_report.md §12):
+#   1. Winsorize x cross-sectionally at [probs[1], probs[2]].
+#   2. Standardize using median / MAD of a calibration sample.
+#      For per-snapshot use, calib_sample defaults to the winsorized x
+#      itself. For expanding-window standardization, the caller supplies
+#      the pooled historical + current winsorized values.
+#
+# Design rationale:
+#   - Pre-winsorize before computing location / scale so fat-tailed outliers
+#     cannot contaminate the standardization statistics.
+#   - Median / MAD (scaled by 1.4826 to estimate sigma under a Gaussian
+#     null) is robust to the remaining within-band skew. Under a normal
+#     distribution it coincides with mean / SD, so values computed on
+#     well-behaved indicators are unchanged in practice.
+#   - clip default is c(-5, 5): the per-indicator / pooled tail diagnostic
+#     (tools/diag_zscore_tails.R) showed p99.9 = 23 unclipped and 4.16:1
+#     positive-heavy asymmetry. Clipping at +/-3 censors 1.8% of negative
+#     (mostly distress) values along with 7.6% of positive (mostly size /
+#     valuation / growth) values -- net-negative for factor discrimination.
+#     c(-5, 5) preserves the negative tail essentially fully while still
+#     bounding the scale so one indicator can't dominate a factor blend.
+#     Long-term fix is log-transforming size / valuation indicators before
+#     winsorization (verification report Section 14 item #11); once that
+#     lands, this clip can likely be dropped (pass clip = NULL).
+#
+# Returns a numeric vector the same length as x. Original NAs are
+# preserved; if x has fewer than min_n non-NA observations or the
+# calibration spread is degenerate, the whole indicator returns all-NA.
+.robust_zscore <- function(x,
+                           calib_sample = NULL,
+                           probs = c(0.025, 0.975),
+                           min_n = 3,
+                           clip = c(-5, 5)) {
+  if (sum(!is.na(x)) < min_n) return(rep(NA_real_, length(x)))
+
+  # 1. Per-snapshot winsorization using current-cross-section percentiles.
+  q <- quantile(x, probs, na.rm = TRUE)
+  x_w <- pmin(pmax(x, q[1]), q[2])
+
+  # 2. Calibration sample. Defaults to winsorized x (per-snapshot); caller
+  # may pass a pooled expanding-window sample.
+  if (is.null(calib_sample)) {
+    s <- x_w[!is.na(x_w)]
+  } else {
+    s <- calib_sample[!is.na(calib_sample)]
+  }
+  if (length(s) < min_n) return(rep(NA_real_, length(x)))
+
+  med <- median(s)
+  mad_v <- mad(s, center = med, constant = 1.4826)
+  if (is.na(mad_v) || mad_v < 1e-12) {
+    return(rep(NA_real_, length(x)))
+  }
+
+  z <- (x_w - med) / mad_v
+  if (!is.null(clip)) {
+    z <- pmin(pmax(z, clip[1]), clip[2])
+  }
+  z[is.na(x)] <- NA_real_
+  z
 }
 
 
@@ -265,35 +386,51 @@ pivot_fundamentals <- function(fund_dt) {
 .derive_quantities <- function(wide_dt) {
   if (is.null(wide_dt) || nrow(wide_dt) == 0) return(wide_dt)
 
-  # Use fcoalesce for NA -> 0 where appropriate
-  .co <- function(col_name) {
+  # Raw column getter: NA-vector if column missing, else the column itself
+  # with NAs preserved (no fill). C-3: callers decide per-quantity whether
+  # a missing input should propagate NA or be treated as a true zero.
+  .raw <- function(col_name) {
     if (col_name %in% names(wide_dt)) {
-      nafill(wide_dt[[col_name]], fill = 0)
+      as.numeric(wide_dt[[col_name]])
     } else {
-      rep(0, nrow(wide_dt))
+      rep(NA_real_, nrow(wide_dt))
     }
   }
 
-  # Gross profit
+  # Gross profit = revenue - cogs
   if (all(c("revenue", "cogs") %in% names(wide_dt))) {
     wide_dt[, gross_profit := revenue - cogs]
   }
 
-  # EBITDA = operating income + D&A
+  # EBITDA = operating_income + D&A. If D&A is absent, the result would be
+  # EBIT mislabelled as EBITDA; propagate NA so downstream (ev_ebitda,
+  # net_debt_ebitda, ebitda_growth) is NA rather than silently wrong.
   if ("operating_income" %in% names(wide_dt)) {
-    wide_dt[, ebitda := operating_income + .co("depreciation")]
+    wide_dt[, ebitda := operating_income + .raw("depreciation")]
   }
 
-  # Free cash flow = operating CF - capex
+  # FCF = operating_cashflow - capex. If capex is absent, FCF would equal
+  # OpCF (overstated); propagate NA.
   if ("operating_cashflow" %in% names(wide_dt)) {
-    wide_dt[, fcf := operating_cashflow - .co("capex")]
+    wide_dt[, fcf := operating_cashflow - .raw("capex")]
   }
 
-  # Total debt = LT debt + ST debt (missing = 0)
-  wide_dt[, total_debt := .co("long_term_debt") + .co("short_term_debt")]
+  # Total debt = LTD + STD.
+  # Both absent -> NA: indistinguishable from "firm has no debt" vs. "tags
+  # not captured", so don't silently report zero debt.
+  # One present, one absent -> treat absent as 0: matches EDGAR filing
+  # practice where firms populate only the tag they actually use.
+  ltd <- .raw("long_term_debt")
+  std <- .raw("short_term_debt")
+  both_na <- is.na(ltd) & is.na(std)
+  ltd0 <- fifelse(is.na(ltd), 0.0, ltd)
+  std0 <- fifelse(is.na(std), 0.0, std)
+  wide_dt[, total_debt := fifelse(both_na, NA_real_, ltd0 + std0)]
 
-  # Net debt = total debt - cash
-  wide_dt[, net_debt := total_debt - .co("cash")]
+  # Net debt = total_debt - cash. NA in either input propagates; cash is
+  # universally reported by going concerns, so absence is data coverage,
+  # not "no cash".
+  wide_dt[, net_debt := total_debt - .raw("cash")]
 
   wide_dt
 }
@@ -307,10 +444,12 @@ pivot_fundamentals <- function(fund_dt) {
 .compute_valuation <- function(curr, price, shares) {
 
   market_cap <- if (!is.na(price) && !is.na(shares)) price * shares else NA_real_
-  # Use net_debt (from .derive_quantities) which handles NA cash -> 0
+  # EV = market_cap + net_debt. C-3: net_debt is NA when cash is unreported
+  # or when both debt tags are absent; propagate rather than silently
+  # substituting total_debt (which would treat cash as 0).
   ev <- if (!is.na(market_cap)) {
     nd <- .col(curr, "net_debt")
-    if (!is.na(nd)) market_cap + nd else market_cap + .col(curr, "total_debt")
+    if (!is.na(nd)) market_cap + nd else NA_real_
   } else NA_real_
 
   eps <- .col(curr, "eps_diluted")
@@ -319,12 +458,16 @@ pivot_fundamentals <- function(fund_dt) {
   fcf_val <- .col(curr, "fcf")
   ebitda_val <- .col(curr, "ebitda")
 
+  # Sign-guard-free: negative denominators (negative book value, negative FCF,
+  # negative EBITDA) produce negative multiples that encode distress. The
+  # cross-sectional winsorization + robust standardization downstream tame
+  # the tails; sign-censoring here would destroy information.
   list(
     pe_trailing    = .safe_divide(price, eps, min_abs_denom = 0.01),
-    pb             = if (!is.na(equity) && equity > 0) .safe_divide(market_cap, equity) else NA_real_,
+    pb             = .safe_divide(market_cap, equity),
     ps             = .safe_divide(market_cap, rev),
-    pfcf           = if (!is.na(fcf_val) && fcf_val > 0) .safe_divide(market_cap, fcf_val) else NA_real_,
-    ev_ebitda      = if (!is.na(ebitda_val) && ebitda_val > 0) .safe_divide(ev, ebitda_val) else NA_real_,
+    pfcf           = .safe_divide(market_cap, fcf_val),
+    ev_ebitda      = .safe_divide(ev, ebitda_val),
     ev_revenue     = .safe_divide(ev, rev),
     earnings_yield = .safe_divide(eps, price, min_abs_denom = 0.01),
     market_cap     = market_cap,
@@ -345,18 +488,20 @@ pivot_fundamentals <- function(fund_dt) {
   td     <- .col(curr, "total_debt")
   cash_v <- .col(curr, "cash")
 
-  # Invested capital = equity + debt - cash
-  ic <- if (!is.na(equity) && !is.na(td)) {
-    equity + td - if (is.na(cash_v)) 0 else cash_v
-  } else NA_real_
+  # Invested capital = equity + debt - cash. NA in any component propagates
+  # (C-3: missing cash is a data-coverage gap, not implicit zero).
+  ic <- equity + td - cash_v
 
+  # Sign-guard-free: negative denominators (negative equity, negative IC)
+  # produce negative ratios that carry distress signal into the cross-section.
+  # Winsorization handles the fat tails; sign-censoring destroys information.
   list(
     gross_margin     = .safe_divide(gp, rev),
     operating_margin = .safe_divide(opinc, rev),
     net_margin       = .safe_divide(ni, rev),
-    roe              = if (!is.na(equity) && equity > 0) .safe_divide(ni, equity) else NA_real_,
+    roe              = .safe_divide(ni, equity),
     roa              = .safe_divide(ni, assets),
-    roic             = if (!is.na(ic) && ic > 0) .safe_divide(ni, ic) else NA_real_
+    roic             = .safe_divide(ni, ic)
   )
 }
 
@@ -394,9 +539,11 @@ pivot_fundamentals <- function(fund_dt) {
   cl      <- .col(curr, "current_liabilities")
   inv     <- .col(curr, "inventory")
 
+  # Sign-guard-free: negative equity / negative EBITDA flip the sign of the
+  # leverage ratio and thereby signal distress. Winsorization handles tails.
   list(
-    debt_equity       = if (!is.na(equity) && equity > 0) .safe_divide(td, equity) else NA_real_,
-    net_debt_ebitda   = if (!is.na(ebitda) && ebitda > 0) .safe_divide(nd, ebitda) else NA_real_,
+    debt_equity       = .safe_divide(td, equity),
+    net_debt_ebitda   = .safe_divide(nd, ebitda),
     interest_coverage = .safe_divide(opinc, intexp, min_abs_denom = 1),
     current_ratio     = .safe_divide(ca, cl),
     quick_ratio       = .safe_divide(
@@ -450,9 +597,11 @@ pivot_fundamentals <- function(fund_dt) {
   abs_div <- if (!is.na(div)) abs(div) else NA_real_
   abs_buy <- if (!is.na(buy)) abs(buy) else NA_real_
 
+  # payout_ratio: allow negative when NI < 0 (firm paying dividends despite
+  # losses -- a distress signal). Winsorization caps the tails.
   list(
     dividend_yield = .safe_divide(abs_div, market_cap),
-    payout_ratio   = if (!is.na(ni) && ni > 0) .safe_divide(abs_div, ni) else NA_real_,
+    payout_ratio   = .safe_divide(abs_div, ni),
     buyback_yield  = .safe_divide(abs_buy, market_cap)
   )
 }
@@ -701,48 +850,43 @@ pivot_fundamentals <- function(fund_dt) {
 
 #' Z-score indicator values cross-sectionally
 #'
+#' Per-snapshot robust standardization. Winsorizes raw values cross-
+#' sectionally at the [p2.5, p97.5] percentiles of the current snapshot,
+#' then standardizes using median / MAD of the winsorized cross-section.
+#' Financial-sector-invalid indicators (gpa, inventory_turnover,
+#' cash_based_op, capex_depreciation, inventory_sales_change) are
+#' computed excluding financial rows and then NA-masked for financials.
+#'
 #' @param indicator_dt data.table. Rows = tickers, columns = indicator values.
 #'   Must also have 'sector' column for financial sector handling.
+#' @param clip Numeric length-2 or NULL. Post-standardization clip bounds.
+#'   Defaults to c(-5, 5) -- see .robust_zscore docstring and
+#'   tools/diag_zscore_tails.R for the tail-diagnostic evidence that
+#'   drove the choice of 5 over 3.
 #' @return data.table with z-scored values (same structure minus sector column).
-zscore_cross_section <- function(indicator_dt) {
+zscore_cross_section <- function(indicator_dt, clip = c(-5, 5)) {
 
   if (is.null(indicator_dt) || nrow(indicator_dt) == 0) return(indicator_dt)
 
   dt <- copy(indicator_dt)
   is_financial <- dt[["sector"]] %in% "Financial"
 
-  # Z-score each indicator column
   ind_cols <- setdiff(names(dt), c("ticker", "sector"))
 
   for (col_name in ind_cols) {
     vals <- dt[[col_name]]
+    financial_masked <- col_name %in% .FINANCIAL_NA_INDICATORS
 
-    if (col_name %in% .FINANCIAL_NA_INDICATORS) {
-      # For financial-NA indicators: compute z-scores excluding financials
-      use <- !is_financial & !is.na(vals)
+    # For financial-NA indicators, exclude financials from the winsorization
+    # and standardization sample, then NA-mask financial rows on output.
+    if (financial_masked) {
+      vals_in <- vals
+      vals_in[is_financial] <- NA_real_
+      z <- .robust_zscore(vals_in, clip = clip)
+      z[is_financial] <- NA_real_
     } else {
-      use <- !is.na(vals)
+      z <- .robust_zscore(vals, clip = clip)
     }
-
-    if (sum(use) < 3) {
-      # Not enough data for meaningful z-score
-      dt[, (col_name) := NA_real_]
-      next
-    }
-
-    mu <- mean(vals[use])
-    s  <- sd(vals[use])
-
-    if (is.na(s) || s < 1e-12) {
-      dt[, (col_name) := NA_real_]
-      next
-    }
-
-    z <- (vals - mu) / s
-    # Winsorize z-scores at [-3, 3]
-    z <- pmin(pmax(z, -3), 3)
-    # Keep NA for original NAs
-    z[is.na(vals)] <- NA_real_
     dt[, (col_name) := z]
   }
 
@@ -903,10 +1047,12 @@ compute_ticker_indicators <- function(fund_dt, price_on_filed, sector,
       dividend_yield = shr$dividend_yield,
       payout_ratio   = shr$payout_ratio,
       buyback_yield  = shr$buyback_yield,
-      # Size (3)
-      market_cap       = val$market_cap,
-      enterprise_value = val$enterprise_value,
-      revenue_raw      = .col(curr, "revenue"),
+      # Size (5)
+      market_cap         = val$market_cap,
+      enterprise_value   = val$enterprise_value,
+      revenue_raw        = .col(curr, "revenue"),
+      shares_outstanding = .col(curr, "shares_outstanding"),
+      public_float       = .col(curr, "public_float"),
       # Tier 1 (5 + 10 Piotroski)
       gpa                  = t1$gpa,
       asset_growth         = t1$asset_growth,
@@ -963,7 +1109,8 @@ compute_ticker_indicators <- function(fund_dt, price_on_filed, sector,
 #' @param sectors Character vector. Sector per ticker (same order).
 #' @return List with $raw (data.table) and $zscored (data.table).
 #'   Both have ticker column + indicator columns.
-compute_cross_section <- function(indicator_list, tickers, sectors) {
+compute_cross_section <- function(indicator_list, tickers, sectors,
+                                  clip = c(-5, 5)) {
 
   stopifnot(length(indicator_list) == length(tickers))
   stopifnot(length(indicator_list) == length(sectors))
@@ -979,7 +1126,7 @@ compute_cross_section <- function(indicator_list, tickers, sectors) {
   # Z-score
   zscore_input <- copy(raw_dt)
   zscore_input[, ticker := NULL]
-  zscored_dt <- zscore_cross_section(zscore_input)
+  zscored_dt <- zscore_cross_section(zscore_input, clip = clip)
   zscored_dt[, ticker := tickers]
   setcolorder(zscored_dt, c("ticker", .INDICATOR_NAMES))
 

@@ -603,13 +603,27 @@ so the cross-sectional distribution is not distorted by forced NAs.
 
 ## Z-Scoring Method
 
-Cross-sectional z-scores are computed per indicator:
+Cross-sectional z-scores are computed per indicator using a robust pipeline
+(`.robust_zscore` in `indicator_compute.R`); this is the default output of
+`assemble_snapshot` (`zscore_mode = "cross_section"`):
 
-1. Compute mean and standard deviation across all non-NA values
-   (excluding financials for the five financial-NA indicators)
-2. Z = (value - mean) / SD
-3. Winsorize at [-3, 3]
-4. Original NAs remain NA
+1. Winsorize the raw values at the per-snapshot p2.5 / p97.5 percentiles
+   (excluding financials for the five financial-NA indicators), so fat tails
+   cannot contaminate the location/scale estimates.
+2. Standardize with the robust center and scale:
+   Z = (value - median) / (1.4826 * MAD). Under a Gaussian null this equals
+   (value - mean) / SD, but it is not distorted by skew or outliers. Note the
+   median -- not the mean -- of the resulting z-scores sits at ~0.
+3. Clip the z-scores at [-5, 5] by default (`clip` argument; pass `NULL` to
+   disable, or `c(-3, 3)` for the tighter legacy bound). See
+   `docs/research/06_indicator_verification_report.md` sec. 12a for the
+   clip-default rationale.
+4. Original NAs remain NA. Negative denominators are preserved (not NA-masked)
+   so distress signals propagate.
 
 Minimum 3 non-NA observations required; otherwise the entire indicator column
 is set to NA for that cross-section.
+
+An opt-in `zscore_mode = "expanding_window"` variant pools winsorized values
+across all prior snapshots plus the current one for the location/scale estimate;
+it is a research variant, not the default output contract.

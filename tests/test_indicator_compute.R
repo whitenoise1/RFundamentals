@@ -81,6 +81,80 @@ test("winsorize: clips extremes", {
   w[1] > -100 && w[7] < 200 && w[3] == 2 && w[4] == 3
 })
 
+test("winsorize: default probs = c(0.025, 0.975)", {
+  # Default percentiles align with the cross-sectional winsorization used
+  # by zscore_cross_section / .robust_zscore.
+  x <- c(-1000, rnorm(98), 1000)
+  w <- .winsorize(x)
+  # Extremes clipped inward; interior preserved.
+  w[1] > -100 && w[100] < 100
+})
+
+# .robust_zscore
+test("robust_zscore: NA-free normal input yields SD ~ 1, median ~ 0", {
+  set.seed(1)
+  x <- rnorm(500)
+  z <- .robust_zscore(x, clip = NULL)  # drop clip to inspect raw scale
+  abs(median(z)) < 0.1 && abs(sd(z) - 1) < 0.2
+})
+
+test("robust_zscore: outlier does not contaminate location/scale", {
+  # A single extreme value would inflate SD under mean/SD standardization.
+  # Under pre-winsorization + MAD, the outlier is clipped to p97.5 first
+  # and can't blow up the scale.
+  x <- c(rnorm(99), 1e6)
+  z <- .robust_zscore(x, clip = NULL)
+  # The extreme observation must be bounded (clipped to the p97.5 of x).
+  # Scale should remain ~1 despite the outlier.
+  !is.na(z[100]) && abs(z[100]) < 10 && abs(sd(z[-100]) - 1) < 0.3
+})
+
+test("robust_zscore: NAs preserved in output", {
+  x <- c(1, 2, NA_real_, 4, 5, 6)
+  z <- .robust_zscore(x)
+  is.na(z[3]) && !is.na(z[1])
+})
+
+test("robust_zscore: fewer than min_n non-NA values -> all NA", {
+  x <- c(1, 2, NA, NA, NA)
+  z <- .robust_zscore(x, min_n = 3)
+  all(is.na(z))
+})
+
+test("robust_zscore: degenerate spread (all equal) -> all NA", {
+  x <- rep(5, 10)
+  z <- .robust_zscore(x)
+  all(is.na(z))
+})
+
+test("robust_zscore: clip bounds respected when non-NULL", {
+  x <- c(rnorm(98), -100, 100)
+  z <- .robust_zscore(x, clip = c(-3, 3))
+  all(is.na(z) | (z >= -3 & z <= 3))
+})
+
+test("robust_zscore: clip = NULL leaves tails unbounded (up to winsor)", {
+  # Without clip, z values are capped only by the winsorization p2.5/p97.5.
+  # For n=100 rnorm, that's roughly ~|2| on the z scale -- well within [-3,3]
+  # -- so clip NULL vs clip c(-3,3) produce identical output for normal data.
+  set.seed(2)
+  x <- rnorm(100)
+  z_clip <- .robust_zscore(x, clip = c(-3, 3))
+  z_none <- .robust_zscore(x, clip = NULL)
+  all(abs(z_clip - z_none) < 1e-10, na.rm = TRUE)
+})
+
+test("robust_zscore: custom calib_sample used for location/scale", {
+  # When calib_sample is supplied, current x_w is standardized against that
+  # sample -- this is the expanding-window case.
+  current <- c(10, 12, 14, 16, 18)
+  history <- rnorm(1000, mean = 100, sd = 20)
+  z <- .robust_zscore(current, calib_sample = history, clip = NULL)
+  # Current values are far below history's median (100); z must be strongly
+  # negative. Under per-snapshot (no history), z would be near 0.
+  all(z < 0) && median(z) < -3
+})
+
 # .col
 test("col: existing column", {
   dt <- data.table(revenue = 1000)
@@ -172,8 +246,88 @@ test("derive: gross_profit = revenue - cogs",
 test("derive: ebitda computed",
      "ebitda" %in% names(derived))
 
-test("derive: ebitda = operating_income + 0 (no depreciation)",
-     derived[fiscal_year == 2024, ebitda] == 200)
+# C-3: missing depreciation propagates NA rather than silently reporting EBIT
+# mislabelled as EBITDA. The .make_long fixture has operating_income but no
+# depreciation, so ebitda must be NA.
+test("derive: ebitda is NA when depreciation tag is absent (C-3)",
+     is.na(derived[fiscal_year == 2024, ebitda]))
+
+# ---- C-3 NA-vs-zero split: explicit coverage ----
+
+test("C-3 derive: ebitda = opinc + depr when both present", {
+  d <- .derive_quantities(data.table(operating_income = 100,
+                                     depreciation = 30))
+  d$ebitda == 130
+})
+
+test("C-3 derive: fcf = opcf - capex when both present", {
+  d <- .derive_quantities(data.table(operating_cashflow = 500, capex = 120))
+  d$fcf == 380
+})
+
+test("C-3 derive: fcf is NA when capex absent (was: equal to OpCF)", {
+  d <- .derive_quantities(data.table(operating_cashflow = 500))
+  is.na(d$fcf)
+})
+
+test("C-3 derive: fcf is NA when capex column present but value NA", {
+  d <- .derive_quantities(data.table(operating_cashflow = 500,
+                                     capex = NA_real_))
+  is.na(d$fcf)
+})
+
+test("C-3 derive: total_debt is NA when both LTD and STD absent", {
+  d <- .derive_quantities(data.table(revenue = 1000))  # no debt cols
+  is.na(d$total_debt)
+})
+
+test("C-3 derive: total_debt treats missing STD as 0 when LTD present", {
+  d <- .derive_quantities(data.table(long_term_debt = 5000))
+  d$total_debt == 5000
+})
+
+test("C-3 derive: total_debt treats missing LTD as 0 when STD present", {
+  d <- .derive_quantities(data.table(short_term_debt = 800))
+  d$total_debt == 800
+})
+
+test("C-3 derive: total_debt is NA when both LTD and STD are NA values", {
+  d <- .derive_quantities(data.table(long_term_debt = NA_real_,
+                                     short_term_debt = NA_real_))
+  is.na(d$total_debt)
+})
+
+test("C-3 derive: total_debt = LTD + STD when both present", {
+  d <- .derive_quantities(data.table(long_term_debt = 5000,
+                                     short_term_debt = 800))
+  d$total_debt == 5800
+})
+
+test("C-3 derive: net_debt is NA when cash absent", {
+  d <- .derive_quantities(data.table(long_term_debt = 5000,
+                                     short_term_debt = 800))
+  is.na(d$net_debt)
+})
+
+test("C-3 derive: net_debt is NA when total_debt NA (both debt inputs absent)", {
+  d <- .derive_quantities(data.table(cash = 1000))
+  is.na(d$net_debt)
+})
+
+test("C-3 derive: net_debt = total_debt - cash when all present", {
+  d <- .derive_quantities(data.table(long_term_debt = 5000,
+                                     short_term_debt = 800,
+                                     cash = 2000))
+  d$net_debt == 3800
+})
+
+test("C-3 derive: vectorised across multi-row input (mixed presence)", {
+  d <- .derive_quantities(data.table(
+    operating_cashflow = c(500, 500, 500),
+    capex = c(120, NA_real_, 200)
+  ))
+  d$fcf[1] == 380 && is.na(d$fcf[2]) && d$fcf[3] == 300
+})
 
 
 # ============================================================================
@@ -248,13 +402,24 @@ test("valuation: zero EPS -> pe is NA", {
   is.na(v$pe_trailing)
 })
 
-test("valuation: EV computed when cash column missing", {
+test("valuation: EV is NA when cash column missing (C-3)", {
+  # Under C-3 net_debt = total_debt - cash propagates NA when cash is
+  # unreported; EV follows. Previously this silently used total_debt
+  # as a proxy, implicitly treating cash as 0.
   no_cash <- copy(curr_row)
   no_cash[, cash := NULL]
   no_cash <- .derive_quantities(no_cash)
   v <- .compute_valuation(no_cash, price, 1000)
-  # EV = mkt_cap + net_debt = 150000 + total_debt (6000) = 156000
-  !is.na(v$enterprise_value) && v$enterprise_value == 156000
+  is.na(v$enterprise_value)
+})
+
+test("valuation: EV NA when both debt tags absent (C-3)", {
+  # Without LTD and STD, total_debt is NA; net_debt and EV follow.
+  no_debt <- copy(curr_row)
+  no_debt[, `:=`(long_term_debt = NULL, short_term_debt = NULL)]
+  no_debt <- .derive_quantities(no_debt)
+  v <- .compute_valuation(no_debt, price, 1000)
+  is.na(v$enterprise_value)
 })
 
 test("valuation: EV = mkt_cap + total_debt - cash", {
@@ -275,11 +440,74 @@ test("profitability: operating_margin = OI/Rev",
 test("profitability: roe = NI/Equity",
      abs(prof$roe - 2000/20000) < 0.001)
 
-test("profitability: negative equity -> roe is NA", {
+test("profitability: negative equity -> roe is negative (sign-preserving)", {
+  # Principle: negative denominators carry distress signal and must propagate
+  # into the cross-section. Winsorization + robust standardization downstream
+  # tame the tails without censoring sign.
   neg_eq <- copy(curr_row)
   neg_eq[, stockholders_equity := -1000]
   p <- .compute_profitability(neg_eq)
-  is.na(p$roe)
+  !is.na(p$roe) && p$roe == 2000 / -1000
+})
+
+# ---- Sign-preservation across the valuation / leverage / shareholder set ----
+
+test("sign-preserve: negative equity yields negative pb", {
+  r <- copy(curr_row); r[, stockholders_equity := -5000]
+  v <- .compute_valuation(r, price, 1000)
+  !is.na(v$pb) && v$pb == 150000 / -5000
+})
+
+test("sign-preserve: negative FCF yields negative pfcf", {
+  # fcf is derived; inject via operating_cashflow < capex
+  r <- copy(curr_row); r[, `:=`(operating_cashflow = 100, capex = 500)]
+  r <- .derive_quantities(r)
+  v <- .compute_valuation(r, price, 1000)
+  !is.na(v$pfcf) && v$pfcf < 0
+})
+
+test("sign-preserve: negative EBITDA yields negative ev_ebitda", {
+  r <- copy(curr_row); r[, `:=`(operating_income = -500, depreciation = 100)]
+  r <- .derive_quantities(r)
+  v <- .compute_valuation(r, price, 1000)
+  !is.na(v$ev_ebitda) && v$ev_ebitda < 0
+})
+
+test("sign-preserve: negative equity yields negative debt_equity", {
+  r <- copy(curr_row); r[, stockholders_equity := -2000]
+  lev <- .compute_leverage(r)
+  !is.na(lev$debt_equity) && lev$debt_equity == 6000 / -2000
+})
+
+test("sign-preserve: negative EBITDA yields negative net_debt_ebitda", {
+  r <- copy(curr_row); r[, `:=`(operating_income = -200, depreciation = 100)]
+  r <- .derive_quantities(r)
+  lev <- .compute_leverage(r)
+  !is.na(lev$net_debt_ebitda) && lev$net_debt_ebitda < 0
+})
+
+test("sign-preserve: negative NI yields negative payout_ratio", {
+  # div = -600 (cash outflow), so abs_div = 600, ni = -100 -> ratio = -6
+  r <- copy(curr_row); r[, net_income := -100]
+  shr <- .compute_shareholder(r, 150000)
+  !is.na(shr$payout_ratio) && shr$payout_ratio == 600 / -100
+})
+
+test("sign-preserve: negative IC yields negative roic", {
+  # Force IC < 0: equity=100, total_debt=100, cash=500 -> IC = -300
+  r <- copy(curr_row)
+  r[, `:=`(stockholders_equity = 100, long_term_debt = 100,
+           short_term_debt = 0, cash = 500)]
+  r <- .derive_quantities(r)
+  p <- .compute_profitability(r)
+  !is.na(p$roic) && p$roic < 0
+})
+
+test("C-3 profitability: roic NA when cash absent (no silent zeroing)", {
+  r <- copy(curr_row); r[, cash := NA_real_]
+  r <- .derive_quantities(r)
+  p <- .compute_profitability(r)
+  is.na(p$roic)
 })
 
 # Growth
@@ -798,22 +1026,27 @@ test("zscore: output is data.table",
 test("zscore: sector column removed",
      !("sector" %in% names(zscored)))
 
-test("zscore: pe_trailing mean near 0", {
-  m <- mean(zscored$pe_trailing, na.rm = TRUE)
+test("zscore: pe_trailing median near 0", {
+  # Median/MAD standardization centers on median, not mean. Mean still near
+  # 0 for normal data but less tightly than under mean/SD standardization.
+  m <- median(zscored$pe_trailing, na.rm = TRUE)
   abs(m) < 0.1
 })
 
-test("zscore: pe_trailing sd near 1", {
+test("zscore: pe_trailing sd near 1 (loose tolerance for small n)", {
+  # Under median/MAD the identity sd(z) == 1 is only asymptotic on normal
+  # data; at n=15 (after financial-row exclusion) sample noise can push
+  # sd(z) to ~1.5. The 500-ticker production cross-section is much tighter.
   s <- sd(zscored$pe_trailing, na.rm = TRUE)
-  abs(s - 1) < 0.2
+  !is.na(s) && s > 0.5 && s < 2.0
 })
 
 test("zscore: financial rows remain NA for gpa",
      all(is.na(zscored$gpa[16:20])))
 
-test("zscore: z-scores bounded to [-3, 3]", {
+test("zscore: z-scores bounded to default clip [-5, 5]", {
   all_vals <- unlist(zscored[, .SD, .SDcols = names(zscored)])
-  all(is.na(all_vals) | (all_vals >= -3 & all_vals <= 3))
+  all(is.na(all_vals) | (all_vals >= -5 & all_vals <= 5))
 })
 
 test("zscore: handles NA sector without error", {
@@ -826,14 +1059,77 @@ test("zscore: handles NA sector without error", {
   is.data.table(z) && nrow(z) == 3
 })
 
+# ---- New robust/winsorization behaviour ----
+
+test("zscore robust: outlier raw value does not blow up other z-scores", {
+  # Under mean/SD, a single raw outlier can inflate SD so that the rest of
+  # the cross-section gets compressed toward 0. Under pre-winsorize + MAD,
+  # the outlier is clipped first and scale stays informative.
+  set.seed(11)
+  dt_out <- data.table(
+    pe_trailing = c(rnorm(49, 20, 5), 1e6),
+    sector = rep("Technology", 50)
+  )
+  z <- zscore_cross_section(dt_out)
+  # Non-outlier tickers should still have a meaningful spread (|z| > 0.5
+  # for at least some of them). Under naive mean/SD this would collapse.
+  sum(abs(z$pe_trailing) > 0.5, na.rm = TRUE) >= 5
+})
+
+test("zscore robust: negative denominator signal preserved", {
+  # pb with negative equity is now computed (negative ratio). That negative
+  # value must make it through to the z-score as a distinctly-negative z.
+  dt <- data.table(
+    pb = c(rep(c(1.5, 2, 2.5, 3), 4), -5),  # last one: distress case
+    sector = rep("Technology", 17)
+  )
+  z <- zscore_cross_section(dt)
+  !is.na(z$pb[17]) && z$pb[17] < -1
+})
+
+test("zscore: clip = NULL removes the [-3, 3] bound", {
+  # With n=100 normal data the clip is inactive anyway; test the contract
+  # rather than the value. Use an indicator designed to produce a z beyond
+  # 3 even under MAD: mostly-constant data with one outlier that survives
+  # winsorization (n=3 -> no clipping happens since the bounds are the data).
+  dt <- data.table(
+    pe_trailing = c(0, 0.1, 100),
+    sector = rep("Technology", 3)
+  )
+  z_clip   <- zscore_cross_section(dt, clip = c(-3, 3))
+  z_unclip <- zscore_cross_section(dt, clip = NULL)
+  # The outlier should be at the clip bound under clip, larger under NULL
+  # (or they may coincide if winsorization pulled the outlier inside 3 MADs;
+  # either way z_unclip must be >= z_clip for the high end).
+  !is.na(z_unclip$pe_trailing[3]) &&
+    z_unclip$pe_trailing[3] >= z_clip$pe_trailing[3] - 1e-10
+})
+
+test("zscore: pre-winsorization capped at [p2.5, p97.5] of input", {
+  # With 100 points where two are extreme, the extremes get clipped to the
+  # empirical p2.5/p97.5. Under median/MAD without clip, the max |z| is
+  # bounded by the winsorization width / MAD. For rnorm(100) that's
+  # well below 3 -- so clip should be inactive.
+  set.seed(3)
+  dt <- data.table(
+    pe_trailing = c(rnorm(98), -50, 50),
+    sector = rep("Technology", 100)
+  )
+  z <- zscore_cross_section(dt, clip = NULL)
+  # The two raw extremes get winsorized to p2.5/p97.5 (~|2|), so z is
+  # bounded well inside [-3, 3] even with clip = NULL.
+  !is.na(max(abs(z$pe_trailing), na.rm = TRUE)) &&
+    max(abs(z$pe_trailing), na.rm = TRUE) < 3
+})
+
 
 # ============================================================================
 # UNIT TESTS: Public API
 # ============================================================================
 message("\n=== Public API ===")
 
-test("get_indicator_names returns 57 names",
-     length(get_indicator_names()) == 57)
+test("get_indicator_names returns 59 names",
+     length(get_indicator_names()) == 59)
 
 test("get_indicator_names has no duplicates",
      !anyDuplicated(get_indicator_names()))
@@ -887,8 +1183,8 @@ result <- compute_ticker_indicators(synth_long, 150, "Technology")
 test("compute_ticker: returns named numeric vector",
      is.numeric(result) && !is.null(names(result)))
 
-test("compute_ticker: correct length (57)",
-     length(result) == 57)
+test("compute_ticker: correct length (59)",
+     length(result) == 59)
 
 test("compute_ticker: pe_trailing = 150/3.8",
      abs(result[["pe_trailing"]] - 150/3.8) < 0.01)
@@ -1111,9 +1407,9 @@ if (length(fund_files) >= 5) {
         all(.INDICATOR_NAMES %in% names(cs$raw))
       })
 
-      test("cross_section_real: z-scores bounded [-3, 3]", {
+      test("cross_section_real: z-scores bounded to default clip [-5, 5]", {
         vals <- unlist(cs$zscored[, .SD, .SDcols = .INDICATOR_NAMES])
-        all(is.na(vals) | (vals >= -3 & vals <= 3))
+        all(is.na(vals) | (vals >= -5 & vals <= 5))
       })
 
       # At least some indicators should be non-NA for most tickers
