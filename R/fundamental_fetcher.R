@@ -537,28 +537,12 @@ parse_companyfacts <- function(facts, ticker, cik) {
 
 
 # =============================================================================
-# 3. dedup_fundamentals()
+# 3. dedup_fundamentals() + pit_dedup()
 # =============================================================================
-#' Deduplicate fundamental observations
-#'
-#' For each (concept, period_end, fiscal_year, fiscal_qtr) combination:
-#' 1. Apply form priority: annual (10-K/10-K/A/20-F/40-F) > quarterly (10-Q/10-Q/A).
-#'    Within a group, amendments share priority with originals so that accession
-#'    sort picks the amendment (later accession number) over the original.
-#' 2. Within same form priority, keep most recent accession number (latest amendment).
-#' 3. Within same form and accession, prefer tag with lower alias rank.
-#' 4. When multiple rows still share the dedup key, prefer the row whose
-#'    period length matches the expected duration for its `fp` label
-#'    (Q1 ~ 3mo, Q2 ~ 6mo YTD, Q3 ~ 9mo YTD, FY/Q4 ~ 12mo). Companyfacts
-#'    JSON often includes prior-period or TTM comparatives under the same
-#'    (concept, period_end, fp) key; the duration-match tie-break keeps
-#'    the current-period value and discards the comparative.
-#'
-#' @param dt data.table from parse_companyfacts().
-#' @return Deduplicated data.table (one row per concept x period).
-dedup_fundamentals <- function(dt) {
 
-  if (is.null(dt) || nrow(dt) == 0) return(dt)
+# Attach the ranking helper columns shared by dedup_fundamentals and
+# pit_dedup: form_priority, tag_rank, duration_match. Mutates a copy.
+.add_dedup_ranks <- function(dt) {
 
   dt <- copy(dt)
 
@@ -579,19 +563,91 @@ dedup_fundamentals <- function(dt) {
   dt[, period_days := as.integer(period_end - period_start)]
   dt[, duration_match := .duration_match_rank(period_days, fiscal_qtr)]
 
+  dt
+}
+
+.RANK_COLS <- c("form_priority", "tag_rank", "period_days", "duration_match")
+
+#' Deduplicate fundamental observations WITHIN each filing (vintage-preserving)
+#'
+#' Keeps one row per (concept, period_end, fiscal_qtr, accession): within a
+#' single filing, resolves tag aliases (lower alias rank wins) and drops
+#' TTM / prior-period comparatives that share the same key (duration-match
+#' tie-break). Rows for the same (concept, period_end, fiscal_qtr) reported
+#' by DIFFERENT filings are all retained, each with its own filed date.
+#'
+#' This preserves reporting vintages: when a later 10-K re-reports last
+#' year's balance sheet as a comparative, both the original row (early filed
+#' date) and the comparative (late filed date) survive. Point-in-time
+#' consumers resolve to a single row per period with pit_dedup(), which
+#' honors filed <= as_of. Without vintages, every cache refresh silently
+#' shifted historical values to the latest re-report and pushed their filed
+#' dates forward, degrading PIT snapshots (see docs/research/
+#' 09_openap_indicator_expansion.md, Phase 0 verification).
+#'
+#' @param dt data.table from parse_companyfacts().
+#' @return data.table, one row per concept x period x filing.
+dedup_fundamentals <- function(dt) {
+
+  if (is.null(dt) || nrow(dt) == 0) return(dt)
+
+  dt <- .add_dedup_ranks(dt)
+
+  # Within a filing there is no accession/form variation, so order by
+  # duration match (drop comparatives/TTM under the same key) then alias rank.
+  setorder(dt, concept, period_end, fiscal_qtr, accession,
+           duration_match, form_priority, tag_rank)
+
+  # Keep first row per (concept, period_end, fiscal_qtr, accession).
+  # fiscal_qtr distinguishes FY from Q4 when period_end is the same.
+  dt <- dt[!duplicated(dt[, .(concept, period_end, fiscal_qtr, accession)])]
+
+  dt[, (.RANK_COLS) := NULL]
+
+  dt
+}
+
+#' Resolve vintages to one row per period, as of a point-in-time date
+#'
+#' For each (concept, period_end, fiscal_qtr) combination:
+#' 1. If as_of is given, drop rows filed after as_of (and rows with NA filed),
+#'    so the view contains only what was public on that date.
+#' 2. Apply form priority: annual (10-K/10-K/A/20-F/40-F) > quarterly (10-Q/10-Q/A).
+#'    Within a group, amendments share priority with originals so that accession
+#'    sort picks the amendment (later accession number) over the original.
+#' 3. Within same form priority, keep most recent accession number (latest
+#'    amendment or re-report available as of the date).
+#' 4. Prefer rows whose period length matches the expected duration for the
+#'    `fp` label, then lower tag alias rank.
+#'
+#' With as_of = NULL this reproduces the pre-vintage cache content exactly
+#' (latest view across all filings) -- the compatible default for consumers
+#' that do not reconstruct history.
+#'
+#' @param dt data.table with vintage rows (dedup_fundamentals output / cache).
+#' @param as_of Date or character. Point-in-time cutoff; NULL = latest view.
+#' @return Deduplicated data.table (one row per concept x period).
+pit_dedup <- function(dt, as_of = NULL) {
+
+  if (is.null(dt) || nrow(dt) == 0) return(dt)
+
+  if (!is.null(as_of)) {
+    d <- as.Date(as_of)
+    dt <- dt[!is.na(filed) & as.Date(filed) <= d]
+    if (nrow(dt) == 0) return(dt)
+  }
+
+  dt <- .add_dedup_ranks(dt)
+
   # Sort: concept + period + fiscal_qtr, duration-match first (so good rows
   # win against TTM/prior-period comparatives), then form priority, accession
   # (desc so amendments beat originals), then tag rank.
   setorder(dt, concept, period_end, fiscal_qtr,
            duration_match, form_priority, -accession, tag_rank)
 
-  # Keep first row per (concept, period_end, fiscal_qtr).
-  # fiscal_qtr distinguishes FY from Q4 when period_end is the same.
   dt <- dt[!duplicated(dt[, .(concept, period_end, fiscal_qtr)])]
 
-  # Clean up helper columns
-  dt[, c("form_priority", "tag_rank",
-         "period_days", "duration_match") := NULL]
+  dt[, (.RANK_COLS) := NULL]
 
   dt
 }
@@ -707,8 +763,8 @@ fetch_and_cache_ticker <- function(ticker, cik,
     "has concept column"   = function(x) "concept" %in% names(x),
     "has filed column"     = function(x) "filed" %in% names(x),
     "has value column"     = function(x) "value" %in% names(x),
-    "no duplicate concept+period+qtr" = function(x)
-      !anyDuplicated(x[, .(concept, period_end, fiscal_qtr)])
+    "no duplicate concept+period+qtr+accession" = function(x)
+      !anyDuplicated(x[, .(concept, period_end, fiscal_qtr, accession)])
   ))
 
   # Cache
@@ -1137,33 +1193,49 @@ validate_fundamentals_build <- function(
 # =============================================================================
 #' Load cached fundamentals for a single ticker
 #'
+#' The cache stores one row per (concept, period, filing) so reporting
+#' vintages survive re-fetches. By default this reader collapses vintages to
+#' the latest view (one row per concept x period), which matches the
+#' pre-vintage cache shape. Pass as_of for a point-in-time view, or
+#' vintages = TRUE for the raw vintage table.
+#'
 #' @param ticker Character. Ticker symbol.
 #' @param cik Character. 10-digit CIK (optional if only one match in cache).
 #' @param cache_dir Character. Cache directory.
+#' @param as_of Date or character. Collapse vintages to what was public on
+#'   this date (rows filed after as_of are dropped). NULL = latest view.
+#' @param vintages Logical. TRUE returns the raw vintage table (one row per
+#'   concept x period x filing); as_of is ignored.
 #' @return data.table or NULL if not cached.
 get_fundamentals <- function(ticker, cik = NULL,
-                             cache_dir = "cache/fundamentals") {
+                             cache_dir = "cache/fundamentals",
+                             as_of = NULL, vintages = FALSE) {
+
+  dt <- NULL
 
   if (!is.null(cik)) {
     path <- file.path(cache_dir, sprintf("%s_%s.parquet", cik, ticker))
     if (file.exists(path)) {
-      return(as.data.table(arrow::read_parquet(path)))
+      dt <- as.data.table(arrow::read_parquet(path))
     }
-    return(NULL)
+  } else {
+    # Search for matching file
+    pattern <- sprintf("*_%s.parquet", ticker)
+    files <- list.files(cache_dir, pattern = glob2rx(pattern), full.names = TRUE)
+
+    if (length(files) > 1) {
+      warning(sprintf("get_fundamentals: multiple files for %s, using most recent",
+                      ticker), call. = FALSE)
+      files <- files[order(file.mtime(files), decreasing = TRUE)]
+    }
+    if (length(files) >= 1) {
+      dt <- as.data.table(arrow::read_parquet(files[1]))
+    }
   }
 
-  # Search for matching file
-  pattern <- sprintf("*_%s.parquet", ticker)
-  files <- list.files(cache_dir, pattern = glob2rx(pattern), full.names = TRUE)
-
-  if (length(files) == 0) return(NULL)
-  if (length(files) > 1) {
-    warning(sprintf("get_fundamentals: multiple files for %s, using most recent",
-                    ticker), call. = FALSE)
-    files <- files[order(file.mtime(files), decreasing = TRUE)]
-  }
-
-  as.data.table(arrow::read_parquet(files[1]))
+  if (is.null(dt)) return(NULL)
+  if (vintages) return(dt)
+  pit_dedup(dt, as_of = as_of)
 }
 
 

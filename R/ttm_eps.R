@@ -68,9 +68,14 @@ build_ttm_eps_series <- function(fund_dt, splits = NULL) {
   e[, pt := fifelse(dur <= 135, "Q1",
              fifelse(dur <= 225, "Q2",
               fifelse(dur <= 315, "Q3", "FY")))]
-  # dedup (period_start, period_type): prefer non-8-K, then latest filed
+  # dedup (period_start, period_type): prefer non-8-K, then EARLIEST filed.
+  # The vintage-preserving cache keeps every filing that reported a period;
+  # the original report (earliest filed) is the point-in-time correct pick --
+  # later rows are comparatives whose filed date would delay availability.
+  # Split basis stays consistent because .split_factor keys off each row's
+  # own filed date. (On old collapsed caches this is a no-op.)
   e[, is8k := as.integer(form == "8-K")]
-  setorder(e, ps, pt, is8k, -fd)
+  setorder(e, ps, pt, is8k, fd)
   e <- e[, .SD[1], by = .(ps, pt)]
 
   starts <- sort(unique(e$ps))

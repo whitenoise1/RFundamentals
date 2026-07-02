@@ -423,9 +423,9 @@ assemble_snapshot <- function(snapshot_date,
       message(sprintf("  computing %d/%d: %s", i, n_total, tk))
     }
 
-    # Load fundamentals
+    # Load raw vintages (one row per concept x period x filing)
     fund_dt <- tryCatch(
-      get_fundamentals(tk, cik, cache_dir = fund_dir),
+      get_fundamentals(tk, cik, cache_dir = fund_dir, vintages = TRUE),
       error = function(e) NULL
     )
     if (is.null(fund_dt) || nrow(fund_dt) == 0) {
@@ -433,8 +433,10 @@ assemble_snapshot <- function(snapshot_date,
       next
     }
 
-    # Point-in-time filter: only data filed on or before snapshot date
-    fund_dt <- fund_dt[!is.na(filed) & as.Date(filed) <= snapshot_date]
+    # Point-in-time resolution: drop rows filed after the snapshot date and
+    # collapse vintages to the row that was authoritative on that date
+    # (original filing until an amendment/re-report becomes public).
+    fund_dt <- pit_dedup(fund_dt, as_of = snapshot_date)
     if (nrow(fund_dt) == 0) {
       n_no_filing <- n_no_filing + 1L
       next

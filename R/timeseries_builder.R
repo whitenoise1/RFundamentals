@@ -223,31 +223,47 @@ build_ticker_fundamentals <- function(ticker, cik, sector,
     return(as.data.table(arrow::read_parquet(out_path)))
   }
 
-  # Load raw XBRL long-format data
-  fund_dt <- tryCatch(
-    get_fundamentals(ticker, cik, cache_dir = fund_dir),
+  # Load raw XBRL vintages (one row per concept x period x filing), so each
+  # fiscal year can be computed from the data that was public when its own
+  # annual report was filed. Old collapsed caches degrade gracefully: the
+  # vintage table then has one row per period and the as-of resolution is a
+  # no-op.
+  fund_v <- tryCatch(
+    get_fundamentals(ticker, cik, cache_dir = fund_dir, vintages = TRUE),
     error = function(e) NULL
   )
-  if (is.null(fund_dt) || nrow(fund_dt) == 0) return(NULL)
+  if (is.null(fund_v) || nrow(fund_v) == 0) return(NULL)
 
-  # Pivot to wide format for stub extraction
-  wide <- pivot_fundamentals(fund_dt)
-  if (is.null(wide)) return(NULL)
-  wide <- .derive_quantities(wide)
+  # Enumerate fiscal years from the latest view
+  fy_all <- pit_dedup(fund_v)[period_type == "FY"]
+  if (nrow(fy_all) == 0) return(NULL)
 
-  fy_rows <- wide[period_type == "FY"]
-  if (nrow(fy_rows) == 0) return(NULL)
-
-  fiscal_years <- sort(unique(fy_rows$fiscal_year))
+  fiscal_years <- sort(unique(fy_all$fiscal_year))
+  annual_forms <- c("10-K", "10-K/A", "20-F", "20-F/A", "40-F", "40-F/A")
 
   results <- vector("list", length(fiscal_years))
   n_ok <- 0L
 
   for (fy in fiscal_years) {
-    curr <- fy_rows[fiscal_year == fy]
+    # Original availability date: earliest annual-form filing that reports
+    # this fiscal year. Amendments and later re-reports come afterwards and
+    # must not push the stamp forward.
+    fy_grp <- fund_v[fiscal_year == fy & period_type == "FY" & !is.na(filed)]
+    if (nrow(fy_grp) == 0) next
+    ann <- fy_grp[form %in% annual_forms]
+    filed_date <- as.Date(min(if (nrow(ann)) ann$filed else fy_grp$filed))
+
+    # Point-in-time view as of that filing date; prior years resolve to the
+    # vintages that were public then.
+    fund_asof <- pit_dedup(fund_v, as_of = filed_date)
+
+    wide <- pivot_fundamentals(fund_asof)
+    if (is.null(wide)) next
+    wide <- .derive_quantities(wide)
+
+    curr <- wide[period_type == "FY" & fiscal_year == fy]
     if (nrow(curr) == 0) next
 
-    filed_date <- as.Date(max(curr$filed, na.rm = TRUE))
     period_end <- as.Date(max(curr$period_end, na.rm = TRUE))
 
     # Require minimum data density
@@ -258,7 +274,7 @@ build_ticker_fundamentals <- function(ticker, cik, sector,
 
     # Compute indicators with price=NA (price-sensitive ones become NA)
     indicators <- tryCatch(
-      compute_ticker_indicators(fund_dt, price_on_filed = NA_real_,
+      compute_ticker_indicators(fund_asof, price_on_filed = NA_real_,
                                 sector = sector, target_fy = fy),
       error = function(e) NULL
     )
@@ -267,7 +283,7 @@ build_ticker_fundamentals <- function(ticker, cik, sector,
     # Extract fundamental-only indicator values
     fund_only <- as.list(indicators[.FUNDAMENTAL_INDICATORS])
 
-    # Extract accounting stubs from pivoted data
+    # Extract accounting stubs from the as-of pivoted data
     stubs <- .extract_stubs(wide, fy)
     if (is.null(stubs)) next
 

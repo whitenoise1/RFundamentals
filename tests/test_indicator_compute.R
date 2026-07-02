@@ -965,8 +965,9 @@ test("dedup: single row with mismatched duration still retained", {
 })
 
 test("dedup: instant tag (NA period_start) unaffected by tie-break", {
-  # Balance-sheet tags have NA period_start. Ordering falls through to
-  # the existing accession chain; later accession (amendment) wins.
+  # Balance-sheet tags have NA period_start. dedup_fundamentals now keeps
+  # one row per accession (vintage-preserving); the cross-accession collapse
+  # (later accession = amendment wins) happens in pit_dedup.
   dt <- data.table(
     ticker = "T", cik = "0", concept = "total_assets", tag = "Assets",
     value = c(100, 101),
@@ -977,7 +978,8 @@ test("dedup: instant tag (NA period_start) unaffected by tie-break", {
     fiscal_year = c(2024L, 2024L), fiscal_qtr = c("Q2", "Q2"), unit = "USD"
   )
   out <- dedup_fundamentals(dt)
-  nrow(out) == 1 && out$value == 101
+  resolved <- pit_dedup(out)
+  nrow(out) == 2 && nrow(resolved) == 1 && resolved$value == 101
 })
 
 test("dedup: .duration_match_rank returns 0 for NA inputs", {

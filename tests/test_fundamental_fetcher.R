@@ -322,15 +322,17 @@ deduped <- dedup_fundamentals(dedup_input)
 
 test("dedup returns data.table",          is.data.table(deduped))
 test("dedup reduces row count",           nrow(deduped) < nrow(dedup_input))
-test("dedup: one row per concept+period+qtr",
-     !anyDuplicated(deduped[, .(concept, period_end, fiscal_qtr)]))
+test("dedup: one row per concept+period+qtr+accession",
+     !anyDuplicated(deduped[, .(concept, period_end, fiscal_qtr, accession)]))
 
-# 10-K/A should beat 10-K: same priority, but 10-K/A has later accession
-test("dedup prefers 10-K/A over 10-K (amendment wins)",
-     deduped[concept == "revenue", form] == "10-K/A")
+# Vintage preservation: original 10-K and 10-K/A amendment both survive,
+# each with its own filed date
+test("dedup keeps both 10-K and 10-K/A vintages",
+     nrow(deduped[concept == "revenue"]) == 2 &&
+       setequal(deduped[concept == "revenue", form], c("10-K", "10-K/A")))
 
-test("dedup picks amendment value",
-     deduped[concept == "revenue", value] == 1010000)
+test("dedup collapses alias duplicates within one accession",
+     deduped[concept == "revenue" & form == "10-K", tag] == "Revenues")
 
 test("dedup preserves total_assets",
      nrow(deduped[concept == "total_assets"]) == 1)
@@ -340,6 +342,37 @@ test("dedup handles NULL input",
 
 test("dedup handles empty input",
      nrow(dedup_fundamentals(data.table())) == 0)
+
+# -- pit_dedup(): as-of resolution over vintages --
+message("\n=== pit_dedup() ===")
+
+resolved <- pit_dedup(deduped)
+
+test("pit_dedup: one row per concept+period+qtr",
+     !anyDuplicated(resolved[, .(concept, period_end, fiscal_qtr)]))
+
+# Latest view: 10-K/A (later accession) beats the original 10-K
+test("pit_dedup latest view prefers amendment",
+     resolved[concept == "revenue", form] == "10-K/A")
+
+test("pit_dedup latest view picks amendment value",
+     resolved[concept == "revenue", value] == 1010000)
+
+# As-of BEFORE the amendment (filed 2024-05-01): the original 10-K row is
+# authoritative -- this is the vintage-leak regression test
+asof_orig <- pit_dedup(deduped, as_of = "2024-03-01")
+test("pit_dedup as-of pre-amendment returns original 10-K row",
+     asof_orig[concept == "revenue", form] == "10-K" &&
+       asof_orig[concept == "revenue", value] == 1000000)
+
+test("pit_dedup as-of excludes rows filed after the date",
+     all(asof_orig$filed <= as.Date("2024-03-01")))
+
+# As-of before ANY filing: empty view
+test("pit_dedup as-of pre-history returns zero rows",
+     nrow(pit_dedup(deduped, as_of = "2023-06-30")) == 0)
+
+test("pit_dedup handles NULL input", is.null(pit_dedup(NULL)))
 
 # Test FY vs Q4 same period_end: both must survive dedup
 fy_q4_input <- data.table(
@@ -384,8 +417,16 @@ annual_vs_quarterly <- data.table(
 )
 
 ann_q_deduped <- dedup_fundamentals(annual_vs_quarterly)
-test("dedup: annual form beats quarterly for same period",
-     nrow(ann_q_deduped) == 1 && ann_q_deduped$form == "10-K")
+test("dedup keeps annual and quarterly vintages for same period",
+     nrow(ann_q_deduped) == 2)
+test("pit_dedup: annual form beats quarterly for same period", {
+  r <- pit_dedup(ann_q_deduped)
+  nrow(r) == 1 && r$form == "10-K"
+})
+test("pit_dedup as-of before 10-K falls back to the 10-Q row", {
+  r <- pit_dedup(ann_q_deduped, as_of = "2024-02-01")
+  nrow(r) == 1 && r$form == "10-Q"
+})
 
 # Test tag rank: within same form and accession, preferred alias wins
 tag_rank_input <- data.table(
@@ -496,8 +537,10 @@ if (!is.null(aapl_facts)) {
 
   test("AAPL dedup reduces rows",
        nrow(aapl_deduped) < nrow(aapl_parsed))
-  test("AAPL dedup: no dups per concept+period+qtr",
-       !anyDuplicated(aapl_deduped[, .(concept, period_end, fiscal_qtr)]))
+  test("AAPL dedup: no dups per concept+period+qtr+accession",
+       !anyDuplicated(aapl_deduped[, .(concept, period_end, fiscal_qtr, accession)]))
+  test("AAPL pit_dedup latest view: no dups per concept+period+qtr",
+       !anyDuplicated(pit_dedup(aapl_deduped)[, .(concept, period_end, fiscal_qtr)]))
 
   # Classify
   aapl_classified <- classify_period(aapl_deduped)
@@ -709,16 +752,23 @@ if (dir.exists(cache_dir)) {
     }
     test("all cached files have correct schema", schema_ok)
 
-    # Gate 3: No duplicate (concept, period_end, fiscal_qtr) in any file
+    # Gate 3: No duplicate (concept, period_end, fiscal_qtr, accession) in any
+    # file (vintage cache), and the resolved latest view is unique per period
     dedup_ok <- TRUE
+    resolve_ok <- TRUE
     for (pf in parquet_files) {
       dt <- as.data.table(arrow::read_parquet(pf))
-      if (anyDuplicated(dt[, .(concept, period_end, fiscal_qtr)])) {
+      if (anyDuplicated(dt[, .(concept, period_end, fiscal_qtr, accession)])) {
         dedup_ok <- FALSE
         message(sprintf("    Dedup violation: %s", basename(pf)))
       }
+      if (anyDuplicated(pit_dedup(dt)[, .(concept, period_end, fiscal_qtr)])) {
+        resolve_ok <- FALSE
+        message(sprintf("    pit_dedup violation: %s", basename(pf)))
+      }
     }
     test("no dedup violations in cached files", dedup_ok)
+    test("pit_dedup latest view unique per period in cached files", resolve_ok)
 
     # Gate 4: Key concepts present across most tickers
     concept_counts <- list()
@@ -957,11 +1007,11 @@ if (dir.exists(cache_dir_d)) {
     }
     test("full build: schema correct (50-file sample)", schema_ok_d)
 
-    # Gate D3: No dedup violations in sample
+    # Gate D3: No dedup violations in sample (vintage key incl. accession)
     dedup_ok_d <- TRUE
     for (pf in sample_files) {
       dt <- as.data.table(arrow::read_parquet(pf))
-      if (anyDuplicated(dt[, .(concept, period_end, fiscal_qtr)])) {
+      if (anyDuplicated(dt[, .(concept, period_end, fiscal_qtr, accession)])) {
         dedup_ok_d <- FALSE
         message(sprintf("    Dedup violation: %s", basename(pf)))
       }

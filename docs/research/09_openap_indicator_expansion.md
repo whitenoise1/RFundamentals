@@ -150,6 +150,40 @@ never cached and its fundamentals are unavailable from this API.
 Gate status: fetcher tests 148/148, indicator compute 182/182, integration
 A-F 54/54. Phase 0 complete; Wave 1 unblocked.
 
+### PIT dedup vintage fix (2026-07-01, post-Phase 0)
+
+E2E verification of Phase 0 exposed a pre-existing design flaw: dedup kept
+one row per (concept, period_end, fiscal_qtr) with the latest accession
+winning, so a later filing that re-reports a period (comparative balance
+sheet, amendment) replaced the original row and pushed its filed date
+forward. Historical PIT snapshots then lost the observation entirely
+(observed: ORCL FY2026 10-K wiped FY2025 equity from the 2026-03-31
+snapshot; LIN Q1-2025 CFO silently lost to a post-snapshot comparative).
+
+Fix: the cache now preserves reporting vintages -- dedup_fundamentals keys
+on (concept, period_end, fiscal_qtr, accession), resolving tag aliases and
+duration mismatches only within each filing. A new resolver pit_dedup(dt,
+as_of) collapses vintages to one row per period using only rows filed on or
+before as_of (NULL = latest view, the old cache shape). Consumers:
+- get_fundamentals() gained as_of / vintages arguments; default output
+  shape is unchanged (latest view).
+- assemble_snapshot resolves each ticker via pit_dedup(as_of = snapshot
+  date) -- prior-year rows retain their original fiscal-year labels, which
+  also repairs lagged lookups needed by Wave 1.
+- build_ticker_fundamentals stamps each fiscal year at the earliest
+  annual-form filing date and computes indicators from the as-of view.
+- build_ttm_eps_series picks the earliest (original) filing per quarter.
+
+Cache impact: vintage rows increase files ~1.5-1.9x (prototype). Old
+collapsed caches degrade gracefully (pit_dedup is a no-op on them) but
+cannot reconstruct history until re-fetched. Full-universe re-fetch:
+build_fundamentals(force_refresh = TRUE, chunk_size = 50L).
+
+E2E: regenerated 2026-03-31 snapshot matches the pre-leak baseline
+23,268/23,269 cells; ORCL's four lost indicators restored exactly; the one
+differing cell is LIN fcf_stability where the fix RECOVERED a quarter of
+CFO history the collapsed cache had lost.
+
 ## 4. New indicators, prioritized by reproduced t-stat
 
 Formulas below are stated in Compustat-style terms mapped to our concepts.

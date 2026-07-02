@@ -95,11 +95,24 @@ source("R/timeseries_builder.R")
 #   Columns: concept, value, period_end, filed, form, fiscal_year, period_type.
 #   This is the raw material before any indicator computation.
 #
+# The cache stores reporting VINTAGES (one row per concept x period x filing),
+# so re-reported periods keep their original filed dates. By default the
+# reader collapses vintages to the latest view (one row per period).
+#
 # Arguments:
 #   ticker     Character. Ticker symbol. Required.
 #   cik        Character or NULL. 10-digit CIK. Optional (auto-detected).
 #   cache_dir  Character. Fundamentals cache directory.
 #              Default "cache/fundamentals".
+#   as_of      Date or NULL. Point-in-time view: rows filed after this date
+#              are dropped before collapsing, so each period resolves to the
+#              value that was public on that date. NULL (default) = latest.
+#   vintages   Logical. TRUE returns the raw vintage table. Default FALSE.
+#
+# Examples:
+#   get_fundamentals("ORCL")                        # latest view
+#   get_fundamentals("ORCL", as_of = "2026-03-31")  # as known on that date
+#   get_fundamentals("ORCL", vintages = TRUE)       # every filing vintage
 
 
 # --- list_timeseries_tickers() ----------------------------------------------
