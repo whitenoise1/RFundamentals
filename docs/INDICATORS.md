@@ -581,6 +581,32 @@ resolution. This handles variation in how companies report the same item.
 | capex | PaymentsToAcquirePropertyPlantAndEquipment, PaymentsToAcquireProductiveAssets |
 | buybacks | PaymentsForRepurchaseOfCommonStock, PaymentsForRepurchaseOfEquity |
 | dividends_paid | PaymentsOfDividendsCommonStock, PaymentsOfDividends, Dividends |
+| public_float | EntityPublicFloat (dei namespace) |
+
+### Phase 0 expansion concepts (fetched, not yet consumed)
+
+Added for the OpenAP indicator expansion
+(docs/research/09_openap_indicator_expansion.md). These concepts are present
+in `cache/fundamentals/` parquet files; the indicators that consume them land
+in Waves 1-5.
+
+| Concept | XBRL tags (priority order) | Notes |
+|---------|---------------------------|-------|
+| income_tax_expense | IncomeTaxExpenseBenefit | |
+| pretax_income | IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest, IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments | Domestic-only tag deliberately excluded (understates multinationals). Fallback: tax + net income |
+| advertising | AdvertisingExpense, MarketingAndAdvertisingExpense | Sparse (~55% of tickers); NA-heavy expected |
+| ppe_net | PropertyPlantAndEquipmentNet, PropertyPlantAndEquipmentAndFinanceLeaseRightOfUseAssetAfterAccumulatedDepreciationAndAmortization | Second tag includes ROU assets post-ASC 842 |
+| ppe_gross | PropertyPlantAndEquipmentGross, PropertyPlantAndEquipmentAndFinanceLeaseRightOfUseAssetBeforeAccumulatedDepreciationAndAmortization | |
+| st_investments | ShortTermInvestments, MarketableSecuritiesCurrent, AvailableForSaleSecuritiesCurrent | Missing usually means none held; treat as 0 |
+| lt_investments | LongTermInvestments, MarketableSecuritiesNoncurrent, AvailableForSaleSecuritiesNoncurrent, EquityMethodInvestments | Aggregate ranked above components |
+| retained_earnings | RetainedEarningsAccumulatedDeficit | |
+| preferred_stock | PreferredStockValue, PreferredStockValueOutstanding | Missing means none outstanding; treat as 0 |
+| goodwill | Goodwill | Kept separate from intangibles to allow summing |
+| intangibles | IntangibleAssetsNetExcludingGoodwill, FiniteLivedIntangibleAssetsNet | Ex-goodwill only; IncludingGoodwill aggregate excluded |
+| minority_interest | MinorityInterest | Missing means no NCI; treat as 0 |
+| debt_issuance | ProceedsFromIssuanceOfLongTermDebt, ProceedsFromIssuanceOfSeniorLongTermDebt, ProceedsFromIssuanceOfLongTermDebtAndCapitalSecuritiesNet, ProceedsFromIssuanceOfDebt, ProceedsFromDebtNetOfIssuanceCosts, ProceedsFromDebtMaturingInMoreThanThreeMonths | Long-term focus; short-term via short_term_debt delta. YTD-cumulated in quarterly filings (like operating_cashflow) |
+| debt_repayment | RepaymentsOfLongTermDebt, RepaymentsOfSeniorDebt, RepaymentsOfLongTermDebtAndCapitalSecurities, RepaymentsOfDebtAndCapitalLeaseObligations, RepaymentsOfDebt, RepaymentsOfDebtMaturingInMoreThanThreeMonths | Same YTD caveat |
+| equity_issuance | ProceedsFromIssuanceOfCommonStock, ProceedsFromIssuanceOrSaleOfEquity, ProceedsFromIssuanceOfSharesUnderIncentiveAndShareBasedCompensationPlansIncludingStockOptions, ProceedsFromStockOptionsExercised | One line wins per period; treat as lower bound on total issuance. Same YTD caveat |
 
 ---
 

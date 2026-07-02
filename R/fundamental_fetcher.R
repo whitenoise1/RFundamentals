@@ -146,6 +146,29 @@ suppressPackageStartupMessages({
     "Depreciation"
   ),
 
+  # Phase 0 OpenAP expansion (docs/research/09_openap_indicator_expansion.md):
+  # tax concepts for Tax, ChTax, ETR (Lev-Nissim 2004, Thomas-Zhang 2011)
+  income_tax_expense = c(
+    "IncomeTaxExpenseBenefit"
+  ),
+
+  # Consolidated tags only. The ...BeforeIncomeTaxesDomestic tag is deliberately
+  # excluded: it is the domestic-only portion and won dedup for multinationals
+  # (PG 2010-2019) when tested, silently understating pretax income. Firms
+  # lacking a consolidated tag get NA; downstream may fall back to
+  # income_tax_expense + net_income.
+  pretax_income = c(
+    "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
+    "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments"
+  ),
+
+  # Sparsely tagged (often text-only disclosure); coverage decides whether
+  # GrAdExp / Mohanram component 8 are buildable. NA-heavy is expected.
+  advertising = c(
+    "AdvertisingExpense",
+    "MarketingAndAdvertisingExpense"
+  ),
+
   # --- Balance Sheet ---
   total_assets = c(
     "Assets"
@@ -230,6 +253,61 @@ suppressPackageStartupMessages({
     "PrepaidExpenseCurrent"
   ),
 
+  # Phase 0 OpenAP expansion: balance-sheet concepts for the change family
+  # (Richardson 2005, Hirshleifer 2004, Soliman 2008) and level ratios
+  # (tang, ZScore, Penman net debt).
+  ppe_net = c(
+    "PropertyPlantAndEquipmentNet",
+    "PropertyPlantAndEquipmentAndFinanceLeaseRightOfUseAssetAfterAccumulatedDepreciationAndAmortization"
+  ),
+
+  ppe_gross = c(
+    "PropertyPlantAndEquipmentGross",
+    "PropertyPlantAndEquipmentAndFinanceLeaseRightOfUseAssetBeforeAccumulatedDepreciationAndAmortization"
+  ),
+
+  # Financial assets split (FNA in Richardson decomposition). LongTermInvestments
+  # is the aggregate; EquityMethodInvestments is a component listed last so the
+  # aggregate wins when both are reported.
+  st_investments = c(
+    "ShortTermInvestments",
+    "MarketableSecuritiesCurrent",
+    "AvailableForSaleSecuritiesCurrent"
+  ),
+
+  lt_investments = c(
+    "LongTermInvestments",
+    "MarketableSecuritiesNoncurrent",
+    "AvailableForSaleSecuritiesNoncurrent",
+    "EquityMethodInvestments"
+  ),
+
+  retained_earnings = c(
+    "RetainedEarningsAccumulatedDeficit"
+  ),
+
+  # Near-zero for most S&P 500 industrials; downstream treats missing as 0.
+  preferred_stock = c(
+    "PreferredStockValue",
+    "PreferredStockValueOutstanding"
+  ),
+
+  # Goodwill and ex-goodwill intangibles kept separate so they can be summed
+  # without double counting. The IncludingGoodwill aggregate tag is deliberately
+  # excluded from both.
+  goodwill = c(
+    "Goodwill"
+  ),
+
+  intangibles = c(
+    "IntangibleAssetsNetExcludingGoodwill",
+    "FiniteLivedIntangibleAssetsNet"
+  ),
+
+  minority_interest = c(
+    "MinorityInterest"
+  ),
+
   # --- Cash Flow Statement ---
   operating_cashflow = c(
     "NetCashProvidedByUsedInOperatingActivities",
@@ -255,6 +333,42 @@ suppressPackageStartupMessages({
     "PaymentsOfDividendsCommonStock",
     "PaymentsOfDividends",
     "Dividends"
+  ),
+
+  # Phase 0 OpenAP expansion: financing flows for NetDebtFinance,
+  # NetEquityFinance, XFIN, NetPayoutYield (Bradshaw 2006, Boudoukh 2007).
+  # Long-term only by design: first-alias-wins dedup cannot sum LT and ST
+  # lines, so the short-term component comes from the short_term_debt
+  # balance-sheet delta instead (Bradshaw's own construction).
+  debt_issuance = c(
+    "ProceedsFromIssuanceOfLongTermDebt",
+    "ProceedsFromIssuanceOfSeniorLongTermDebt",
+    "ProceedsFromIssuanceOfLongTermDebtAndCapitalSecuritiesNet",
+    # Generic / firm-specific styles found in prototype (KO, GOOGL, MSFT, CAT).
+    # MaturingInMoreThanThreeMonths includes some short-term paper; acceptable
+    # proxy since the short-term component is also captured via the
+    # short_term_debt balance-sheet delta.
+    "ProceedsFromIssuanceOfDebt",
+    "ProceedsFromDebtNetOfIssuanceCosts",
+    "ProceedsFromDebtMaturingInMoreThanThreeMonths"
+  ),
+
+  debt_repayment = c(
+    "RepaymentsOfLongTermDebt",
+    "RepaymentsOfSeniorDebt",
+    "RepaymentsOfLongTermDebtAndCapitalSecurities",
+    "RepaymentsOfDebtAndCapitalLeaseObligations",
+    "RepaymentsOfDebt",
+    "RepaymentsOfDebtMaturingInMoreThanThreeMonths"
+  ),
+
+  # SSTK analog. Option-plan proceeds tag listed last: it is the common line
+  # for mature firms that issue shares only through compensation plans.
+  equity_issuance = c(
+    "ProceedsFromIssuanceOfCommonStock",
+    "ProceedsFromIssuanceOrSaleOfEquity",
+    "ProceedsFromIssuanceOfSharesUnderIncentiveAndShareBasedCompensationPlansIncludingStockOptions",
+    "ProceedsFromStockOptionsExercised"
   )
 )
 

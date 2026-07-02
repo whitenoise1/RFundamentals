@@ -174,7 +174,7 @@ cache/                     (generated, not in repo)
 
 | Source | What | Access |
 |--------|------|--------|
-| SEC EDGAR | XBRL financial statements (28 tags, 10-K/10-Q) | `data.sec.gov/api/xbrl/companyfacts/` (free, rate-limited) |
+| SEC EDGAR | XBRL financial statements (45 concepts / 101 tag aliases, 10-K/10-Q) | `data.sec.gov/api/xbrl/companyfacts/` (free, rate-limited) |
 | Yahoo Finance | Daily OHLCV prices | `quantmod::getSymbols()` (free) |
 | Finviz | Sector/industry classification | Web scrape with CSV fallback |
 

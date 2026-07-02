@@ -82,6 +82,49 @@ test("annual forms beat quarterly forms",
 test("20-F shares annual priority with 10-K",
      .FORM_PRIORITY[["20-F"]] == .FORM_PRIORITY[["10-K"]])
 
+# -- Phase 0 OpenAP expansion concepts (docs/research/09) --
+message("\n=== Phase 0 Expansion Concepts ===")
+
+.phase0_concepts <- c(
+  "income_tax_expense", "pretax_income", "advertising",
+  "ppe_net", "ppe_gross", "st_investments", "lt_investments",
+  "retained_earnings", "preferred_stock", "goodwill", "intangibles",
+  "minority_interest", "debt_issuance", "debt_repayment", "equity_issuance"
+)
+
+test("all 15 Phase 0 concepts defined",
+     all(.phase0_concepts %in% names(.TAG_ALIASES)))
+
+test("45 canonical concepts defined",
+     length(.TAG_ALIASES) == 45)
+
+test("pretax_income excludes domestic-only tag",
+     !"IncomeLossFromContinuingOperationsBeforeIncomeTaxesDomestic" %in%
+       .TAG_ALIASES[["pretax_income"]])
+
+test("intangibles excludes IncludingGoodwill aggregate",
+     !"IntangibleAssetsNetIncludingGoodwill" %in%
+       unlist(.TAG_ALIASES, use.names = FALSE))
+
+test("lt_investments prefers aggregate over equity-method component", {
+  al <- .TAG_ALIASES[["lt_investments"]]
+  match("LongTermInvestments", al) < match("EquityMethodInvestments", al)
+})
+
+test("debt_issuance covers generic proceeds styles",
+     all(c("ProceedsFromIssuanceOfLongTermDebt", "ProceedsFromIssuanceOfDebt",
+           "ProceedsFromDebtMaturingInMoreThanThreeMonths") %in%
+           .TAG_ALIASES[["debt_issuance"]]))
+
+test("equity_issuance ranks common stock proceeds first",
+     .TAG_ALIASES[["equity_issuance"]][1] == "ProceedsFromIssuanceOfCommonStock")
+
+test("reverse lookup: RetainedEarningsAccumulatedDeficit -> retained_earnings",
+     .TAG_TO_CONCEPT[["RetainedEarningsAccumulatedDeficit"]] == "retained_earnings")
+
+test("reverse lookup: PropertyPlantAndEquipmentNet -> ppe_net",
+     .TAG_TO_CONCEPT[["PropertyPlantAndEquipmentNet"]] == "ppe_net")
+
 
 # ============================================================================
 # UNIT TESTS: parse_companyfacts() with synthetic data
@@ -126,6 +169,25 @@ message("\n=== parse_companyfacts() ===")
             )
           )
         ),
+        # Phase 0 concepts: instant (balance sheet) and duration (cash flow)
+        RetainedEarningsAccumulatedDeficit = list(
+          units = list(
+            USD = list(
+              list(val = 2000000, end = "2023-12-31",
+                   filed = "2024-02-15", form = "10-K", accn = "0001-24-000001",
+                   fy = 2023L, fp = "FY")
+            )
+          )
+        ),
+        ProceedsFromIssuanceOfLongTermDebt = list(
+          units = list(
+            USD = list(
+              list(val = 300000, end = "2023-12-31", start = "2023-01-01",
+                   filed = "2024-02-15", form = "10-K", accn = "0001-24-000001",
+                   fy = 2023L, fp = "FY")
+            )
+          )
+        ),
         # Tag not in our target list -- should be skipped
         SomeObscureTag = list(
           units = list(
@@ -164,6 +226,15 @@ test("parse found total_assets rows",    "total_assets" %in% parsed$concept)
 test("parse found net_income rows",      "net_income" %in% parsed$concept)
 test("parse found shares_outstanding",   "shares_outstanding" %in% parsed$concept)
 test("parse skipped SomeObscureTag",     !("SomeObscureTag" %in% parsed$tag))
+
+test("parse found retained_earnings (Phase 0 instant)",
+     "retained_earnings" %in% parsed$concept)
+test("parse found debt_issuance (Phase 0 duration)",
+     "debt_issuance" %in% parsed$concept)
+test("retained_earnings has NA period_start (instant)",
+     is.na(parsed[concept == "retained_earnings", period_start][1]))
+test("debt_issuance value correct",
+     parsed[concept == "debt_issuance", value][1] == 300000)
 
 test("revenue FY value correct",
      parsed[concept == "revenue" & fiscal_qtr == "FY", value] == 1000000)
