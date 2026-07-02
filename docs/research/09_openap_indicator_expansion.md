@@ -184,6 +184,33 @@ E2E: regenerated 2026-03-31 snapshot matches the pre-leak baseline
 differing cell is LIN fcf_stability where the fix RECOVERED a quarter of
 CFO history the collapsed cache had lost.
 
+### Pivot label-group fix (2026-07-02, follow-up)
+
+Verifying the rebuilt timeseries layer exposed a second, longstanding bug
+in pivot_fundamentals: within a (fiscal_year, period_type, concept) group
+it kept the latest-FILED row, but a 10-K reports prior-year comparatives
+under the SAME fiscal_year label and the SAME filed date as the current
+period, so the survivor fell to parse order -- which in companyfacts JSON
+is chronological, i.e. the OLDEST comparative. Wide rows could also mix
+periods across concepts. Consequence: snapshots systematically carried
+2-3-year-stale fundamentals (old 2026-03-31 snapshot: AAPL revenue was
+FY2023's 383.3B, MSFT revenue was FY2022's 211.9B, ORCL fy2025 row was a
+chimera of FY2023 equity/revenue/income). This predates the vintage fix;
+old and new snapshots agreed because both shared it.
+
+Fix: order by -period_end then -filed inside the group -- the current
+period is always the group's max period_end; filed still breaks
+original-vs-amendment ties for the same period. Corrected 2026-03-31
+snapshot: 81% of cells changed across all 500 tickers, verified against
+as-reported 10-K figures (AAPL FY2025 416.2B revenue / 46.9% gross margin,
+MSFT FY2025 281.7B, ORCL implied equity exactly 20.451B). The 46 cells
+that became NA are all peg -- its EPS-growth guard firing on corrected
+growth numbers. Timeseries layer rebuilt from the fixed pivot (ORCL fund
+layer now year-coherent with original-filing stamps).
+
+Implication: any analysis produced from snapshots or the timeseries layer
+before this fix used stale fundamentals and should be regenerated.
+
 ## 4. New indicators, prioritized by reproduced t-stat
 
 Formulas below are stated in Compustat-style terms mapped to our concepts.

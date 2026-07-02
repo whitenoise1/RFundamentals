@@ -229,6 +229,39 @@ test("pivot: NULL input returns NULL",
 test("pivot: empty input returns NULL",
      is.null(pivot_fundamentals(data.table())))
 
+# A 10-K reports prior-year comparatives under the SAME fiscal_year label
+# and filed date as the current period. The pivot must select the current
+# period (max period_end) per concept -- not parse order -- or wide rows
+# mix periods across concepts (ORCL fy2025 carried fy2023 equity/revenue).
+comparative_long <- rbindlist(list(
+  # comparatives listed FIRST to expose parse-order sensitivity
+  .make_long(c("revenue", "stockholders_equity"), c(800, 1000),
+             pe = as.Date("2022-12-31")),
+  .make_long(c("revenue", "stockholders_equity"), c(900, 4000),
+             pe = as.Date("2023-12-31")),
+  .make_long(c("revenue", "stockholders_equity"), c(1000, 9000),
+             pe = as.Date("2024-12-31"))
+))
+
+comp_wide <- pivot_fundamentals(comparative_long)
+
+test("pivot: comparative rows collapse to one row per label",
+     nrow(comp_wide) == 1)
+
+test("pivot: current period wins over same-label comparatives",
+     comp_wide$revenue == 1000 && comp_wide$stockholders_equity == 9000)
+
+test("pivot: metadata period_end matches the chosen period",
+     comp_wide$period_end == as.Date("2024-12-31"))
+
+# Amendment for the same period (later filed) still beats the original
+amended_long <- rbindlist(list(
+  .make_long("revenue", 1000, filed = as.Date("2025-02-15")),
+  .make_long("revenue", 1010, filed = as.Date("2025-05-01"))
+))
+test("pivot: amendment (later filed) wins for the same period",
+     pivot_fundamentals(amended_long)$revenue == 1010)
+
 
 # ============================================================================
 # UNIT TESTS: .derive_quantities

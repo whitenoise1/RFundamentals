@@ -335,9 +335,15 @@ pivot_fundamentals <- function(fund_dt) {
   dt <- fund_dt[!is.na(period_type) & !is.na(fiscal_year)]
   if (nrow(dt) == 0) return(NULL)
 
-  # For each (fiscal_year, period_type, concept), keep the row with the latest
-  # filed date (most up-to-date value for that period)
-  setorder(dt, fiscal_year, period_type, concept, -filed)
+  # For each (fiscal_year, period_type, concept), keep the row with the
+  # LATEST PERIOD END, then latest filed date. Period end must rank first:
+  # a 10-K reports prior-year comparatives under the SAME fiscal_year label
+  # and the SAME filed date as the current period, so ordering by filed
+  # alone left the survivor to parse order -- wide rows could mix periods
+  # across concepts (e.g. ORCL fy2025 row carrying fy2023 equity/revenue).
+  # The current period is always the group's max period_end; filed breaks
+  # ties between an original and its amendment for the same period.
+  setorder(dt, fiscal_year, period_type, concept, -period_end, -filed)
   dt <- dt[!duplicated(dt[, .(fiscal_year, period_type, concept)])]
 
   # Pivot: one row per (fiscal_year, period_type), one column per concept
