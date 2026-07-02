@@ -94,10 +94,21 @@ get_universe_at_date <- function(snapshot_date, master_dt) {
 # =============================================================================
 # 2. fetch_ticker_prices()
 # =============================================================================
+
+# Session-level memo of tickers whose Yahoo download failed after all
+# retries (mostly delisted symbols). A multi-date backfill calls
+# fetch_ticker_prices for the same dead tickers at every snapshot date;
+# without the memo each date re-pays retries + exponential backoff
+# (~10s per dead ticker). Session-scoped on purpose: a fresh R process
+# retries everything, so a transient outage cannot poison future runs.
+.PRICE_FETCH_FAILED <- new.env(parent = emptyenv())
+
 #' Download OHLCV price data for a single ticker with parquet cache
 #'
 #' Adapted from download_ohlcv() in ref/data_loader.R.
 #' Returns xts object. Caches to cache/prices/{ticker}_yahoo_{from}.parquet.
+#' Tickers that fail all retries are memoized for the session and return
+#' NULL immediately on subsequent calls.
 #'
 #' @param ticker Character. Ticker symbol.
 #' @param from Character. Start date (default "2009-01-01").
@@ -122,6 +133,10 @@ fetch_ticker_prices <- function(ticker, from = "2009-01-01",
     if (!is.null(cached) && nrow(cached) > 0) return(cached)
   }
 
+  # Known-dead this session: skip the download entirely
+  memo_key <- sprintf("%s_%s", ticker, from)
+  if (isTRUE(.PRICE_FETCH_FAILED[[memo_key]])) return(NULL)
+
   # Download from Yahoo
   px <- NULL
   for (attempt in seq_len(retries)) {
@@ -137,7 +152,10 @@ fetch_ticker_prices <- function(ticker, from = "2009-01-01",
     if (!is.null(px)) break
   }
 
-  if (is.null(px)) return(NULL)
+  if (is.null(px)) {
+    .PRICE_FETCH_FAILED[[memo_key]] <- TRUE
+    return(NULL)
+  }
 
   # Cache write
   df <- data.frame(date = as.character(index(px)), coredata(px),
