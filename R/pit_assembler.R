@@ -349,7 +349,7 @@ get_latest_annual_filing <- function(fund_dt, as_of_date,
 #'   2. Filters to filings known as of snapshot date (point-in-time)
 #'   3. Identifies the most recent annual filing
 #'   4. Gets the closing price on the filing date
-#'   5. Computes all 59 indicators
+#'   5. Computes all indicators (get_indicator_names(), 74 as of Wave 1)
 #'   6. Stacks into cross-section and z-scores
 #'
 #' @param snapshot_date Date or character. The snapshot date.

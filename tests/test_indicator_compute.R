@@ -755,6 +755,143 @@ test("filter_deprecated_tags: does not mutate input", {
 
 
 # ============================================================================
+# UNIT TESTS: Wave 1 -- Balance-Sheet Change Family
+# ============================================================================
+# Hand-computed from the shared fixture (curr_row / prior_row):
+#   curr:  COA=11000 COL=7000  WC=4000 NCOA=35000 NCOL=17000 NCO=18000
+#          FNA=0 FINL=6000 FIN=-6000 NOA=22000 CEQ=20000
+#   prior: COA=10000 COL=6500  WC=3500 NCOA=34000 NCOL=17000 NCO=17000
+#          FNA=0 FINL=6500 FIN=-6500 NOA=20500 CEQ=18000
+#   avgAT=49000, lagAT=48000
+message("\n=== Wave 1: Balance-Sheet Change Family ===")
+
+bsc <- .compute_bs_change(curr_row, prior_row)
+
+test("bsc: del_coa = 1000/49000",
+     abs(bsc$del_coa - 1000/49000) < 1e-9)
+
+test("bsc: del_col = 500/49000",
+     abs(bsc$del_col - 500/49000) < 1e-9)
+
+test("bsc: del_finl = -500/49000 (LTD down 500)",
+     abs(bsc$del_finl - (-500/49000)) < 1e-9)
+
+test("bsc: del_lti = 0 (no LT investments reported, zero-if-na)",
+     bsc$del_lti == 0)
+
+test("bsc: del_equ = 2000/49000",
+     abs(bsc$del_equ - 2000/49000) < 1e-9)
+
+test("bsc: del_netfin = 500/49000 (FIN -6500 -> -6000)",
+     abs(bsc$del_netfin - 500/49000) < 1e-9)
+
+test("bsc: total_accruals = (dWC + dNCO + dFIN)/avgAT = 2000/49000",
+     abs(bsc$total_accruals - 2000/49000) < 1e-9)
+
+test("bsc: Richardson identity TACC = (dNOA + dFIN)/avgAT", {
+  # NOA = WC + NCO by construction, so dWC + dNCO = dNOA = 1500
+  abs(bsc$total_accruals - (1500 - (-500))/49000) < 1e-9
+})
+
+test("bsc: dnoa = 1500/48000 (lagged AT scaling)",
+     abs(bsc$dnoa - 1500/48000) < 1e-9)
+
+test("bsc: ch_nncoa = 1000/48000",
+     abs(bsc$ch_nncoa - 1000/48000) < 1e-9)
+
+test("bsc: ch_nwc = 500/48000",
+     abs(bsc$ch_nwc - 500/48000) < 1e-9)
+
+test("bsc: inventory_change = 200/49000",
+     abs(bsc$inventory_change - 200/49000) < 1e-9)
+
+test("bsc: inventory_growth = 200/2800",
+     abs(bsc$inventory_growth - 200/2800) < 1e-9)
+
+test("bsc: ppe_inv_change NA when ppe_gross missing",
+     is.na(bsc$ppe_inv_change))
+
+test("bsc: equity_growth = 2000/18000",
+     abs(bsc$equity_growth - 2000/18000) < 1e-9)
+
+test("bsc: gr_ltnoa = (18000-17000)/49000 (LTNOA = NOA - WC)",
+     abs(bsc$gr_ltnoa - 1000/49000) < 1e-9)
+
+test("bsc: all NA when prior is NULL", {
+  r <- .compute_bs_change(curr_row, NULL)
+  all(is.na(unlist(r)))
+})
+
+test("bsc: ppe_inv_change with PPEG present, INV zero-if-na", {
+  c2 <- copy(curr_row);  c2[, ppe_gross := 26000]
+  p2 <- copy(prior_row); p2[, ppe_gross := 24000]
+  r <- .compute_bs_change(c2, p2)
+  # (26000+3000 - 24000-2800)/48000 = 2200/48000
+  abs(r$ppe_inv_change - 2200/48000) < 1e-9
+})
+
+test("bsc: equity_growth NA when prior book equity negative", {
+  p2 <- copy(prior_row); p2[, stockholders_equity := -100]
+  r <- .compute_bs_change(curr_row, p2)
+  is.na(r$equity_growth)
+})
+
+test("bsc: LT identity fallback (Liabilities tag absent)", {
+  # LT = AT - CEQ: curr 50000-20000=30000, prior 48000-18000=30000 --
+  # identical to the tagged values, so dnoa must be unchanged
+  c2 <- copy(curr_row);  c2[, total_liabilities := NA_real_]
+  p2 <- copy(prior_row); p2[, total_liabilities := NA_real_]
+  r <- .compute_bs_change(c2, p2)
+  abs(r$dnoa - 1500/48000) < 1e-9
+})
+
+test("bsc: FINL NA when all debt/preferred components missing", {
+  c2 <- copy(curr_row)
+  c2[, `:=`(long_term_debt = NA_real_, short_term_debt = NA_real_)]
+  r <- .compute_bs_change(c2, prior_row)
+  is.na(r$del_finl)
+})
+
+# -- .prior_fy_row(): label-free prior selection (relabeling regression) --
+message("\n=== .prior_fy_row (label-free prior) ===")
+
+# Latest-view relabeling scenario: the fy2024 10-K re-reported the FY2023
+# balance sheet, so the period 2023-12-31 rows carry the fy=2024 label and
+# the fy=2023 label group holds only the stale period 2022-12-31.
+relabel_long <- data.table(
+  concept     = rep(c("total_assets", "stockholders_equity"), 3),
+  value       = c(1200, 500,   1000, 400,   800, 300),
+  fiscal_year = c(2024L, 2024L, 2024L, 2024L, 2023L, 2023L),
+  period_type = "FY",
+  period_end  = as.Date(c("2024-12-31", "2024-12-31",
+                          "2023-12-31", "2023-12-31",
+                          "2022-12-31", "2022-12-31")),
+  filed       = as.Date(c("2025-02-15", "2025-02-15",
+                          "2025-02-15", "2025-02-15",
+                          "2024-02-15", "2024-02-15"))
+)
+
+test("prior_fy_row: picks the true prior PERIOD, not the label group", {
+  p <- .prior_fy_row(relabel_long, 2024L)
+  !is.null(p) && p$total_assets == 1000 && p$stockholders_equity == 400
+})
+
+test("prior_fy_row: gap guard rejects a 2-year hole", {
+  gap_long <- relabel_long[period_end != as.Date("2023-12-31")]
+  is.null(.prior_fy_row(gap_long, 2024L))
+})
+
+test("prior_fy_row: NULL when target year absent",
+     is.null(.prior_fy_row(relabel_long, 2030L)))
+
+test("compute_ticker_indicators: asset_growth uses period-true prior", {
+  ind <- compute_ticker_indicators(relabel_long, price_on_filed = NA_real_,
+                                   sector = "Technology", target_fy = 2024L)
+  abs(ind[["asset_growth"]] - 0.2) < 1e-9   # 1200/1000 - 1, not 1200/800 - 1
+})
+
+
+# ============================================================================
 # UNIT TESTS: Tier 2 Research Indicators
 # ============================================================================
 message("\n=== Tier 2 Research Indicators ===")
@@ -1163,8 +1300,8 @@ test("zscore: pre-winsorization capped at [p2.5, p97.5] of input", {
 # ============================================================================
 message("\n=== Public API ===")
 
-test("get_indicator_names returns 59 names",
-     length(get_indicator_names()) == 59)
+test("get_indicator_names returns 74 names",
+     length(get_indicator_names()) == 74)
 
 test("get_indicator_names has no duplicates",
      !anyDuplicated(get_indicator_names()))
@@ -1218,8 +1355,8 @@ result <- compute_ticker_indicators(synth_long, 150, "Technology")
 test("compute_ticker: returns named numeric vector",
      is.numeric(result) && !is.null(names(result)))
 
-test("compute_ticker: correct length (59)",
-     length(result) == 59)
+test("compute_ticker: correct length (74)",
+     length(result) == 74)
 
 test("compute_ticker: pe_trailing = 150/3.8",
      abs(result[["pe_trailing"]] - 150/3.8) < 0.01)

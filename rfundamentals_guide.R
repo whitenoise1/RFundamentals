@@ -124,12 +124,16 @@ source("R/timeseries_builder.R")
 
 
 # --- get_indicator_names() --------------------------------------------------
-# Returns: character vector of 57 indicator names in canonical order.
+# Returns: character vector of 74 indicator names in canonical order.
 #   Groups: valuation (8), profitability (6), growth (5), leverage (5),
-#   efficiency (3), cash flow quality (3), shareholder return (3), size (3),
-#   tier 1 research (15), tier 2 research (6).
+#   efficiency (3), cash flow quality (3), shareholder return (3), size (5),
+#   tier 1 research (15), tier 2 research (6),
+#   balance-sheet change / Wave 1 (15).
 #
 # Arguments: none.
+#
+# Family subsets via indicator_names(), e.g.:
+#   indicator_names("balance_sheet_change")   # the 15 Wave 1 indicators
 
 
 # --- build_timeseries() -----------------------------------------------------

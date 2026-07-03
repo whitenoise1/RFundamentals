@@ -1,6 +1,6 @@
 # RFundamentals: Indicator Reference
 
-57 fundamental indicators computed from SEC EDGAR XBRL filings and Yahoo Finance
+74 fundamental indicators computed from SEC EDGAR XBRL filings and Yahoo Finance
 market data. Each indicator is listed with its formula, data sources, and
 interpretation.
 
@@ -545,6 +545,46 @@ Practitioner signals requiring additional XBRL tags or multi-period computation.
 
 ---
 
+## 11. Balance-Sheet Change Family (15 indicators, Wave 1)
+
+Annual year-over-year changes in balance-sheet aggregates, from the OpenAP
+expansion (docs/research/09; full references and reproduced t-stats in
+docs/RESEARCH_INDICATORS.md, section WAVE 1). Building blocks per
+Richardson et al. (2005): COA = CurrentAssets - Cash; COL =
+CurrentLiabilities - ShortTermDebt; WC = COA - COL; NCOA = Assets -
+CurrentAssets - LTInvestments; NCOL = Liabilities - CurrentLiabilities -
+LongTermDebt; NCO = NCOA - NCOL; FNA = STInvestments + LTInvestments;
+FINL = LongTermDebt + ShortTermDebt + PreferredStock; FIN = FNA - FINL;
+NOA = (Assets - Cash) - (Liabilities - TotalDebt). avgAT = average of
+current and prior total assets; lagAT = prior total assets.
+
+Missing-input policy: st_investments, lt_investments, preferred_stock,
+short_term_debt enter as 0 when unreported; FINL needs at least one
+debt/preferred component; when the Liabilities tag is absent, LT is
+derived as Assets - Equity - MinorityInterest (balance-sheet identity).
+The prior year is selected by period_end, never by fiscal_year label
+(re-reported comparatives carry the newer filing's label).
+
+| Indicator | Formula | Scaling | Source study (CZ t-stat) |
+|---|---|---|---|
+| `del_coa` | ΔCOA | avgAT | Richardson 2005 (6.01) |
+| `del_col` | ΔCOL | avgAT | Richardson 2005 (4.35) |
+| `del_finl` | ΔFINL | avgAT | Richardson 2005 (12.23) |
+| `del_lti` | ΔLTInvestments | avgAT | Richardson 2005 (2.55) |
+| `del_equ` | ΔEquity | avgAT | Richardson 2005 (3.18) |
+| `del_netfin` | ΔFIN | avgAT | Richardson 2005 (9.00) |
+| `total_accruals` | ΔWC + ΔNCO + ΔFIN | avgAT | Richardson 2005 (2.63) |
+| `dnoa` | ΔNOA | lagAT | Hirshleifer 2004 (9.25) |
+| `ch_nncoa` | ΔNCO | lagAT | Soliman 2008 (4.43) |
+| `ch_nwc` | ΔWC | lagAT | Soliman 2008 (2.83) |
+| `inventory_change` **[NA for financials]** | ΔInventory | avgAT | Thomas-Zhang 2002 (6.24) |
+| `inventory_growth` **[NA for financials]** | Inventory_t / Inventory_{t-1} - 1 | -- | Belo-Lin 2012 (7.19) |
+| `ppe_inv_change` **[NA for financials]** | Δ(PPEgross + Inventory) | lagAT | Lyandres 2008 (7.86) |
+| `equity_growth` | Equity_t / Equity_{t-1} - 1 (both > 0) | -- | Lockwood-Prombutr 2010 (4.26) |
+| `gr_ltnoa` | ΔLTNOA, LTNOA = NOA - WC | avgAT | Fairfield 2003 (3.73) |
+
+---
+
 ## XBRL Tag Alias Map
 
 Each canonical concept maps to multiple XBRL tags. First match wins during
@@ -621,6 +661,7 @@ under the "Financial" sector:
 - `cash_based_op` (Cash-Based Operating Profitability)
 - `capex_depreciation`
 - `inventory_sales_change`
+- `inventory_change`, `inventory_growth`, `ppe_inv_change` (Wave 1)
 
 During z-scoring, these indicators are computed excluding financial sector firms,
 so the cross-sectional distribution is not distorted by forced NAs.

@@ -4,13 +4,17 @@
 # Pure computation layer: no I/O. Receives data.tables and price scalars,
 # returns named vectors and data.tables.
 #
-# Computes 57 output fields from EDGAR XBRL data + market prices:
+# Computes 74 output fields from EDGAR XBRL data + market prices:
 #   - 36 baseline indicators (valuation, profitability, growth, leverage,
 #     efficiency, cash flow quality, shareholder return, size)
+#   - 2 size extras (shares outstanding, public float)
 #   - 6 Tier 1 research indicators (GP/A, Asset Growth, Sloan Accrual,
 #     Pct Accruals, NOA, Piotroski F-Score with 9 binary components)
 #   - 6 Tier 2 research indicators (Cash-Based OP, FCF Stability,
 #     SGA Efficiency, CAPEX/DA, DSO Change, Inventory/Sales Change)
+#   - 15 Wave 1 balance-sheet change indicators (Richardson 2005
+#     decomposition, dNOA, Soliman changes, inventory/PPE investment,
+#     equity growth, LTNOA growth) -- see docs/research/09
 #
 # Public API:
 #   compute_ticker_indicators(fund_dt, price, sector, target_fy, target_period)
@@ -33,7 +37,10 @@ suppressPackageStartupMessages({
 # inventory, standard operating income structure)
 .FINANCIAL_NA_INDICATORS <- c(
   "gpa", "inventory_turnover", "cash_based_op",
-  "capex_depreciation", "inventory_sales_change"
+  "capex_depreciation", "inventory_sales_change",
+  # Wave 1 inventory/PPE-investment indicators (banks hold no inventory;
+  # their PPE is immaterial to the investment anomaly)
+  "inventory_change", "inventory_growth", "ppe_inv_change"
 )
 
 # XBRL tags that should not contribute to a concept when read from cache.
@@ -45,9 +52,9 @@ suppressPackageStartupMessages({
   interest_expense = c("InterestIncomeExpenseNet")
 )
 
-# Canonical indicator names in output order (59 entries):
+# Canonical indicator names in output order (74 entries):
 # 36 baseline + 2 size (shares_outstanding, public_float) + 5 tier1 +
-# 10 piotroski (9 components + composite) + 6 tier2
+# 10 piotroski (9 components + composite) + 6 tier2 + 15 wave1
 .INDICATOR_NAMES <- c(
   # Valuation (8)
   "pe_trailing", "peg", "pb", "ps", "pfcf",
@@ -78,7 +85,14 @@ suppressPackageStartupMessages({
   "f_dmargin", "f_dturn", "f_score",
   # Tier 2 Research (6)
   "cash_based_op", "fcf_stability", "sga_efficiency",
-  "capex_depreciation", "dso_change", "inventory_sales_change"
+  "capex_depreciation", "dso_change", "inventory_sales_change",
+  # Wave 1: balance-sheet change family (15) -- OpenAP expansion,
+  # docs/research/09_openap_indicator_expansion.md
+  "del_coa", "del_col", "del_finl", "del_lti", "del_equ",
+  "del_netfin", "total_accruals",
+  "dnoa", "ch_nncoa", "ch_nwc",
+  "inventory_change", "inventory_growth", "ppe_inv_change",
+  "equity_growth", "gr_ltnoa"
 )
 
 # Family-to-indicator mapping (canonical groupings, 10 families)
@@ -103,21 +117,26 @@ suppressPackageStartupMessages({
   research          = c("gpa", "asset_growth", "sloan_accrual", "pct_accruals",
                          "net_operating_assets", "cash_based_op", "fcf_stability",
                          "sga_efficiency", "capex_depreciation", "dso_change",
-                         "inventory_sales_change")
+                         "inventory_sales_change"),
+  balance_sheet_change = c("del_coa", "del_col", "del_finl", "del_lti",
+                            "del_equ", "del_netfin", "total_accruals",
+                            "dnoa", "ch_nncoa", "ch_nwc",
+                            "inventory_change", "inventory_growth",
+                            "ppe_inv_change", "equity_growth", "gr_ltnoa")
 )
 
 
 #' Return indicator names belonging to one or more families.
 #'
 #' @param families Character vector of family slugs, e.g. "valuation" or
-#'   c("valuation", "growth"). NULL returns all 59 indicator names.
+#'   c("valuation", "growth"). NULL returns all 74 indicator names.
 #'   Matching is case-insensitive.
 #' @return Character vector of indicator names, in canonical order.
 #'
 #' @examples
 #'   indicator_names("valuation")
 #'   indicator_names(c("valuation", "growth"))
-#'   indicator_names()  # all 59
+#'   indicator_names()  # all 74
 indicator_names <- function(families = NULL) {
   if (is.null(families)) return(.INDICATOR_NAMES)
 
@@ -851,6 +870,238 @@ pivot_fundamentals <- function(fund_dt) {
 
 
 # =============================================================================
+# SECTION 6a: PRIOR-YEAR ROW CONSTRUCTION (label-free)
+# =============================================================================
+
+# Build the prior-year wide row for a target fiscal year from long-format
+# fundamentals, keyed by period_end instead of the fiscal_year label.
+#
+# Anchor: the current year's balance-sheet date is the max FY period_end of
+# total_assets rows labeled target_fy (the target year's own rows keep
+# their original label because no newer annual filing exists in the view
+# when target_fy is the newest year; for older target years callers pass
+# an as-of view dated at that year's filing, with the same property).
+# The prior date is the max FY total_assets period_end strictly before the
+# anchor; all FY rows at that date -- whatever filing re-reported them
+# last, whatever label they now carry -- form the prior row.
+#
+# Returns a one-row data.table shaped like a pivot_fundamentals row (with
+# derived quantities), or NULL when no prior year exists at annual spacing
+# (gap outside [270, 500] days).
+.prior_fy_row <- function(fund_dt, target_fy) {
+
+  at_fy <- fund_dt[concept == "total_assets" & !is.na(period_end) &
+                     !is.na(period_type) & period_type == "FY"]
+  if (nrow(at_fy) == 0) return(NULL)
+
+  anchor <- at_fy[fiscal_year == target_fy, suppressWarnings(max(period_end))]
+  if (!length(anchor) || is.na(anchor) || is.infinite(as.numeric(anchor))) {
+    return(NULL)
+  }
+
+  prior_pe <- at_fy[period_end < anchor, suppressWarnings(max(period_end))]
+  if (!length(prior_pe) || is.na(prior_pe) ||
+      is.infinite(as.numeric(prior_pe))) {
+    return(NULL)
+  }
+
+  gap_days <- as.integer(anchor - prior_pe)
+  if (gap_days < 270L || gap_days > 500L) return(NULL)
+
+  rows <- fund_dt[period_type == "FY" & period_end == prior_pe &
+                    !is.na(value)]
+  if (nrow(rows) == 0) return(NULL)
+
+  # One value per concept (dedup guarantees uniqueness per (concept,
+  # period_end, FY); duplicated labels for the same period cannot occur
+  # after pit_dedup, but keep first defensively)
+  rows <- rows[!duplicated(concept)]
+  wide <- dcast(rows, period_end ~ concept, value.var = "value")
+  filed_val <- rows[!is.na(filed), if (.N) max(filed) else as.Date(NA)]
+  wide[, `:=`(fiscal_year = target_fy - 1L, period_type = "FY",
+              filed = filed_val)]
+  .derive_quantities(wide)
+}
+
+
+# =============================================================================
+# SECTION 6b: WAVE 1 -- BALANCE-SHEET CHANGE FAMILY
+# =============================================================================
+# 15 indicators from the OpenAP expansion (docs/research/09, Wave 1).
+# All are year-over-year changes in balance-sheet aggregates, annual only.
+#
+# Notation: AT = total_assets, ACT = current_assets, LCT = current_liabilities,
+# CHE = cash, LT = total_liabilities, LTD/STD = long/short-term debt,
+# CEQ = stockholders_equity, INV = inventory, PPEG = ppe_gross,
+# STI/LTI = st/lt_investments, PS = preferred_stock,
+# avgAT = (AT_t + AT_{t-1})/2.
+#
+# Building blocks (Richardson, Sloan, Soliman, Tuna 2005 JAE):
+#   COA  = ACT - CHE                 current operating assets
+#   COL  = LCT - STD                 current operating liabilities
+#   WC   = COA - COL                 net working capital
+#   NCOA = AT - ACT - LTI            noncurrent operating assets
+#   NCOL = LT - LCT - LTD            noncurrent operating liabilities
+#   NCO  = NCOA - NCOL               net noncurrent operating assets
+#   FNA  = STI + LTI                 financial assets
+#   FINL = LTD + STD + PS            financial liabilities
+#   FIN  = FNA - FINL                net financial assets
+#
+# Missing-input policy (see docs/INDICATORS.md, Phase 0 concepts): the
+# absence-means-zero concepts (STI, LTI, PS, STD) enter as 0 when missing;
+# FINL additionally requires at least one debt/preferred component reported
+# (all three missing -> NA, same convention as derived total_debt). Core
+# balance-sheet lines (AT, ACT, LCT, LT, CHE, CEQ) propagate NA.
+
+# Sum of the non-NA components; NA when ALL components are NA.
+.sum_available <- function(...) {
+  v <- c(...)
+  if (all(is.na(v))) NA_real_ else sum(v, na.rm = TRUE)
+}
+
+# Treat NA as a true zero (documented absence-means-zero concepts only)
+.zero_if_na <- function(x) if (is.na(x)) 0.0 else x
+
+# Richardson building blocks for one wide row. Returns a list of scalars
+# (NA where core inputs are missing).
+.bs_blocks <- function(row) {
+  at   <- .col(row, "total_assets")
+  act  <- .col(row, "current_assets")
+  lct  <- .col(row, "current_liabilities")
+  che  <- .col(row, "cash")
+  lt   <- .col(row, "total_liabilities")
+  ltd  <- .col(row, "long_term_debt")
+  std  <- .col(row, "short_term_debt")
+  ceq  <- .col(row, "stockholders_equity")
+  sti  <- .col(row, "st_investments")
+  lti  <- .col(row, "lt_investments")
+  ps   <- .col(row, "preferred_stock")
+  td   <- .col(row, "total_debt")
+  mi   <- .col(row, "minority_interest")
+
+  # The Liabilities total tag is absent for ~25% of filers (they tag only
+  # LiabilitiesAndStockholdersEquity). Derive it from the balance-sheet
+  # identity: LT = AT - CEQ - noncontrolling interest. This is exactly how
+  # Hirshleifer et al. (2004) build operating liabilities without LT.
+  if (is.na(lt) && !is.na(at) && !is.na(ceq)) {
+    lt <- at - ceq - .zero_if_na(mi)
+  }
+
+  coa  <- if (!is.na(act) && !is.na(che)) act - che else NA_real_
+  col_ <- if (!is.na(lct)) lct - .zero_if_na(std) else NA_real_
+  wc   <- if (!is.na(coa) && !is.na(col_)) coa - col_ else NA_real_
+  ncoa <- if (!is.na(at) && !is.na(act)) at - act - .zero_if_na(lti) else NA_real_
+  ncol_ <- if (!is.na(lt) && !is.na(lct)) lt - lct - .zero_if_na(ltd) else NA_real_
+  nco  <- if (!is.na(ncoa) && !is.na(ncol_)) ncoa - ncol_ else NA_real_
+  fna  <- .zero_if_na(sti) + .zero_if_na(lti)
+  finl <- .sum_available(ltd, std, ps)
+  fin  <- if (!is.na(finl)) fna - finl else NA_real_
+
+  # NOA exactly as Tier 1 net_operating_assets numerator:
+  # operating assets (AT - CHE) minus operating liabilities (LT - total debt)
+  noa <- if (!is.na(at) && !is.na(che) && !is.na(lt) && !is.na(td)) {
+    (at - che) - (lt - td)
+  } else NA_real_
+
+  list(at = at, ceq = ceq, coa = coa, col = col_, wc = wc,
+       ncoa = ncoa, ncol = ncol_, nco = nco,
+       fna = fna, finl = finl, fin = fin, noa = noa)
+}
+
+.compute_bs_change <- function(curr, prior) {
+
+  out <- list(
+    del_coa = NA_real_, del_col = NA_real_, del_finl = NA_real_,
+    del_lti = NA_real_, del_equ = NA_real_, del_netfin = NA_real_,
+    total_accruals = NA_real_,
+    dnoa = NA_real_, ch_nncoa = NA_real_, ch_nwc = NA_real_,
+    inventory_change = NA_real_, inventory_growth = NA_real_,
+    ppe_inv_change = NA_real_, equity_growth = NA_real_,
+    gr_ltnoa = NA_real_
+  )
+  if (is.null(prior)) return(out)
+
+  b_t <- .bs_blocks(curr)
+  b_p <- .bs_blocks(prior)
+
+  avg_at <- if (!is.na(b_t$at) && !is.na(b_p$at)) {
+    (b_t$at + b_p$at) / 2
+  } else NA_real_
+  lag_at <- b_p$at
+
+  d <- function(x_t, x_p) {
+    if (is.na(x_t) || is.na(x_p)) NA_real_ else x_t - x_p
+  }
+
+  # -- Richardson, Sloan, Soliman, Tuna (2005 JAE): balance-sheet
+  #    decomposition changes, scaled by average total assets --
+  out$del_coa    <- .safe_divide(d(b_t$coa,  b_p$coa),  avg_at)
+  out$del_col    <- .safe_divide(d(b_t$col,  b_p$col),  avg_at)
+  out$del_finl   <- .safe_divide(d(b_t$finl, b_p$finl), avg_at)
+  out$del_equ    <- .safe_divide(d(b_t$ceq,  b_p$ceq),  avg_at)
+  out$del_netfin <- .safe_divide(d(b_t$fin,  b_p$fin),  avg_at)
+
+  # DelLTI = change in long-term investments (IVAO). Zero-if-na components:
+  # a firm holding no LT investments has a true 0 change.
+  lti_t <- .zero_if_na(.col(curr,  "lt_investments"))
+  lti_p <- .zero_if_na(.col(prior, "lt_investments"))
+  out$del_lti <- .safe_divide(lti_t - lti_p, avg_at)
+
+  # TotalAccruals = dWC + dNCO + dFIN over avgAT (Richardson eq. 5)
+  d_wc  <- d(b_t$wc,  b_p$wc)
+  d_nco <- d(b_t$nco, b_p$nco)
+  d_fin <- d(b_t$fin, b_p$fin)
+  ta_num <- if (is.na(d_wc) || is.na(d_nco) || is.na(d_fin)) {
+    NA_real_
+  } else d_wc + d_nco + d_fin
+  out$total_accruals <- .safe_divide(ta_num, avg_at)
+
+  # -- Hirshleifer, Hou, Teoh, Zhang (2004 JAE): change in net operating
+  #    assets over lagged total assets --
+  out$dnoa <- .safe_divide(d(b_t$noa, b_p$noa), lag_at)
+
+  # -- Soliman (2008 TAR): changes in net noncurrent operating assets and
+  #    net working capital, over lagged total assets --
+  out$ch_nncoa <- .safe_divide(d_nco, lag_at)
+  out$ch_nwc   <- .safe_divide(d_wc,  lag_at)
+
+  # -- Inventory investment --
+  inv_t <- .col(curr,  "inventory")
+  inv_p <- .col(prior, "inventory")
+  # Thomas & Zhang (2002 RAS): dINV over average total assets
+  out$inventory_change <- .safe_divide(d(inv_t, inv_p), avg_at)
+  # Belo & Lin (2012 RFS): inventory growth rate
+  out$inventory_growth <- .safe_growth(inv_t, inv_p)
+
+  # -- Lyandres, Sun, Zhang (2008 RFS): (dPPEgross + dINV) over lagged
+  #    total assets. INV zero-if-na so no-inventory firms still measure
+  #    the PPE component; PPEG is required.
+  ppeg_t <- .col(curr,  "ppe_gross")
+  ppeg_p <- .col(prior, "ppe_gross")
+  ppe_inv_num <- if (is.na(ppeg_t) || is.na(ppeg_p)) NA_real_ else {
+    (ppeg_t + .zero_if_na(inv_t)) - (ppeg_p + .zero_if_na(inv_p))
+  }
+  out$ppe_inv_change <- .safe_divide(ppe_inv_num, lag_at)
+
+  # -- Lockwood & Prombutr (2010 JFR): growth in book equity. Requires
+  #    positive book equity in both years (a sign flip through zero is a
+  #    distress event, not growth).
+  if (!is.na(b_t$ceq) && !is.na(b_p$ceq) && b_t$ceq > 0 && b_p$ceq > 0) {
+    out$equity_growth <- .safe_growth(b_t$ceq, b_p$ceq)
+  }
+
+  # -- Fairfield, Whisenant, Yohn (2003 TAR): growth in long-term net
+  #    operating assets over avgAT, with LTNOA = NOA - WC (their
+  #    decomposition of NOA into working capital + long-term component).
+  ltnoa_t <- if (!is.na(b_t$noa) && !is.na(b_t$wc)) b_t$noa - b_t$wc else NA_real_
+  ltnoa_p <- if (!is.na(b_p$noa) && !is.na(b_p$wc)) b_p$noa - b_p$wc else NA_real_
+  out$gr_ltnoa <- .safe_divide(d(ltnoa_t, ltnoa_p), avg_at)
+
+  out
+}
+
+
+# =============================================================================
 # SECTION 7: CROSS-SECTIONAL Z-SCORING
 # =============================================================================
 
@@ -956,10 +1207,16 @@ compute_ticker_indicators <- function(fund_dt, price_on_filed, sector,
     if (length(curr_idx) == 0) return(all_na)
     curr <- fy_rows[curr_idx[1]]
 
-    # Prior fiscal year for growth / change indicators
-    prior_fy <- target_fy - 1L
-    prior_idx <- which(fy_rows$fiscal_year == prior_fy)
-    prior <- if (length(prior_idx) > 0) fy_rows[prior_idx[1]] else NULL
+    # Prior year for growth / change indicators, constructed from the LONG
+    # data by PERIOD END, not by fiscal_year label. The target year's 10-K
+    # re-reports the prior year as comparatives carrying the TARGET year's
+    # label, so in any view that includes that 10-K the "fiscal_year - 1"
+    # label group has lost its current-period rows and lagged indicators
+    # would difference against a period two years back. (concept,
+    # period_end, FY) is label-free and immune to relabeling. A gap guard
+    # rejects non-annual spacing (fiscal-year transition stubs, missing
+    # years) rather than differencing across the gap.
+    prior <- .prior_fy_row(fund_dt, target_fy)
 
     # Quarterly rows for QoQ growth and FCF Stability
     q_rows <- wide[period_type %in% c("Q1", "Q2", "Q3", "Q4")]
@@ -1002,6 +1259,7 @@ compute_ticker_indicators <- function(fund_dt, price_on_filed, sector,
     shr  <- .compute_shareholder(curr, val$market_cap)
     t1   <- .compute_tier1(curr, prior)
     t2   <- .compute_tier2(curr, prior, quarterly_hist)
+    bsc  <- .compute_bs_change(curr, prior)
 
     # PEG ratio: depends on growth (computed after growth)
     peg <- NA_real_
@@ -1081,7 +1339,23 @@ compute_ticker_indicators <- function(fund_dt, price_on_filed, sector,
       sga_efficiency         = t2$sga_efficiency,
       capex_depreciation     = t2$capex_depreciation,
       dso_change             = t2$dso_change,
-      inventory_sales_change = t2$inventory_sales_change
+      inventory_sales_change = t2$inventory_sales_change,
+      # Wave 1: balance-sheet change family (15)
+      del_coa          = bsc$del_coa,
+      del_col          = bsc$del_col,
+      del_finl         = bsc$del_finl,
+      del_lti          = bsc$del_lti,
+      del_equ          = bsc$del_equ,
+      del_netfin       = bsc$del_netfin,
+      total_accruals   = bsc$total_accruals,
+      dnoa             = bsc$dnoa,
+      ch_nncoa         = bsc$ch_nncoa,
+      ch_nwc           = bsc$ch_nwc,
+      inventory_change = bsc$inventory_change,
+      inventory_growth = bsc$inventory_growth,
+      ppe_inv_change   = bsc$ppe_inv_change,
+      equity_growth    = bsc$equity_growth,
+      gr_ltnoa         = bsc$gr_ltnoa
     )
 
     # Financial sector: NA-out meaningless indicators
