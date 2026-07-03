@@ -224,6 +224,18 @@ entries go into docs/RESEARCH_INDICATORS.md as they are built.
 
 ### Wave 1 -- balance-sheet change family (12 indicators, t-stats 2.8-12.2)
 
+STATUS: COMPLETED 2026-07-03 (commit df38cac) as 15 indicators (the 12
+below + DelEqu, DelLTI, TotalAccruals). Canonical names and formulas in
+docs/INDICATORS.md section 11 and RESEARCH_INDICATORS.md WAVE 1. All 66
+snapshots + timeseries regenerated at 74 indicators. Coverage on
+2024-06-30: del_finl/del_netfin 95%, del_equ/del_lti 99.6%,
+equity_growth 92%, dnoa 78%, Richardson current-account family 74-84%
+(bounded by AssetsCurrent tag coverage), inventory pair 59% (financials
+NA + tag coverage), gr_ltnoa 71%. Implementation also fixed label-based
+prior-year selection (lagged indicators could difference across two
+years); quarterly QoQ selection retains the label issue -- follow-up
+before any quarterly-surprise work (Wave 3).
+
 Shared plumbing: lagged annual snapshot machinery + avgAT scaling. One
 helper, twelve outputs. All annual (10-K to 10-K).
 
