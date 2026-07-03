@@ -987,6 +987,24 @@ test("fin: net_payout_yield NA without price",
      is.na(compute_ticker_indicators(.fin_long, NA_real_, "Technology",
                                      target_fy = 2024L)[["net_payout_yield"]]))
 
+test("fin: DEI cover count beats constant issued count (BA case)", {
+  # Balance-sheet line carries the constant ISSUED count; the DEI cover
+  # instant (a few weeks after FYE) carries true outstanding.
+  long2 <- copy(.fin_long)
+  long2[, tag := "CommonStockSharesOutstanding"]
+  long2[concept == "shares_outstanding", value := 1000]     # constant issued
+  dei <- data.table(
+    concept = "shares_outstanding", value = c(610, 750),
+    fiscal_year = c(2023L, 2024L), period_type = "FY",
+    period_end = as.Date(c("2024-01-25", "2025-01-27")),
+    filed = as.Date(c("2024-02-01", "2025-02-03")),
+    tag = "EntityCommonStockSharesOutstanding"
+  )
+  ind <- compute_ticker_indicators(rbind(long2, dei), 10, "Technology",
+                                   target_fy = 2024L)
+  abs(ind[["share_iss_1y"]] - (750/610 - 1)) < 1e-9
+})
+
 
 # ============================================================================
 # UNIT TESTS: Tier 2 Research Indicators

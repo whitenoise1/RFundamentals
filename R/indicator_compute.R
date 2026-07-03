@@ -1162,13 +1162,27 @@ pivot_fundamentals <- function(fund_dt) {
   if (!any(sel)) 1 else prod(rt[sel])
 }
 
-# FY share count at one balance-sheet date, with the row's own filed date
-# (the basis date). Returns list(v, filed) or NULL.
+# FY share count for the fiscal year ending at pe, with the row's own
+# filed date (the basis date). Candidates are FY-labeled share rows dated
+# in [pe, pe + 120d]: the balance-sheet date itself plus the 10-K
+# cover-page instant a few weeks later. The DEI cover tag
+# (EntityCommonStockSharesOutstanding) is preferred when present: it is
+# the true point-in-time outstanding count, whereas some filers populate
+# the balance-sheet CommonStockSharesOutstanding line with the constant
+# ISSUED count and vary treasury stock instead (BA: 1,012.26M for years
+# on end while outstanding moved 610M -> 750M through the 2024 offering).
+# Returns list(v, filed) or NULL.
 .fy_shares_at <- function(fund_dt, pe) {
   if (is.null(pe)) return(NULL)
-  r <- fund_dt[concept == "shares_outstanding" & period_type == "FY" &
-                 period_end == pe & !is.na(value)]
-  if (nrow(r) == 0) return(NULL)
+  win <- fund_dt[concept == "shares_outstanding" & period_type == "FY" &
+                   !is.na(value) & !is.na(period_end) &
+                   period_end >= pe & period_end <= pe + 120]
+  if (nrow(win) == 0) return(NULL)
+  if ("tag" %in% names(win)) {
+    dei <- win[tag == "EntityCommonStockSharesOutstanding"]
+    if (nrow(dei)) win <- dei
+  }
+  r <- win[order(period_end)][1]
   list(v = r$value[1], filed = r$filed[1])
 }
 
