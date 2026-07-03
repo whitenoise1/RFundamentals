@@ -59,14 +59,14 @@ test("all price-sensitive are valid indicator names",
 test("all fundamental-only are valid indicator names",
      all(.FUNDAMENTAL_INDICATORS %in% all_indicators))
 
-test("12 price-sensitive indicators",
-     length(.PRICE_SENSITIVE_INDICATORS) == 12)
+test("13 price-sensitive indicators",
+     length(.PRICE_SENSITIVE_INDICATORS) == 13)
 
-test("62 fundamental-only indicators (47 + 15 Wave 1)",
-     length(.FUNDAMENTAL_INDICATORS) == 62)
+test("68 fundamental-only indicators (47 + 15 Wave 1 + 6 Wave 2)",
+     length(.FUNDAMENTAL_INDICATORS) == 68)
 
-test("11 stubs (no unused stubs)",
-     length(.STUB_NAMES) == 11)
+test("12 stubs (no unused stubs)",
+     length(.STUB_NAMES) == 12)
 
 test("all stub names start with stub_",
      all(grepl("^stub_", .STUB_NAMES)))
@@ -132,8 +132,8 @@ test("dividend_yield = 15e9 / 150e9",
 test("buyback_yield = 80e9 / 150e9",
      abs(ps_result$buyback_yield - (80e9 / 150e9)) < 0.0001)
 
-test("returns data.table with 12 columns",
-     is.data.table(ps_result) && ncol(ps_result) == 12)
+test("returns data.table with 13 columns",
+     is.data.table(ps_result) && ncol(ps_result) == 13)
 
 
 # -- 3. Vectorized: multiple elements --
@@ -160,7 +160,7 @@ test("vectorized: 3 rows returned",
 test("vectorized: NA price -> NA market_cap",
      is.na(ps_vec$market_cap[3]))
 
-test("vectorized: NA price -> NA for all 12 indicators",
+test("vectorized: NA price -> NA for all 13 indicators",
      all(is.na(as.numeric(ps_vec[3]))))
 
 test("vectorized: row 1 market_cap = 100 * 1e6",

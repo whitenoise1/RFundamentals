@@ -475,11 +475,21 @@ assemble_snapshot <- function(snapshot_date,
     price <- get_price_on_date(price_data, filing$filed_date)
     if (is.na(price)) n_no_price <- n_no_price + 1L
 
+    # Split events for share-issuance adjustment. load_ticker_splits lives
+    # in ttm_eps.R; guard so pit_assembler still works standalone (share
+    # issuance is then computed unadjusted). fetch = FALSE: no network in
+    # the snapshot loop; the splits cache is populated by the timeseries
+    # TTM augment.
+    splits <- if (exists("load_ticker_splits")) {
+      tryCatch(load_ticker_splits(tk, fetch = FALSE), error = function(e) NULL)
+    } else NULL
+
     # Compute indicators (pass point-in-time-filtered fundamentals)
     sector_label <- if (is.na(sec)) "Unknown" else sec
     indicators <- tryCatch(
       compute_ticker_indicators(fund_dt, price, sector_label,
-                                target_fy = filing$fiscal_year),
+                                target_fy = filing$fiscal_year,
+                                splits = splits),
       error = function(e) {
         warning(sprintf("  indicators failed for %s: %s", tk, e$message),
                 call. = FALSE)

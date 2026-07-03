@@ -892,6 +892,103 @@ test("compute_ticker_indicators: asset_growth uses period-true prior", {
 
 
 # ============================================================================
+# UNIT TESTS: Wave 2 -- External Financing Family
+# ============================================================================
+message("\n=== Wave 2: External Financing Family ===")
+
+# Synthetic 7-year long history; one filing per year (filed = pe + 60d).
+.fin_long <- local({
+  yrs <- 2018:2024
+  mk <- function(concept, values) data.table(
+    concept = concept, value = values,
+    fiscal_year = yrs, period_type = "FY",
+    period_end = as.Date(sprintf("%d-12-31", yrs)),
+    filed = as.Date(sprintf("%d-03-01", yrs + 1))
+  )
+  rbindlist(list(
+    mk("total_assets",       rep(1000, 7)),
+    mk("shares_outstanding", c(130, 120, 118, 116, 112, 100, 110)),
+    mk("long_term_debt",     c(90, 100, 120, 150, 170, 190, 200)),
+    mk("short_term_debt",    c(20, 25, 22, 24, 26, 20, 30)),
+    mk("debt_issuance",      c(10, 20, 30, 40, 50, 60, 100)),
+    mk("debt_repayment",     c(5, 10, 15, 20, 25, 30, 40)),
+    mk("equity_issuance",    c(5, 5, 5, 5, 5, 5, 20)),
+    mk("buybacks",           c(-10, -20, -20, -30, -40, -40, -50)),
+    mk("dividends_paid",     c(10, 12, 14, 16, 20, 25, 30)),
+    mk("revenue",            rep(500, 7)),
+    mk("net_income",         rep(50, 7))
+  ))
+})
+
+fin_ind <- compute_ticker_indicators(.fin_long, price_on_filed = 10,
+                                     sector = "Technology",
+                                     target_fy = 2024L)
+
+test("fin: net_debt_finance = (100 - 40 + (30-20))/1000",
+     abs(fin_ind[["net_debt_finance"]] - 0.07) < 1e-9)
+
+test("fin: net_equity_finance = (20 - 50 - 30)/1000",
+     abs(fin_ind[["net_equity_finance"]] - (-0.06)) < 1e-9)
+
+test("fin: xfin = ndf + nef",
+     abs(fin_ind[["xfin"]] - 0.01) < 1e-9)
+
+test("fin: composite_debt_issuance = log(TD_2024/TD_2019) = log(230/125)",
+     abs(fin_ind[["composite_debt_issuance"]] - log(230/125)) < 1e-9)
+
+test("fin: share_iss_1y = 110/100 - 1 (no splits)",
+     abs(fin_ind[["share_iss_1y"]] - 0.10) < 1e-9)
+
+test("fin: share_iss_5y = 110/120 - 1",
+     abs(fin_ind[["share_iss_5y"]] - (110/120 - 1)) < 1e-9)
+
+test("fin: net_payout_yield = (30 + 50 - 20)/(10 * 110)",
+     abs(fin_ind[["net_payout_yield"]] - 60/1100) < 1e-9)
+
+# Split adjustment: 2:1 split (ratio 0.5) between the 2023 and 2024
+# filings. The 2024 count is on the post-split basis; the surviving 2023
+# row was filed pre-split.
+test("fin: share_iss_1y split-adjusts by filed-date basis", {
+  long2 <- copy(.fin_long)
+  long2[concept == "shares_outstanding" & fiscal_year == 2024, value := 220]
+  splits <- data.table(ex_date = as.Date("2024-06-15"), ratio = 0.5)
+  ind <- compute_ticker_indicators(long2, 10, "Technology",
+                                   target_fy = 2024L, splits = splits)
+  abs(ind[["share_iss_1y"]] - 0.10) < 1e-9   # 220*0.5/100 - 1
+})
+
+test("fin: no adjustment when both counts share one filing basis", {
+  # Move the 2023 shares row into the 2024 filing (post-split restated)
+  long2 <- copy(.fin_long)
+  long2[concept == "shares_outstanding" & fiscal_year == 2024, value := 220]
+  long2[concept == "shares_outstanding" & fiscal_year == 2023,
+        `:=`(value = 200, filed = as.Date("2025-03-01"))]
+  splits <- data.table(ex_date = as.Date("2024-06-15"), ratio = 0.5)
+  ind <- compute_ticker_indicators(long2, 10, "Technology",
+                                   target_fy = 2024L, splits = splits)
+  abs(ind[["share_iss_1y"]] - 0.10) < 1e-9   # 220/200 - 1, window empty
+})
+
+test("fin: net_debt_finance NA when debt side entirely unreported", {
+  long2 <- .fin_long[!concept %in% c("debt_issuance", "debt_repayment",
+                                      "short_term_debt")]
+  ind <- compute_ticker_indicators(long2, 10, "Technology", target_fy = 2024L)
+  is.na(ind[["net_debt_finance"]])
+})
+
+test("fin: 5y indicators NA when history too short", {
+  long2 <- .fin_long[fiscal_year >= 2022]
+  ind <- compute_ticker_indicators(long2, 10, "Technology", target_fy = 2024L)
+  is.na(ind[["composite_debt_issuance"]]) && is.na(ind[["share_iss_5y"]]) &&
+    !is.na(ind[["share_iss_1y"]])
+})
+
+test("fin: net_payout_yield NA without price",
+     is.na(compute_ticker_indicators(.fin_long, NA_real_, "Technology",
+                                     target_fy = 2024L)[["net_payout_yield"]]))
+
+
+# ============================================================================
 # UNIT TESTS: Tier 2 Research Indicators
 # ============================================================================
 message("\n=== Tier 2 Research Indicators ===")
@@ -1300,8 +1397,8 @@ test("zscore: pre-winsorization capped at [p2.5, p97.5] of input", {
 # ============================================================================
 message("\n=== Public API ===")
 
-test("get_indicator_names returns 74 names",
-     length(get_indicator_names()) == 74)
+test("get_indicator_names returns 81 names",
+     length(get_indicator_names()) == 81)
 
 test("get_indicator_names has no duplicates",
      !anyDuplicated(get_indicator_names()))
@@ -1355,8 +1452,8 @@ result <- compute_ticker_indicators(synth_long, 150, "Technology")
 test("compute_ticker: returns named numeric vector",
      is.numeric(result) && !is.null(names(result)))
 
-test("compute_ticker: correct length (74)",
-     length(result) == 74)
+test("compute_ticker: correct length (81)",
+     length(result) == 81)
 
 test("compute_ticker: pe_trailing = 150/3.8",
      abs(result[["pe_trailing"]] - 150/3.8) < 0.01)

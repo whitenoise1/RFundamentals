@@ -3,7 +3,7 @@
 # ============================================================================
 #
 # Point-in-time fundamental database for S&P 500 constituents.
-# 57 indicators x ~500 tickers x daily frequency, from free public data.
+# 81 indicators x ~500 tickers x daily frequency, from free public data.
 #
 # This file is the complete reference: function signatures, arguments, and
 # copy-paste examples. Run any example line in an interactive R session.
@@ -60,7 +60,7 @@ source("R/timeseries_builder.R")
 
 # --- load_ticker_timeseries() -----------------------------------------------
 # Returns: data.table with one row per trading day.
-#   Columns: date, price, fiscal_year, filed_date, + 57 indicator columns.
+#   Columns: date, price, fiscal_year, filed_date, + 81 indicator columns.
 #   Price-sensitive indicators (P/E, P/B, market_cap, ...) update daily.
 #   Fundamental indicators (ROE, margins, ...) carry forward until next filing.
 #
@@ -76,7 +76,7 @@ source("R/timeseries_builder.R")
 # Returns: list with two elements:
 #   $raw      data.table [tickers x indicators]. One row per ticker.
 #             Columns: date, ticker, sector, industry, price, fiscal_year,
-#             filed_date, + 57 indicator columns.
+#             filed_date, + 81 indicator columns.
 #   $zscored  data.table [tickers x indicators]. Cross-sectional z-scores.
 #             Mean ~0, SD ~1, winsorized at [-3, 3].
 #   If zscore=FALSE, returns the raw data.table directly (not a list).
@@ -124,11 +124,11 @@ source("R/timeseries_builder.R")
 
 
 # --- get_indicator_names() --------------------------------------------------
-# Returns: character vector of 74 indicator names in canonical order.
+# Returns: character vector of 81 indicator names in canonical order.
 #   Groups: valuation (8), profitability (6), growth (5), leverage (5),
 #   efficiency (3), cash flow quality (3), shareholder return (3), size (5),
 #   tier 1 research (15), tier 2 research (6),
-#   balance-sheet change / Wave 1 (15).
+#   balance-sheet change / Wave 1 (15), external financing / Wave 2 (7).
 #
 # Arguments: none.
 #

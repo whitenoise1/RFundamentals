@@ -48,7 +48,8 @@ suppressPackageStartupMessages({
   "pe_trailing", "peg", "pb", "ps", "pfcf",
   "ev_ebitda", "ev_revenue", "earnings_yield",
   "dividend_yield", "buyback_yield",
-  "market_cap", "enterprise_value"
+  "market_cap", "enterprise_value",
+  "net_payout_yield"
 )
 
 # Accounting stubs: raw items stored in the fundamentals layer that enable
@@ -58,7 +59,7 @@ suppressPackageStartupMessages({
   "stub_shares", "stub_eps", "stub_equity",
   "stub_revenue", "stub_fcf", "stub_ebitda",
   "stub_total_debt", "stub_net_debt", "stub_cash",
-  "stub_dividends", "stub_buybacks"
+  "stub_dividends", "stub_buybacks", "stub_equity_issuance"
 )
 
 # Fundamental-only indicators: change only when a new filing appears
@@ -101,7 +102,8 @@ suppressPackageStartupMessages({
     stub_net_debt   = .col(curr, "net_debt"),
     stub_cash       = .col(curr, "cash"),
     stub_dividends  = .col(curr, "dividends_paid"),
-    stub_buybacks   = .col(curr, "buybacks")
+    stub_buybacks   = .col(curr, "buybacks"),
+    stub_equity_issuance = .col(curr, "equity_issuance")
   )
 }
 
@@ -127,7 +129,8 @@ suppressPackageStartupMessages({
 #' @return data.table with 12 price-sensitive indicator columns.
 .compute_price_sensitive_vec <- function(p, shares, eps, equity, rev,
                                          fcf_v, ebitda, td, nd,
-                                         div, buy, eps_g) {
+                                         div, buy, eps_g,
+                                         iss = NA_real_) {
 
   # Market cap & enterprise value
   mc <- ifelse(!is.na(p) & !is.na(shares), p * shares, NA_real_)
@@ -179,6 +182,15 @@ suppressPackageStartupMessages({
   bb_yield <- ifelse(!is.na(abs_buy) & !is.na(mc) & abs(mc) >= 1e-9,
                      abs_buy / mc, NA_real_)
 
+  # Net payout yield = (|dividends| + |buybacks| - equity issuance) /
+  # market_cap (Boudoukh et al. 2007). Components zero-if-na; NA when
+  # none of the three is reported.
+  any_payout <- !is.na(abs_div) | !is.na(abs_buy) | !is.na(iss)
+  npy_num <- ifelse(is.na(abs_div), 0, abs_div) +
+    ifelse(is.na(abs_buy), 0, abs_buy) - ifelse(is.na(iss), 0, iss)
+  npy <- ifelse(any_payout & !is.na(mc) & abs(mc) >= 1e-9,
+                npy_num / mc, NA_real_)
+
   data.table(
     pe_trailing      = pe,
     peg              = peg,
@@ -191,7 +203,8 @@ suppressPackageStartupMessages({
     dividend_yield   = div_yield,
     buyback_yield    = bb_yield,
     market_cap       = mc,
-    enterprise_value = ev
+    enterprise_value = ev,
+    net_payout_yield = npy
   )
 }
 
@@ -241,6 +254,12 @@ build_ticker_fundamentals <- function(ticker, cik, sector,
   fiscal_years <- sort(unique(fy_all$fiscal_year))
   annual_forms <- c("10-K", "10-K/A", "20-F", "20-F/A", "40-F", "40-F/A")
 
+  # Split events for share-issuance adjustment (loaded once per ticker;
+  # guarded so the builder works when ttm_eps.R is not sourced)
+  splits <- if (exists("load_ticker_splits")) {
+    tryCatch(load_ticker_splits(ticker, fetch = FALSE), error = function(e) NULL)
+  } else NULL
+
   results <- vector("list", length(fiscal_years))
   n_ok <- 0L
 
@@ -275,7 +294,8 @@ build_ticker_fundamentals <- function(ticker, cik, sector,
     # Compute indicators with price=NA (price-sensitive ones become NA)
     indicators <- tryCatch(
       compute_ticker_indicators(fund_asof, price_on_filed = NA_real_,
-                                sector = sector, target_fy = fy),
+                                sector = sector, target_fy = fy,
+                                splits = splits),
       error = function(e) NULL
     )
     if (is.null(indicators)) next
@@ -449,7 +469,10 @@ update_ticker_daily <- function(ticker,
     nd      = as.numeric(fund_dt$stub_net_debt[fund_idx]),
     div     = as.numeric(fund_dt$stub_dividends[fund_idx]),
     buy     = as.numeric(fund_dt$stub_buybacks[fund_idx]),
-    eps_g   = result_dt$eps_growth_yoy  # from fundamental indicators
+    eps_g   = result_dt$eps_growth_yoy,  # from fundamental indicators
+    iss     = if ("stub_equity_issuance" %in% names(fund_dt)) {
+      as.numeric(fund_dt$stub_equity_issuance[fund_idx])
+    } else NA_real_   # pre-Wave-2 fund layers lack the stub
   )
 
   # Bind price-sensitive columns into result

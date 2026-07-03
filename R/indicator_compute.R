@@ -4,7 +4,7 @@
 # Pure computation layer: no I/O. Receives data.tables and price scalars,
 # returns named vectors and data.tables.
 #
-# Computes 74 output fields from EDGAR XBRL data + market prices:
+# Computes 81 output fields from EDGAR XBRL data + market prices:
 #   - 36 baseline indicators (valuation, profitability, growth, leverage,
 #     efficiency, cash flow quality, shareholder return, size)
 #   - 2 size extras (shares outstanding, public float)
@@ -15,6 +15,9 @@
 #   - 15 Wave 1 balance-sheet change indicators (Richardson 2005
 #     decomposition, dNOA, Soliman changes, inventory/PPE investment,
 #     equity growth, LTNOA growth) -- see docs/research/09
+#   - 7 Wave 2 external financing indicators (Bradshaw 2006 net debt/
+#     equity financing + XFIN, composite debt issuance, split-adjusted
+#     share issuance 1y/5y, net payout yield) -- see docs/research/09
 #
 # Public API:
 #   compute_ticker_indicators(fund_dt, price, sector, target_fy, target_period)
@@ -52,9 +55,9 @@ suppressPackageStartupMessages({
   interest_expense = c("InterestIncomeExpenseNet")
 )
 
-# Canonical indicator names in output order (74 entries):
+# Canonical indicator names in output order (81 entries):
 # 36 baseline + 2 size (shares_outstanding, public_float) + 5 tier1 +
-# 10 piotroski (9 components + composite) + 6 tier2 + 15 wave1
+# 10 piotroski (9 components + composite) + 6 tier2 + 15 wave1 + 7 wave2
 .INDICATOR_NAMES <- c(
   # Valuation (8)
   "pe_trailing", "peg", "pb", "ps", "pfcf",
@@ -92,7 +95,11 @@ suppressPackageStartupMessages({
   "del_netfin", "total_accruals",
   "dnoa", "ch_nncoa", "ch_nwc",
   "inventory_change", "inventory_growth", "ppe_inv_change",
-  "equity_growth", "gr_ltnoa"
+  "equity_growth", "gr_ltnoa",
+  # Wave 2: external financing family (7) -- OpenAP expansion
+  "net_debt_finance", "net_equity_finance", "xfin",
+  "composite_debt_issuance", "share_iss_1y", "share_iss_5y",
+  "net_payout_yield"
 )
 
 # Family-to-indicator mapping (canonical groupings, 10 families)
@@ -122,21 +129,24 @@ suppressPackageStartupMessages({
                             "del_equ", "del_netfin", "total_accruals",
                             "dnoa", "ch_nncoa", "ch_nwc",
                             "inventory_change", "inventory_growth",
-                            "ppe_inv_change", "equity_growth", "gr_ltnoa")
+                            "ppe_inv_change", "equity_growth", "gr_ltnoa"),
+  financing         = c("net_debt_finance", "net_equity_finance", "xfin",
+                         "composite_debt_issuance", "share_iss_1y",
+                         "share_iss_5y", "net_payout_yield")
 )
 
 
 #' Return indicator names belonging to one or more families.
 #'
 #' @param families Character vector of family slugs, e.g. "valuation" or
-#'   c("valuation", "growth"). NULL returns all 74 indicator names.
+#'   c("valuation", "growth"). NULL returns all 81 indicator names.
 #'   Matching is case-insensitive.
 #' @return Character vector of indicator names, in canonical order.
 #'
 #' @examples
 #'   indicator_names("valuation")
 #'   indicator_names(c("valuation", "growth"))
-#'   indicator_names()  # all 74
+#'   indicator_names()  # all 81
 indicator_names <- function(families = NULL) {
   if (is.null(families)) return(.INDICATOR_NAMES)
 
@@ -889,6 +899,24 @@ pivot_fundamentals <- function(fund_dt) {
 # derived quantities), or NULL when no prior year exists at annual spacing
 # (gap outside [270, 500] days).
 .prior_fy_row <- function(fund_dt, target_fy) {
+  .lag_fy_row(fund_dt, target_fy, lag_years = 1L)
+}
+
+# Generalized k-year lag row. Selects the FY total_assets period_end
+# closest to (anchor - k * 365.25 days); rejects matches more than 135
+# days off annual spacing (53-week calendars and fiscal-year-end shifts
+# stay well inside that band; a missing year does not). Closest-match
+# also skips fiscal-year-transition stub periods that a plain
+# max(period_end < anchor) would trip on.
+.lag_fy_row <- function(fund_dt, target_fy, lag_years = 1L) {
+  pe <- .lag_fy_pe(fund_dt, target_fy, lag_years)
+  if (is.null(pe)) return(NULL)
+  .fy_row_at_period(fund_dt, pe, label_fy = target_fy - lag_years)
+}
+
+# The balance-sheet date lag_years before the target year's own date.
+# lag_years = 0 returns the target year's anchor date itself.
+.lag_fy_pe <- function(fund_dt, target_fy, lag_years = 1L) {
 
   at_fy <- fund_dt[concept == "total_assets" & !is.na(period_end) &
                      !is.na(period_type) & period_type == "FY"]
@@ -898,18 +926,22 @@ pivot_fundamentals <- function(fund_dt) {
   if (!length(anchor) || is.na(anchor) || is.infinite(as.numeric(anchor))) {
     return(NULL)
   }
+  if (lag_years == 0L) return(anchor)
 
-  prior_pe <- at_fy[period_end < anchor, suppressWarnings(max(period_end))]
-  if (!length(prior_pe) || is.na(prior_pe) ||
-      is.infinite(as.numeric(prior_pe))) {
-    return(NULL)
-  }
+  target_date <- anchor - round(lag_years * 365.25)
+  cands <- at_fy[period_end < anchor, unique(period_end)]
+  if (!length(cands)) return(NULL)
 
-  gap_days <- as.integer(anchor - prior_pe)
-  if (gap_days < 270L || gap_days > 500L) return(NULL)
+  off <- abs(as.numeric(cands - target_date))
+  if (min(off) > 135) return(NULL)
+  cands[which.min(off)]
+}
 
-  rows <- fund_dt[period_type == "FY" & period_end == prior_pe &
-                    !is.na(value)]
+# Assemble a one-row wide slice (with derived quantities) from all FY rows
+# at one balance-sheet date, label-free.
+.fy_row_at_period <- function(fund_dt, pe, label_fy) {
+
+  rows <- fund_dt[period_type == "FY" & period_end == pe & !is.na(value)]
   if (nrow(rows) == 0) return(NULL)
 
   # One value per concept (dedup guarantees uniqueness per (concept,
@@ -918,7 +950,7 @@ pivot_fundamentals <- function(fund_dt) {
   rows <- rows[!duplicated(concept)]
   wide <- dcast(rows, period_end ~ concept, value.var = "value")
   filed_val <- rows[!is.na(filed), if (.N) max(filed) else as.Date(NA)]
-  wide[, `:=`(fiscal_year = target_fy - 1L, period_type = "FY",
+  wide[, `:=`(fiscal_year = as.integer(label_fy), period_type = "FY",
               filed = filed_val)]
   .derive_quantities(wide)
 }
@@ -1102,6 +1134,135 @@ pivot_fundamentals <- function(fund_dt) {
 
 
 # =============================================================================
+# SECTION 6c: WAVE 2 -- EXTERNAL FINANCING FAMILY
+# =============================================================================
+# 7 indicators from the OpenAP expansion (docs/research/09, Wave 2).
+# Annual. Sign conventions: Proceeds*/Repayments* cash-flow tags are
+# positive by construction; buybacks/dividends enter as |absolute| so the
+# result is robust to either reporting sign (same convention as the
+# shareholder-return group).
+#
+# Split adjustment: a share count's split basis is the split state at its
+# FILED date -- comparatives re-reported by later filings arrive
+# retroactively restated (GAAP), so period_end says nothing about basis.
+# share_iss_* maps the current count onto the older row's basis by the
+# product of split ratios (quantmod convention: an n:1 split has ratio
+# 1/n) with ex_date between the two rows' filed dates. When both values
+# survive from the same filing the window is empty and no adjustment is
+# applied -- which is correct, because that filing reported both on one
+# basis. splits = NULL leaves counts unadjusted -- callers supply
+# cache/splits data (see load_ticker_splits).
+
+# Product of split ratios with ex_date in (from, to]; 1 when no splits
+# data or no splits in the window.
+.split_ratio_between <- function(splits, from, to) {
+  if (is.null(splits) || !NROW(splits) || is.na(from) || is.na(to)) return(1)
+  ex <- as.Date(splits$ex_date); rt <- as.numeric(splits$ratio)
+  sel <- !is.na(ex) & !is.na(rt) & rt > 0 & ex > as.Date(from) & ex <= as.Date(to)
+  if (!any(sel)) 1 else prod(rt[sel])
+}
+
+# FY share count at one balance-sheet date, with the row's own filed date
+# (the basis date). Returns list(v, filed) or NULL.
+.fy_shares_at <- function(fund_dt, pe) {
+  if (is.null(pe)) return(NULL)
+  r <- fund_dt[concept == "shares_outstanding" & period_type == "FY" &
+                 period_end == pe & !is.na(value)]
+  if (nrow(r) == 0) return(NULL)
+  list(v = r$value[1], filed = r$filed[1])
+}
+
+.compute_financing <- function(fund_dt, target_fy, curr, prior, lag5,
+                               market_cap, splits = NULL) {
+
+  out <- list(
+    net_debt_finance = NA_real_, net_equity_finance = NA_real_,
+    xfin = NA_real_, composite_debt_issuance = NA_real_,
+    share_iss_1y = NA_real_, share_iss_5y = NA_real_,
+    net_payout_yield = NA_real_
+  )
+
+  iss  <- .col(curr, "equity_issuance")
+  bb   <- .col(curr, "buybacks")
+  dv   <- .col(curr, "dividends_paid")
+  abs_bb <- if (is.na(bb)) NA_real_ else abs(bb)
+  abs_dv <- if (is.na(dv)) NA_real_ else abs(dv)
+
+  # -- Boudoukh et al. (2007 JF): net payout yield. Current-year data
+  #    only; price-sensitive via market cap. Components zero-if-na
+  #    (absence = none paid/issued) but at least one must be reported.
+  if (!is.na(market_cap) && !all(is.na(c(abs_dv, abs_bb, iss)))) {
+    payout <- .zero_if_na(abs_dv) + .zero_if_na(abs_bb) - .zero_if_na(iss)
+    out$net_payout_yield <- .safe_divide(payout, market_cap)
+  }
+
+  if (!is.null(prior)) {
+
+    at_t <- .col(curr, "total_assets")
+    at_p <- .col(prior, "total_assets")
+    avg_at <- if (!is.na(at_t) && !is.na(at_p)) (at_t + at_p) / 2 else NA_real_
+
+    # -- Bradshaw, Richardson, Sloan (2006 JAE): net debt financing =
+    #    (LT debt issuance - LT debt repayment + change in short-term
+    #    debt) / avgAT. Components zero-if-na; NA when nothing at all is
+    #    reported on the debt-financing side.
+    dltis <- .col(curr, "debt_issuance")
+    dltr  <- .col(curr, "debt_repayment")
+    std_t <- .col(curr, "short_term_debt")
+    std_p <- .col(prior, "short_term_debt")
+    if (!all(is.na(c(dltis, dltr, std_t, std_p)))) {
+      d_std <- .zero_if_na(std_t) - .zero_if_na(std_p)
+      ndf_num <- .zero_if_na(dltis) - .zero_if_na(dltr) + d_std
+      out$net_debt_finance <- .safe_divide(ndf_num, avg_at)
+    }
+
+    # -- Bradshaw et al. (2006): net equity financing = (stock issuance
+    #    - repurchases - dividends) / avgAT.
+    if (!all(is.na(c(iss, abs_bb, abs_dv)))) {
+      nef_num <- .zero_if_na(iss) - .zero_if_na(abs_bb) - .zero_if_na(abs_dv)
+      out$net_equity_finance <- .safe_divide(nef_num, avg_at)
+    }
+
+    # -- XFIN = net external financing (Bradshaw et al. 2006)
+    if (!is.na(out$net_debt_finance) && !is.na(out$net_equity_finance)) {
+      out$xfin <- out$net_debt_finance + out$net_equity_finance
+    }
+
+    # -- Pontiff & Woodgate (2008 JF): 1-year split-adjusted share
+    #    issuance. Counts and their basis (filed) dates come from the
+    #    long data at the anchored balance-sheet dates.
+    sh_t <- .fy_shares_at(fund_dt, .lag_fy_pe(fund_dt, target_fy, 0L))
+    sh_p <- .fy_shares_at(fund_dt, .lag_fy_pe(fund_dt, target_fy, 1L))
+    if (!is.null(sh_t) && !is.null(sh_p)) {
+      adj <- .split_ratio_between(splits, sh_p$filed, sh_t$filed)
+      out$share_iss_1y <- .safe_growth(sh_t$v * adj, sh_p$v)
+    }
+  }
+
+  if (!is.null(lag5)) {
+
+    # -- Lyandres, Sun, Zhang (2008 RFS): composite debt issuance =
+    #    log(total debt_t / total debt_{t-5}), both must be positive.
+    td_t <- .col(curr, "total_debt")
+    td_5 <- .col(lag5, "total_debt")
+    if (!is.na(td_t) && !is.na(td_5) && td_t > 0 && td_5 > 0) {
+      out$composite_debt_issuance <- log(td_t / td_5)
+    }
+
+    # -- Daniel & Titman (2006 JF): 5-year split-adjusted share issuance
+    sh_t <- .fy_shares_at(fund_dt, .lag_fy_pe(fund_dt, target_fy, 0L))
+    sh_5 <- .fy_shares_at(fund_dt, .lag_fy_pe(fund_dt, target_fy, 5L))
+    if (!is.null(sh_t) && !is.null(sh_5)) {
+      adj <- .split_ratio_between(splits, sh_5$filed, sh_t$filed)
+      out$share_iss_5y <- .safe_growth(sh_t$v * adj, sh_5$v)
+    }
+  }
+
+  out
+}
+
+
+# =============================================================================
 # SECTION 7: CROSS-SECTIONAL Z-SCORING
 # =============================================================================
 
@@ -1174,11 +1335,15 @@ get_indicator_names <- function() {
 #' @param target_fy Integer or NULL. Target fiscal year. If NULL, uses the
 #'   most recent fiscal year available.
 #' @param target_period Character. Period type to target ("FY" for annual).
+#' @param splits data.table or NULL. Split events (ex_date, ratio) for this
+#'   ticker, as returned by load_ticker_splits(). Used to split-adjust the
+#'   share-issuance indicators; NULL leaves share counts unadjusted.
 #' @return Named numeric vector of indicator values. NA for indicators that
 #'   cannot be computed. Returns all-NA vector on total failure.
 compute_ticker_indicators <- function(fund_dt, price_on_filed, sector,
                                       target_fy = NULL,
-                                      target_period = "FY") {
+                                      target_period = "FY",
+                                      splits = NULL) {
 
   # All-NA fallback
   all_na <- setNames(rep(NA_real_, length(.INDICATOR_NAMES)), .INDICATOR_NAMES)
@@ -1260,6 +1425,9 @@ compute_ticker_indicators <- function(fund_dt, price_on_filed, sector,
     t1   <- .compute_tier1(curr, prior)
     t2   <- .compute_tier2(curr, prior, quarterly_hist)
     bsc  <- .compute_bs_change(curr, prior)
+    lag5 <- .lag_fy_row(fund_dt, target_fy, lag_years = 5L)
+    fin  <- .compute_financing(fund_dt, target_fy, curr, prior, lag5,
+                               val$market_cap, splits)
 
     # PEG ratio: depends on growth (computed after growth)
     peg <- NA_real_
@@ -1355,7 +1523,15 @@ compute_ticker_indicators <- function(fund_dt, price_on_filed, sector,
       inventory_growth = bsc$inventory_growth,
       ppe_inv_change   = bsc$ppe_inv_change,
       equity_growth    = bsc$equity_growth,
-      gr_ltnoa         = bsc$gr_ltnoa
+      gr_ltnoa         = bsc$gr_ltnoa,
+      # Wave 2: external financing family (7)
+      net_debt_finance        = fin$net_debt_finance,
+      net_equity_finance      = fin$net_equity_finance,
+      xfin                    = fin$xfin,
+      composite_debt_issuance = fin$composite_debt_issuance,
+      share_iss_1y            = fin$share_iss_1y,
+      share_iss_5y            = fin$share_iss_5y,
+      net_payout_yield        = fin$net_payout_yield
     )
 
     # Financial sector: NA-out meaningless indicators

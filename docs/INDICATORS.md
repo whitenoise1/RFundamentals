@@ -1,6 +1,6 @@
 # RFundamentals: Indicator Reference
 
-74 fundamental indicators computed from SEC EDGAR XBRL filings and Yahoo Finance
+81 fundamental indicators computed from SEC EDGAR XBRL filings and Yahoo Finance
 market data. Each indicator is listed with its formula, data sources, and
 interpretation.
 
@@ -582,6 +582,32 @@ The prior year is selected by period_end, never by fiscal_year label
 | `ppe_inv_change` **[NA for financials]** | Δ(PPEgross + Inventory) | lagAT | Lyandres 2008 (7.86) |
 | `equity_growth` | Equity_t / Equity_{t-1} - 1 (both > 0) | -- | Lockwood-Prombutr 2010 (4.26) |
 | `gr_ltnoa` | ΔLTNOA, LTNOA = NOA - WC | avgAT | Fairfield 2003 (3.73) |
+
+---
+
+## 12. External Financing Family (7 indicators, Wave 2)
+
+Annual financing-flow indicators from the OpenAP expansion (full
+references and construction notes in docs/RESEARCH_INDICATORS.md, WAVE 2).
+Proceeds*/Repayments* cash-flow tags are positive; buybacks/dividends
+enter as absolute values. avgAT = average total assets.
+
+| Indicator | Formula | Source study (CZ t-stat) |
+|---|---|---|
+| `net_debt_finance` | (debt issuance - repayment + ΔSTD) / avgAT | Bradshaw 2006 (7.70) |
+| `net_equity_finance` | (equity issuance - \|buybacks\| - \|dividends\|) / avgAT | Bradshaw 2006 (5.40) |
+| `xfin` | net_debt_finance + net_equity_finance | Bradshaw 2006 (4.84) |
+| `composite_debt_issuance` | log(total debt_t / total debt_{t-5}) | Lyandres 2008 (5.19) |
+| `share_iss_1y` | split-adjusted shares_t / shares_{t-1} - 1 | Pontiff-Woodgate 2008 (4.97) |
+| `share_iss_5y` | split-adjusted shares_t / shares_{t-5} - 1 | Daniel-Titman 2006 (4.32) |
+| `net_payout_yield` | (\|dividends\| + \|buybacks\| - equity issuance) / market cap | Boudoukh 2007 (2.57) |
+
+Split adjustment: a share count's basis is the split state at its filed
+date; the adjustment multiplies the current count by the product of split
+ratios between the two rows' filed dates (empty window when both survive
+from one filing). Tickers without cached split events (cache/splits) are
+computed unadjusted. `net_payout_yield` is price-sensitive and updates
+daily in the timeseries layer.
 
 ---
 
