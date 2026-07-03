@@ -259,6 +259,20 @@ Also free once this lands: DelEqu (3.18), DelLTI (2.55), TotalAccruals
 
 ### Wave 2 -- external financing family (7 indicators, t-stats 2.3-7.7)
 
+STATUS: COMPLETED 2026-07-03 (commits 7b8121a, b45a2f0) as the
+`financing` family, 74 -> 81 indicators. Canonical names/formulas in
+docs/INDICATORS.md section 12 and RESEARCH_INDICATORS.md WAVE 2.
+Coverage (2024-06-30): net_equity_finance 99%, share_iss_1y 98.4%,
+share_iss_5y 95.6%, net_payout_yield 93.2%, net_debt_finance 87.3%,
+composite_debt_issuance 82.9%. Split adjustment implemented on the
+filed-date basis rule (a count's split basis is the split state at its
+filing date) -- validated on AAPL 2020 4:1 across three vintage
+scenarios. Share counts prefer the DEI cover instant after finding that
+constant-issued-count filers (BA) zeroed share_iss for 2.4% of the
+universe; BA's Oct-2024 $24B offering now reads +22.9% (1y) and its
+net_equity_finance +12.4%. Anchor checks: AAPL FY2020 net equity
+financing -25.8% (its 72B buybacks + 14B dividends over avgAT).
+
 Requires Phase 0 cash-flow-statement tags. Annual, scaled by avgAT or ME.
 
 | # | Acronym | t | Original study | Formula |
