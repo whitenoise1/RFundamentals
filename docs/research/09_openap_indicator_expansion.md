@@ -291,6 +291,51 @@ differencing. Gate test: AAPL 2020 4:1 split must not show as 300% issuance.
 
 ### Wave 3 -- quarterly seasonal-surprise family (6 indicators, t-stats 2.5-9.5)
 
+STATUS: CODE COMPLETE 2026-07-03 as the `surprise` family, 81 -> 87.
+Canonical names/formulas in docs/INDICATORS.md section 13 and
+RESEARCH_INDICATORS.md WAVE 3. Constructions verified against OpenAP
+pyCode (Signals/pyCode/Predictors); deltas from the draft plan adopted
+from there: drift/sd are available-case over the prior 8 quarters (no
+6-of-8 minimum; sd needs >= 2 and is over drift-adjusted surprises),
+NumEarnIncrease replicates OpenAP exactly (missing quarter continues a
+streak; a 9+ streak scores 0 -- MSFT reads 0 by design), ChTax scales by
+assets at q-4, roaq by assets at q-1, EarningsConsistency is annual-only
+with the CLG-CHG exception filters. Deviations documented: diluted EPS
+(we do not cache basic ex-extraordinaries) and explicit split adjustment
+(OpenAP relies on Compustat; unadjusted, AAPL 2020 fabricates a -3x
+seasonal diff). revenue_growth_qoq rebased onto the panel (Wave 1
+follow-up closed); it now reflects the latest FILED quarter.
+
+Gates: indicator tests 254/254 (34 new), fetcher 159/159, pit_assembler
+55/55, timeseries 188/188, ttm_eps 23/23, pipeline 34/34, integration
+A-F 54/54. Anchors: AAPL FY2024 Q4 revenue 94.93B via FY - Q3ytd
+(exact); AAPL 2020 split-adjusted EPS chain reproduces the post-split
+basis to the cent, SUE sane at -0.71 (unadjusted revenue surprise would
+read -9.7); JPM ch_tax/roaq computed; KR 16-week Q1 classifies and
+seasonally aligns. A .q_shares_at direction bug (counts adjust opposite
+to per-share values) was caught by the unit tests and fixed. Coverage on
+a fresh 2024-06-30 snapshot (498 tickers): ch_tax 98.4%,
+num_earn_increase 98.6%, revenue_surprise 96.6%, earnings_surprise
+98.2%, roaq 95.4%, earnings_consistency 45.4% (by construction --
+the Alwathainani consistency filter excludes sign-flippers). Cell-level
+diff vs the 81-indicator baseline: only revenue_growth_qoq differs
+(489/498 tickers, the intended rebase); all other 80 indicators
+identical. Pre-existing observation, not Wave 3: validate_snapshot's
+zscore_mean_near_zero check fails on the baseline too (12 skewed level
+indicators, max |z-mean| 0.748 = revenue_raw); left untouched.
+
+Regeneration COMPLETED 2026-07-04: all 66 snapshots at 87 indicators
+(verified per-file), timeseries fund + daily layers rebuilt (639 layers,
+all carrying the surprise columns; the 47 daily-layer failures are the
+usual price-less tickers). One rebuild subtlety: the Wave 2 timeseries
+run overlapped this wave's coding session and sourced indicator_compute
+BEFORE the .q_shares_at split-direction fix -- its fund layers carried
+wrong revenue_surprise for split tickers (AAPL, 14 cells). Caught by
+recompute-diff, fixed by a forced layer rebuild; snapshots were never
+affected (all regenerated post-fix). Old layers parked in
+cache/timeseries_pre_wave3/ (deletable). Historical coverage matches the
+XBRL-ramp expectation: SUE 83% (2011) -> 96% (2013) -> 98% (2024).
+
 Requires standalone-quarter income-statement values (Q4 = FY − Q1..Q3, same
 pattern as .decumulate_cfo for CFO). This machinery is the main cost; the
 indicators are then near-free, and roaq / ChangeRoA / ChangeRoE variants
@@ -304,6 +349,109 @@ come along at no cost.
 | 4 | EarningsSurprise (SUE) | 4.94 | Foster, Olsen, Shevlin (1984 TAR) | (EPS_q − EPS_{q-4} − drift) / σ(seasonal diffs, prior 8q) |
 | 5 | EarningsConsistency | 2.51 | Alwathainani (2009 BAR) | consistency of annual EPS growth sign/rank over prior 5y; verify exact form |
 | 6 | OPLeverage_q etc. | -- | (variants) | optional once quarterly machinery exists |
+
+#### Wave 3 implementation plan (2026-07-03)
+
+Final scope: 6 indicators, new family `surprise`, 81 -> 87. The five core
+rows above plus roaq (Balakrishnan 2010, t = 5.90, listed in section 2 as
+free once the machinery lands). OPLeverage_q and other quarterly variants
+deferred. No new fetcher concepts: income_tax_expense (99.4%), net_income,
+revenue, eps_diluted, total_assets, shares_outstanding are all cached.
+
+Step 1 -- standalone-quarter panel (the machinery, main cost).
+New builder `.build_quarter_panel(fund_dt, splits)` in indicator_compute.R,
+constructed from the LONG as-of view -- NOT from pivot (fiscal_year,
+period_type) labels. Grouping by (period_start, duration) is label-free,
+which resolves the quarterly label issue flagged in the Wave 1 status note
+as a Wave 3 blocker; `build_ttm_eps_series` (ttm_eps.R) is the proven
+template. Per concept x quarter:
+- classify duration rows into 3mo/2Q/3Q/FY using the .decumulate_cfo bands
+  (Q1 upper bound 120d for Kroger/AAP 16-week Q1);
+- standalone value: prefer a direct 3-month row where the filer reports
+  one; else difference consecutive YTD rows sharing period_start;
+  Q4 = FY - Q3ytd. Classify per ROW, not per filer -- styles are mixed;
+- seasonal lag q-4: match by period_end 330-400 days earlier (52/53-week
+  safe), gap guard -> NA, never difference across a fiscal-year-change stub;
+- eps_diluted normalized to current split basis via .split_factor(filed)
+  BEFORE differencing (reuse from ttm_eps.R); per-share revenue uses
+  split-adjusted shares (DEI cover instant preferred, per Wave 2);
+- instants (total_assets, shares) taken at each quarter's period_end.
+PIT is inherited: both call sites (assemble_snapshot, timeseries builder)
+already hand compute_indicators the pit_dedup as-of view and splits.
+
+Step 2 -- indicators (near-free given the panel).
+- ch_tax = (tax_q - tax_{q-4}) / AT_{q-4}
+- num_earn_increase = consecutive quarters with NI_q > NI_{q-4}, cap 8
+- revenue_surprise / earnings_surprise (SUE) = (x_q - x_{q-4} - drift) /
+  sd(seasonal diffs, prior 8 quarters), x = revenue per share / EPS;
+  require >= 6 of 8 prior diffs (confirm threshold vs OpenAP
+  SignalDocumentation at implementation time); sd floor guard for
+  degenerate near-zero dispersion
+- earnings_consistency = annual EPS growth consistency over prior 5y;
+  verify exact Alwathainani form from SignalDocumentation before coding
+- roaq = NI_q / AT_{q-1 quarter}
+Latest quarter = max standalone period_end in the as-of view. Financial
+sector: no COGS/inventory dependency, so financials are computed, not
+masked; bank revenue tags are sparse, revenue_surprise will be NA-heavy
+for financials -- document, do not force.
+
+Step 3 -- also in this wave: rebase revenue_growth_qoq curr_q/prior_q
+selection onto the panel (period_end order, not label order), closing the
+Wave 1 follow-up.
+
+Step 4 -- wiring: get_indicator_names() + family map (`surprise`),
+.assert_output, snapshot row-count assertions (pit_assembler + pipeline
+gates), INDICATORS.md section 13, RESEARCH_INDICATORS.md WAVE 3.
+
+Step 5 -- per repo rules: code -> detailed code review -> unit tests ->
+gate test. Unit tests: synthetic YTD-only / 3mo-only / mixed filers,
+split-spanning SUE, 16-week Q1, fiscal-year-change stub -> NA, missing
+Q3 -> Q4 NA, streak edge cases (exactly 8, broken streak, NA quarter).
+Gate anchors: AAPL FY2024 Q4 revenue 94.93B via FY - Q3ytd; AAPL 2020 4:1
+split must not distort SUE or share-based revenue_surprise; a known
+earnings streak (e.g. MSFT) for num_earn_increase; ch_tax present for a
+bank. Then integration A-F, 20-ticker prototype coverage report, full
+regeneration of all snapshots + timeseries at 87 indicators, coverage on
+2024-06-30 against the 70% bar.
+
+Risks specific to this wave:
+1. Mixed 3mo/YTD tagging within one filer history (classify per row).
+2. Q4 derivation mixes tag aliases between FY and Q3ytd rows within a
+   concept -- accept (same-concept differencing only), spot-check anchors.
+3. History depth: SUE needs 13 consecutive quarters; snapshots before
+   ~2013 will be NA-heavy (XBRL mandate ramp) -- document, matches the
+   existing 5y-lookback caveat.
+4. sd ~= 0 for ultra-stable seasonal diffs -> guard, NA not Inf.
+
+Plan review notes (code-verified 2026-07-03, pre-implementation):
+1. Duration-band conflict: two classification conventions coexist.
+   ttm_eps.R uses catch-all cumulative bands (<=135 Q1, <=225 Q2,
+   <=315 Q3, else FY); .decumulate_cfo uses strict bands with NA gaps
+   (60-120 / 160-200 / 250-290 / 330-380). The panel builder must use
+   the strict-band style (gap -> NA beats silent misclassification for
+   differencing). Extract a shared .classify_duration() helper; leave
+   ttm_eps.R on its own bands (TTM identity is robust to a missing
+   middle quarter, differencing is not).
+2. Panel dedup rule: per (concept, period_start, duration_class) keep
+   non-8-K then EARLIEST filed -- exactly the build_ttm_eps_series
+   vintage rule (ttm_eps.R lines 71-79), PIT-correct on the vintage
+   cache and a no-op on collapsed caches.
+3. History depth per indicator (sets coverage expectations for the
+   2024-06-30 report): roaq 2 consecutive quarters; ch_tax 5 (needs
+   AT instant at q-4 period_end); num_earn_increase 12 (cap-8 streak =
+   8 seasonal comparisons); SUE / revenue_surprise 13; and
+   earnings_consistency is ANNUAL-only (6 FY EPS values, split-adjusted)
+   -- it does not depend on the quarter panel and can be built
+   independently of Steps 1-2.
+4. Call-site confirmation: compute_ticker_indicators already receives
+   the long as-of fund_dt and splits (financing wave precedent), so
+   .compute_surprise(fund_dt, splits, ...) requires no signature change
+   in pit_assembler or timeseries_builder. The revenue_growth_qoq label
+   defect is confirmed at indicator_compute.R:1404-1419.
+5. Sequencing: Wave 3 coding may start immediately (touches no cache),
+   but the full 87-indicator regeneration waits until the in-flight
+   Wave 2 regeneration run completes and its 81-indicator snapshots are
+   validated as the comparison baseline.
 
 ### Wave 4 -- levels and simple ratios (17 indicators, t-stats 2.2-5.8)
 
@@ -342,6 +490,72 @@ Financial-sector NA policy applies: GrSaleToGrInv, InvGrowth, ChInv,
 InvestPPEInv, tang, OPLeverage, ChAssetTurnover join the existing NA list
 for financials where COGS/inventory-dependent.
 
+#### Wave 4 preflight verification (2026-07-03)
+
+All 28 constructions verified against the OpenAP Stata code
+(github.com/OpenSourceAP/CrossSection, now under Signals/
+LegacyStataCode/ -- the old Signals/Code/ paths 404). Canonical
+formulas, deviations and guards are in RESEARCH_INDICATORS.md WAVE 4
+(W4.1-W4.22); entries there SUPERSEDE the table above where they
+differ. Corrections found:
+
+1. grcapx3y is 3*capx_t/(capx_{t-1}+capx_{t-2}+capx_{t-3}), current
+   capex over the prior-3y average -- not capx_t/capx_{t-3} - 1.
+2. Leverage (Bhandari) is total LIABILITIES / ME (lt), not total debt.
+3. CashProd as replicated is (ME - AT)/CHE; OpenAP omits the paper's
+   + DLTT term. We follow the replicated code.
+4. tang uses GROSS PP&E (ppegt), not net, and OpenAP restricts it to
+   manufacturing (SIC 2000-3999); we compute for all non-financials.
+5. Cash (Palazzo) is quarterly cheq/atq in OpenAP; ours is
+   filing-frequency (cash + STI)/AT, documented as cash_assets.
+6. ETR is an OpenAP PLACEBO and price-interacted; dropped in favor of
+   a plain effective_tax_rate level (tax/pretax).
+7. PctTotAcc's OpenAP numerator needs total financing + investing CF
+   (fincf, ivncf -- not fetched); we use the Wave 1 Richardson
+   balance-sheet decomposition over |NI| instead.
+8. ChAssetTurnover's OpenAP NOA needs aco/lco/lo detail tags; we reuse
+   the Tier 1 Hirshleifer NOA. Negative-turnover guard adopted.
+9. Tax (Lev-Nissim): OpenAP grosses up txfo+txfed (fallback txt-txdi),
+   neither split fetched -- we use total tax expense; OpenAP's rate
+   table was never updated for TCJA, we use 35% through 2017, blended
+   straddle year, 21% after.
+10. RDcap zero-fills missing R&D and OpenAP keeps only the bottom size
+    tercile -- computed for all, small-cap caveat documented.
+11. Investment (TWX) benchmark mean INCLUDES the current year, min 2
+    of 3 years, revenue >= $10M floor, no minus-one.
+12. SurpriseRD thresholds strictly > 1.05 on both conditions; OpenAP's
+    Stata missing-semantics leak (missing revt/at pass) fixed by
+    requiring both nonmissing.
+13. ChInvIA ingredient is the AB98 2y-average-base capex growth with
+    1y fallback, demeaned by equal-weighted mean within 2-digit SIC;
+    ours demeans within the finviz sector map at the assembler stage.
+14. salecash, depr, pchdepr are OpenAP Placebos (Table 4); included
+    as database quantities, documented as non-predictors.
+15. Backtest-only sample filters (size terciles in OperProf/RDcap,
+    B/M quintiles in NetDebtPrice, positive-payout + 24-month
+    seasoning in PayoutYield, financials exclusion where it is a
+    sample choice) documented, not applied.
+
+Zero new fetcher concepts required: every variant chosen stays inside
+the 45 fetched concepts (no txditc, txfo/txfed/txdi, fincf/ivncf,
+pstkrv, aco/lco/lo, dc/dvpa/tstkp).
+
+Final Wave 4 set: 29 indicators, 87 -> 116 once Wave 3's 6 land
+(before Wave 3: 81 -> 110). Families: "levels" (19) -- rd_me, ebm,
+bpebm, cf_me, cfp, net_debt_price, tang, tax_to_book,
+effective_tax_rate, am, book_leverage, leverage_mkt, cash_prod,
+oper_prof, cash_assets, op_leverage, payout_yield, salecash,
+depr_rate; "investment" (10) -- pchdepr, grcapx, grcapx3y,
+pct_tot_acc, ch_asset_turnover, gr_sale_to_gr_inv, surprise_rd,
+investment, rd_cap, ch_inv_ia. Financial NA additions: tang,
+op_leverage, ch_asset_turnover, gr_sale_to_gr_inv, net_debt_price.
+
+Implementation gated on the Wave 3 commit (shared files: indicator
+names, family map, gate assertions). ch_inv_ia adds a sector-demean
+step to pit_assembler; everything else is indicator_compute only.
+Fetched OpenAP .do files retained in the session scratchpad during
+implementation for line-level reference.
+
 ### Wave 5 -- composite scores (4-6 indicators)
 
 | Acronym | t | Original study | Notes |
@@ -351,6 +565,170 @@ for financials where COGS/inventory-dependent.
 | ZScore | (1.20) | Altman (1968 JF) via Dichev (1998) | 1.2 WC/AT + 1.4 RE/AT + 3.3 EBIT/AT + 0.6 ME/LT + 1.0 revenue/AT. Weak predictor but canonical database indicator. |
 | Herf | 2.30 | Hou & Robinson (2006 JF) | sum of squared within-industry sales shares, 3y average. Caveat: our universe is S&P 500 only, concentration is relative to large-cap peers, not the full market. |
 | KZ / WW | (0.53/1.34) | Lamont et al. (2001) / Whited & Wu (2006) | financial-constraint indices; completeness only, lowest priority. |
+
+#### Wave 5 preflight verification + implementation plan (2026-07-03)
+
+All six constructions verified against the OpenAP code. Note: the repo's
+current implementation is Python (Signals/pyCode/Predictors|Placebos/),
+a line-by-line port of Signals/LegacyStataCode/; the Stata remains the
+canonical spec and is what was verified. Fetched .do/.py files retained
+in the session scratchpad for line-level reference during
+implementation. Zero new fetcher concepts required; all inputs are
+inside the 45 fetched concepts.
+
+Final scope: 14 indicators, 116 -> 130 (81 committed + Wave 3's 6 +
+Wave 4's 29 + these). Families: "mohanram" (9) -- ms_roa, ms_cfroa,
+ms_accrual, ms_roa_vol, ms_rev_vol, ms_rd, ms_capex, ms_adv, ms_score
+(components stored individually, f_score pattern); "distress" (2) --
+o_score, z_score; "structure" (3) -- herf, kz_index, ww_index.
+
+Construction findings and decisions (canonical entries go into
+RESEARCH_INDICATORS.md WAVE 5 at implementation; they SUPERSEDE the
+table above where they differ):
+
+1. MS is quarterly in OpenAP: TTM sums (12-month rolling, min 12
+   months) of quarterly NI, CFO, capex, R&D over average / lagged
+   quarterly assets; advertising stays annual. The volatility
+   components are sd of quarterly ROA (niq/atq) and sd of quarterly
+   YoY sales growth (saleq vs 4 quarters back) over a 48-month window,
+   min 18 months (~16 quarters, min ~6). Ours: level components
+   (m1-m3, m6-m8) from FY filing-frequency values per repo convention;
+   volatility components (m4, m5) from the Wave 3 standalone-quarter
+   panel, trailing 16 quarters, min 6 observations.
+2. MS sample filter: OpenAP restricts to the lowest-BM quintile
+   (log(ceq/ME), monthly) with ceq > 0 BEFORE computing industry
+   medians, so the medians are within-growth-firm medians. Backtest
+   sample choice per the Wave 4 item-15 rule: we compute across the
+   full snapshot universe and document that our medians are
+   full-universe large-cap medians -- the largest deviation in this
+   wave.
+3. MS industry = 2-digit sicCRSP with >= 3 firms per industry-month;
+   ours = finviz sector (11 groups, always >= 3 in a 500-name
+   snapshot), medians computed at the assembler stage via the same
+   cross-sectional hook Wave 4 adds for ch_inv_ia.
+4. MS missing handling: OpenAP zero-fills advertising and quarterly
+   R&D; adopted (absent R&D/advertising tags = immaterial spend). The
+   Stata missing=+infinity artifact (missing numerator grants
+   m1/m2/m3/m6/m7/m8 a 1; the Python port reproduces it deliberately)
+   is NOT replicated -- missing profitability inputs give NA
+   components; ms_score NA if any component NA (f_score precedent).
+   With 47.9% advertising coverage the zero-fill keeps m8 computable,
+   but sector medians of adv/AT will sit at or near 0, so m8
+   degenerates toward "discloses advertising at all" -- document,
+   keep the component stored.
+5. MS discretization: OpenAP clamps the 0-8 sum into {1..6} (>=6 -> 6,
+   <=1 -> 1). Traded-signal transform -- we store the raw 0-8 sum.
+6. OScore: FFO = Compustat fopt with oancf fallback; post-1987 (our
+   whole sample) that is simply CFO -- we use operating_cashflow. ib
+   maps to net_income. INTWO in the replicated code is
+   (ib_t + ib_{t-1}) < 0 -- the SUM negative, not loss-in-both-years
+   as in Ohlson's paper -- follow the replicated code. Size term is
+   log(AT/GNP deflator); the deflator is omitted (it is constant
+   within a snapshot, so cross-sectional ordering and z-scores are
+   exact; raw-level drift across years documented) -- no new external
+   data dependency. o_score is price-free, so it is also available in
+   the per-ticker timeseries fund layer.
+7. OScore discretization per Dichev Table 5 (binary: top decile vs
+   deciles 1-7, deciles 8-9 dropped) is a traded-signal transform --
+   we store the continuous score. Sign: higher = more distressed.
+8. ZScore (OpenAP Placebo): EBIT proxy is ni + xint + txt =
+   net_income + interest_expense + income_tax_expense (not operating
+   income); leverage term is 0.6 * ME / total LIABILITIES; revt/at
+   coefficient 1.0. OpenAP refreshes ME monthly; ours is market_cap at
+   filing date, making z_score price-sensitive: snapshot-only, NA in
+   the timeseries fund layer.
+9. OScore/ZScore exclusions: OpenAP sets NA for SIC 4000-4999 and
+   > 5999 (transport/utilities, financials and beyond). Mapped to
+   sectors: NA for Financial, Utilities, Real Estate (transports
+   inside Industrials cannot be isolated with the finviz map;
+   documented). Implemented by generalizing .FINANCIAL_NA_INDICATORS
+   into a sector -> indicators NA map.
+10. Herf: the industry is de facto 4-digit sicCRSP (the code's "sic3D"
+    slices 4 characters; the Python port reproduces this). Ours =
+    finviz INDUSTRY (~150 groups), the closest granularity our map
+    offers. HHI = sum of squared within-industry revenue shares;
+    3-year average (OpenAP: 36-month rolling mean, min 12 months ->
+    ours: mean of up to 3 annual HHIs, min 1). Singleton industries
+    give HHI = 1 identically -> NA (universe artifact). The permanent
+    SIC-49 exclusion maps to the Utilities mask; shrcd, pre-1983
+    regulated-industry and pre-1951 filters do not bind post-2009.
+    S&P-500-only caveat stands: concentration among large-cap peers.
+11. KZ (Placebo): -1.002*(ib+dp)/ppent + 0.283*q + 3.139*debt/(debt +
+    seq) - 39.368*(dvc+dvp)/ppent - 1.315*che/ppent, with q = (at +
+    ME - ceq - txdb)/at, debt = dlc + dltt. txdb (deferred-tax
+    balance) is not fetched -> omitted (treated as 0), documented.
+    che = cash + st_investments; dividends_paid covers dvc + dvp;
+    ppent = ppe_net. Price-sensitive via q. No filters in OpenAP.
+12. WW (Placebo): -0.091*(ib+dp)/(4*at) - 0.062*DIVPOS +
+    0.021*dltt/at - 0.044*log(at) + 0.102*(industry sales growth)/4 -
+    0.035*(firm sales growth)/4. DIVPOS = dividends_paid > 0.
+    Industry = 3-digit sicCRSP -> finviz industry, computed at the
+    assembler stage from the same revenue ingredients as Herf.
+    OpenAP's firm sales-growth term takes a 1-MONTH lag on the
+    monthly-expanded annual panel (zero for 11 of 12 months) -- a
+    panel artifact, not replicated; we use FY-over-FY revenue growth
+    / 4 (Wave 4 item-12 precedent for fixing Stata artifacts).
+13. Placebo status: z_score, kz_index, ww_index are OpenAP Placebos --
+    included as database quantities, documented as non-predictors
+    (Wave 4 item-14 precedent).
+
+Architecture split:
+- Per-ticker (indicator_compute.R): o_score, z_score, kz_index
+  composites; MS ingredient values (FY levels + quarter-panel sds);
+  WW firm-level terms; current + 2 lagged FY revenues for Herf. The
+  cross-sectional inputs travel as hidden ingredient columns, not
+  indicator rows.
+- Cross-sectional (assembler-stage post-pass, shared with Wave 4
+  ch_inv_ia): finviz-sector medians -> m1..m8 binaries + ms_score;
+  finviz-industry HHI (3y avg) -> herf; industry sales growth
+  completes ww_index. ms_*, herf, ww_index are therefore
+  snapshot-only (NA in the timeseries fund layer), like
+  price-sensitive indicators; of the wave only o_score appears in the
+  timeseries fund layer.
+
+Steps, per repo rules (code -> detailed code review -> unit tests ->
+gate test):
+1. Sector-NA mask generalization; per-ticker composites and
+   ingredients (reuse Wave 3 quarter panel + prior-FY machinery).
+2. Cross-sectional pass: sector medians, binaries, HHI, WW assembly.
+3. Wiring: .INDICATOR_NAMES (+14), family map (mohanram, distress,
+   structure), .assert_output, snapshot row-count assertions
+   (pit_assembler + pipeline gates), INDICATORS.md new section,
+   RESEARCH_INDICATORS.md WAVE 5.
+4. Unit tests: hand-computed OScore/ZScore/KZ/WW on synthetic firms;
+   OENEG (lt > at) and INTWO (sum-negative vs both-negative) dummy
+   edges; NI_t = NI_{t-1} = 0 in the CHIN denominator -> NA; median
+   binarization on a synthetic sector incl. ties and NA inputs;
+   R&D/advertising zero-fill; raw 0-8 sum (no clamp); sd window with
+   exactly 6 and fewer than 6 quarters; singleton-industry herf ->
+   NA; sector-NA mask hits all three sectors.
+5. Gate anchors: 2020-era airline (AAL/DAL) vs AAPL orders o_score
+   correctly; AAPL z_score deep in the safe zone (>> 3); bank
+   z_score/o_score NA via mask, bank ms_score computed; herf high for
+   a known concentrated finviz industry, NA for singletons; ms_score
+   distribution within {0..8}; 20-ticker prototype coverage, then
+   full regeneration (all snapshots + timeseries) at 130 indicators,
+   coverage report on 2024-06-30 vs the 70% bar.
+
+Sequencing: implementation gated on the Wave 3 and Wave 4 commits
+(shared indicator-name/family/gate files; reuses the ch_inv_ia
+cross-sectional hook). Regeneration queues behind the in-flight Wave
+2/3 snapshot rebuilds.
+
+Risks specific to this wave:
+1. Sector-granularity mismatch: 11 finviz sectors vs ~70 2-digit SIC
+   groups for MS medians; ~150 finviz industries vs 4-digit SIC for
+   Herf. Documented per indicator.
+2. Full-universe (not low-BM-quintile) MS medians shift component
+   cut-points vs Mohanram; components remain internally consistent.
+3. ms_roa_vol / ms_rev_vol need 6+ standalone quarters: NA-heavy
+   before ~2013 (XBRL ramp), matching the Wave 3 caveat -- and they
+   gate ms_score under the any-NA rule; report the ms_score coverage
+   consequence explicitly.
+4. Advertising median degeneracy (item 4).
+5. O-Score/Z-Score coefficients presume industrials; the sector mask
+   removes the worst offenders, remaining cross-sector application
+   documented.
 
 ### Wave 6 -- deferred / stretch (document, do not schedule)
 
