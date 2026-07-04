@@ -62,8 +62,8 @@ test("all fundamental-only are valid indicator names",
 test("13 price-sensitive indicators",
      length(.PRICE_SENSITIVE_INDICATORS) == 13)
 
-test("68 fundamental-only indicators (47 + 15 Wave 1 + 6 Wave 2)",
-     length(.FUNDAMENTAL_INDICATORS) == 68)
+test("74 fundamental-only indicators (47 + 15 Wave 1 + 6 Wave 2 + 6 Wave 3)",
+     length(.FUNDAMENTAL_INDICATORS) == 74)
 
 test("12 stubs (no unused stubs)",
      length(.STUB_NAMES) == 12)

@@ -4,7 +4,7 @@
 # Pure computation layer: no I/O. Receives data.tables and price scalars,
 # returns named vectors and data.tables.
 #
-# Computes 81 output fields from EDGAR XBRL data + market prices:
+# Computes 87 output fields from EDGAR XBRL data + market prices:
 #   - 36 baseline indicators (valuation, profitability, growth, leverage,
 #     efficiency, cash flow quality, shareholder return, size)
 #   - 2 size extras (shares outstanding, public float)
@@ -18,6 +18,9 @@
 #   - 7 Wave 2 external financing indicators (Bradshaw 2006 net debt/
 #     equity financing + XFIN, composite debt issuance, split-adjusted
 #     share issuance 1y/5y, net payout yield) -- see docs/research/09
+#   - 6 Wave 3 seasonal-surprise indicators (ChTax, earnings-increase
+#     streak, revenue/earnings surprise, earnings consistency, roaq)
+#     built on a label-free standalone-quarter panel -- see docs/research/09
 #
 # Public API:
 #   compute_ticker_indicators(fund_dt, price, sector, target_fy, target_period)
@@ -55,9 +58,10 @@ suppressPackageStartupMessages({
   interest_expense = c("InterestIncomeExpenseNet")
 )
 
-# Canonical indicator names in output order (81 entries):
+# Canonical indicator names in output order (87 entries):
 # 36 baseline + 2 size (shares_outstanding, public_float) + 5 tier1 +
-# 10 piotroski (9 components + composite) + 6 tier2 + 15 wave1 + 7 wave2
+# 10 piotroski (9 components + composite) + 6 tier2 + 15 wave1 + 7 wave2 +
+# 6 wave3
 .INDICATOR_NAMES <- c(
   # Valuation (8)
   "pe_trailing", "peg", "pb", "ps", "pfcf",
@@ -99,7 +103,10 @@ suppressPackageStartupMessages({
   # Wave 2: external financing family (7) -- OpenAP expansion
   "net_debt_finance", "net_equity_finance", "xfin",
   "composite_debt_issuance", "share_iss_1y", "share_iss_5y",
-  "net_payout_yield"
+  "net_payout_yield",
+  # Wave 3: quarterly seasonal-surprise family (6) -- OpenAP expansion
+  "ch_tax", "num_earn_increase", "revenue_surprise",
+  "earnings_surprise", "earnings_consistency", "roaq"
 )
 
 # Family-to-indicator mapping (canonical groupings, 10 families)
@@ -132,7 +139,9 @@ suppressPackageStartupMessages({
                             "ppe_inv_change", "equity_growth", "gr_ltnoa"),
   financing         = c("net_debt_finance", "net_equity_finance", "xfin",
                          "composite_debt_issuance", "share_iss_1y",
-                         "share_iss_5y", "net_payout_yield")
+                         "share_iss_5y", "net_payout_yield"),
+  surprise          = c("ch_tax", "num_earn_increase", "revenue_surprise",
+                         "earnings_surprise", "earnings_consistency", "roaq")
 )
 
 
@@ -272,6 +281,24 @@ indicator_names <- function(families = NULL) {
 }
 
 
+# -- Classify a reported duration (days) into a cumulation kind.
+# Strict bands with NA gaps: a duration that fits no band (fiscal-year
+# transition stubs, dedup mismatches) is NA rather than force-classified.
+# Q1-standalone upper bound is 120 (not 110) to accommodate 16-week Q1
+# used by Kroger/AAP fiscal calendars (Q1=16wk, Q2-Q4=12wk each).
+# Shared by .decumulate_cfo and the Wave 3 quarter-panel builders; the
+# looser catch-all bands in ttm_eps.R stay separate on purpose (the TTM
+# identity is robust to a missing middle quarter, differencing is not).
+.classify_duration <- function(days) {
+  fifelse(is.na(days), NA_character_,
+  fifelse(days >= 60  & days <= 120, "3mo",
+  fifelse(days >= 160 & days <= 200, "2Q",
+  fifelse(days >= 250 & days <= 290, "3Q",
+  fifelse(days >= 330 & days <= 380, "FY",
+          NA_character_)))))
+}
+
+
 # -- De-cumulate YTD quarterly operating_cashflow into standalone-quarter values.
 # Input: q_rows, the wide-format quarterly slice with columns
 #   operating_cashflow, cfo_period_days, fiscal_year, period_type, total_assets.
@@ -287,14 +314,7 @@ indicator_names <- function(families = NULL) {
 
   dt <- copy(q_rows)
 
-  # Q1-standalone upper bound is 120 (not 110) to accommodate 16-week Q1
-  # used by Kroger/AAP fiscal calendars (Q1=16wk, Q2-Q4=12wk each).
-  dt[, cfo_kind := fifelse(is.na(cfo_period_days), NA_character_,
-          fifelse(cfo_period_days >= 60  & cfo_period_days <= 120, "3mo",
-          fifelse(cfo_period_days >= 160 & cfo_period_days <= 200, "2Q",
-          fifelse(cfo_period_days >= 250 & cfo_period_days <= 290, "3Q",
-          fifelse(cfo_period_days >= 330 & cfo_period_days <= 380, "FY",
-                  NA_character_)))))]
+  dt[, cfo_kind := .classify_duration(cfo_period_days)]
 
   expected_map <- c(Q1 = "3mo", Q2 = "2Q", Q3 = "3Q", Q4 = "FY")
   dt[, expected_kind := expected_map[period_type]]
@@ -1277,6 +1297,363 @@ pivot_fundamentals <- function(fund_dt) {
 
 
 # =============================================================================
+# SECTION 6d: WAVE 3 -- QUARTERLY SEASONAL-SURPRISE FAMILY
+# =============================================================================
+# 6 indicators from the OpenAP expansion (docs/research/09, Wave 3), built
+# on a label-free standalone-quarter panel. Constructions verified against
+# the OpenAP pyCode predictors (github.com/OpenSourceAP/CrossSection,
+# Signals/pyCode/Predictors) on 2026-07-03:
+#   ch_tax               ChTax, Thomas & Zhang (2011 JAR)
+#   num_earn_increase    NumEarnIncrease, Loh & Warachka (2012 MS)
+#   revenue_surprise     RevenueSurprise, Jegadeesh & Livnat (2006 JFE)
+#   earnings_surprise    EarningsSurprise (SUE), Foster, Olsen, Shevlin (1984)
+#   earnings_consistency EarningsConsistency, Alwathainani (2009 BAR)
+#   roaq                 roaq, Balakrishnan, Bartov, Faurel (2010 JAE)
+#
+# Panel construction never trusts (fiscal_year, period_type) labels: a
+# later 10-K re-reports prior periods under its own label, so label-keyed
+# quarter selection differences the wrong periods (the Wave 1 lesson).
+# Rows are grouped by period_start and classified by reported duration
+# (.classify_duration); lags are matched by period_end distance with gap
+# guards. PIT correctness is inherited from the caller's pit_dedup as-of
+# view. Financials are computed, not masked: taxes, net income and EPS
+# are well-defined for banks (bank revenue tags are sparse, so
+# revenue_surprise degrades to NA there -- documented, not forced).
+
+# Product of split ratios with ex_date after `filed`: maps an as-filed
+# per-share/count value onto the CURRENT split basis (GAAP restates
+# per-share figures for splits in every filing, so a value's basis is the
+# split state at its filed date). Scalar; quantmod convention (4:1 split
+# has ratio 0.25). Same rule as ttm_eps.R's .split_factor, local so this
+# module stays self-contained.
+.split_to_current <- function(filed, splits = NULL) {
+  if (is.null(splits) || !NROW(splits) || is.na(filed)) return(1)
+  ex <- as.Date(splits$ex_date); rt <- as.numeric(splits$ratio)
+  sel <- !is.na(ex) & !is.na(rt) & rt > 0 & ex > as.Date(filed)
+  if (!any(sel)) 1 else prod(rt[sel])
+}
+
+# Index of the element of `dates` nearest to `target`, provided it is
+# within `tol` days; NA_integer_ otherwise.
+.near_idx <- function(dates, target, tol) {
+  if (!length(dates) || is.na(target)) return(NA_integer_)
+  off <- abs(as.numeric(dates - target))
+  i <- which.min(off)
+  if (!length(i) || off[i] > tol) return(NA_integer_)
+  i
+}
+
+# Duration rows of one concept, duration-classified and vintage-deduped.
+# One row per (period_start, kind); the original report wins (non-8-K,
+# then earliest filed -- same PIT rule as build_ttm_eps_series). With
+# split_adjust = TRUE values are normalized to the current split basis
+# BEFORE any differencing, so a chain spanning a split stays coherent.
+# Returns NULL when the input has no usable duration rows.
+.dedup_period_rows <- function(fund_dt, cn, splits = NULL,
+                               split_adjust = FALSE) {
+  need <- c("concept", "value", "period_start", "period_end", "filed")
+  if (is.null(fund_dt) || !all(need %in% names(fund_dt))) return(NULL)
+  x <- fund_dt[concept == cn & !is.na(period_start) & !is.na(period_end) &
+                 !is.na(value)]
+  if (nrow(x) == 0) return(NULL)
+  x[, `:=`(ps = as.Date(period_start), pe = as.Date(period_end),
+           fd = as.Date(filed))]
+  if (split_adjust) {
+    x[, value := value *
+        vapply(fd, .split_to_current, numeric(1), splits = splits)]
+  }
+  x[, kind := .classify_duration(as.integer(pe - ps))]
+  x <- x[!is.na(kind)]
+  if (nrow(x) == 0) return(NULL)
+  x[, is8k := if ("form" %in% names(x)) {
+    as.integer(!is.na(form) & form == "8-K")
+  } else 0L]
+  setorder(x, ps, kind, is8k, fd, na.last = TRUE)
+  x[, .SD[1], by = .(ps, kind)]
+}
+
+# Standalone-quarter series for one flow concept: data.table(qend, filed,
+# value) ordered by qend, or NULL. Per quarter, a directly reported
+# 3-month row wins; otherwise the value is recovered by differencing
+# consecutive YTD rows sharing a period_start (Q2 = 2Q - Q1, Q3 = 3Q - 2Q,
+# Q4 = FY - 3Q). The derived quarter's implied duration must itself look
+# like a quarter (60-131 d): the bands admit pathological pairings at
+# their edges, and differencing across a fiscal-year-change stub must
+# yield nothing rather than a wrong value.
+.flow_quarter_series <- function(fund_dt, cn, splits = NULL,
+                                 split_adjust = FALSE) {
+  x <- .dedup_period_rows(fund_dt, cn, splits, split_adjust)
+  if (is.null(x)) return(NULL)
+
+  parts <- list(
+    x[kind == "3mo", .(qend = pe, filed = fd, value = value, direct = 1L)]
+  )
+  ytd_pairs <- list(c("2Q", "3mo"), c("3Q", "2Q"), c("FY", "3Q"))
+  for (p in ytd_pairs) {
+    hi <- x[kind == p[1], .(ps, pe, fd, value)]
+    lo <- x[kind == p[2], .(ps, pe, fd, value)]
+    if (nrow(hi) == 0 || nrow(lo) == 0) next
+    m <- merge(hi, lo, by = "ps", suffixes = c("_hi", "_lo"))
+    m <- m[as.integer(pe_hi - pe_lo) >= 60 & as.integer(pe_hi - pe_lo) <= 131]
+    if (nrow(m) == 0) next
+    parts[[length(parts) + 1]] <-
+      m[, .(qend = pe_hi, filed = pmax(fd_hi, fd_lo),
+            value = value_hi - value_lo, direct = 0L)]
+  }
+  ser <- rbindlist(parts)
+  if (nrow(ser) == 0) return(NULL)
+  setorder(ser, qend, -direct, filed, na.last = TRUE)
+  ser <- ser[!duplicated(qend)]
+  ser[, direct := NULL]
+  setorder(ser, qend)
+  ser
+}
+
+# Instant series for one balance-sheet concept: data.table(qend, value)
+# with one row per period_end (original report wins), ordered.
+.instant_series <- function(fund_dt, cn) {
+  need <- c("concept", "value", "period_end", "filed")
+  if (is.null(fund_dt) || !all(need %in% names(fund_dt))) return(NULL)
+  x <- fund_dt[concept == cn & !is.na(period_end) & !is.na(value)]
+  if (nrow(x) == 0) return(NULL)
+  x[, `:=`(pe = as.Date(period_end), fd = as.Date(filed))]
+  x[, is8k := if ("form" %in% names(x)) {
+    as.integer(!is.na(form) & form == "8-K")
+  } else 0L]
+  setorder(x, pe, is8k, fd, na.last = TRUE)
+  x <- x[!duplicated(pe)]
+  x[, .(qend = pe, value = as.numeric(value))]
+}
+
+# Split-adjusted share count for the quarter ending at qend, on the
+# CURRENT basis. Candidates are share rows dated in [qend, qend + 75]:
+# the balance-sheet instant plus the filing's cover instant a few weeks
+# later, but never the next quarter's date (>= qend + 84). The DEI cover
+# tag is preferred for the same reason as .fy_shares_at (BA-style filers
+# hold the balance-sheet line at the constant issued count).
+.q_shares_at <- function(fund_dt, qend, splits = NULL) {
+  if (is.null(qend) || is.na(qend)) return(NA_real_)
+  win <- fund_dt[concept == "shares_outstanding" & !is.na(value) &
+                   !is.na(period_end) &
+                   period_end >= qend & period_end <= qend + 75]
+  if (nrow(win) == 0) return(NA_real_)
+  if ("tag" %in% names(win)) {
+    dei <- win[tag == "EntityCommonStockSharesOutstanding"]
+    if (nrow(dei)) win <- dei
+  }
+  # filed breaks ties between an original report and a later re-report of
+  # the same instant (original wins; its filed date is the split basis)
+  r <- win[order(period_end, filed)][1]
+  # counts move OPPOSITE to per-share values across a split: an as-filed
+  # pre-split count is n times too small on the current basis, so divide
+  # by the ratio product (EPS multiplies by it)
+  as.numeric(r$value[1]) / .split_to_current(as.Date(r$filed[1]), splits)
+}
+
+# Lag index within an ordered quarter series: the quarter nearest to
+# `nominal_days` before quarter i, within `tol`, strictly earlier than i.
+# Nominal quarter spacing 91.3 d absorbs 52/53-week calendars and 16-week
+# quarters at tol = 40; the seasonal (4-quarter) lag at 365/35 enforces
+# the documented [330, 400] gap band.
+.q_lag_idx <- function(qend, i, nominal_days, tol) {
+  j <- .near_idx(qend, qend[i] - nominal_days, tol)
+  if (is.na(j) || j >= i) NA_integer_ else j
+}
+
+# Standardized seasonal surprise (Foster, Olsen, Shevlin 1984 form as
+# reproduced by OpenAP) at the LATEST quarter of the series:
+#   diff_t  = x_t - x_{t-4q}
+#   drift_t = mean(diff over the prior 8 quarters, available-case)
+#   su_t    = diff_t - drift_t
+#   signal  = su_t / sd(su over the prior 8 quarters, >= 2 required)
+# Available-case convention per OpenAP: no minimum-count rule beyond what
+# the mean (>= 1) and sd (>= 2) need. sd at or below sd_floor -> NA
+# (ultra-stable seasonal diffs would otherwise explode the ratio).
+.seasonal_surprise <- function(qend, v, sd_floor) {
+  n <- length(v)
+  if (n < 4) return(NA_real_)
+
+  dif <- rep(NA_real_, n)
+  for (i in seq_len(n)) {
+    j <- .q_lag_idx(qend, i, 365, 35)
+    if (!is.na(j) && !is.na(v[i]) && !is.na(v[j])) dif[i] <- v[i] - v[j]
+  }
+
+  su <- rep(NA_real_, n)
+  for (i in seq_len(n)) {
+    if (is.na(dif[i])) next
+    lags <- vapply(1:8, function(m) {
+      j <- .q_lag_idx(qend, i, round(m * 91.3), 40)
+      if (is.na(j)) NA_real_ else dif[j]
+    }, numeric(1))
+    if (all(is.na(lags))) next
+    su[i] <- dif[i] - mean(lags, na.rm = TRUE)
+  }
+
+  if (is.na(su[n])) return(NA_real_)
+  sd_lags <- vapply(1:8, function(m) {
+    j <- .q_lag_idx(qend, n, round(m * 91.3), 40)
+    if (is.na(j)) NA_real_ else su[j]
+  }, numeric(1))
+  if (sum(!is.na(sd_lags)) < 2) return(NA_real_)
+  s <- stats::sd(sd_lags, na.rm = TRUE)
+  if (is.na(s) || s <= sd_floor) return(NA_real_)
+  su[n] / s
+}
+
+# Earnings consistency (Alwathainani 2009, OpenAP CLG-CHG form). Annual:
+# egrowth_t = (e_t - e_{t-1}) / (0.5 * (|e_{t-1}| + |e_{t-2}|)); the
+# signal is the mean of egrowth over the current + 4 prior years
+# (available-case), NA'd when current or prior-year EPS is missing, the
+# raw EPS ratio exceeds 6 in magnitude, or the current growth's sign
+# flips against last year's (positive after negative; negative after
+# positive-or-missing). Anchored to the target year's balance-sheet date
+# so it moves with the annual indicators, not the latest quarter.
+.compute_earnings_consistency <- function(fund_dt, target_fy, splits = NULL) {
+  x <- .dedup_period_rows(fund_dt, "eps_diluted", splits, split_adjust = TRUE)
+  if (is.null(x)) return(NA_real_)
+  a <- x[kind == "FY", .(pe, value)]
+  if (nrow(a) < 3) return(NA_real_)
+  setorder(a, pe)
+
+  anchor <- .lag_fy_pe(fund_dt, target_fy, 0L)
+  if (is.null(anchor)) return(NA_real_)
+  ti <- .near_idx(a$pe, as.Date(anchor), 10)
+  if (is.na(ti)) return(NA_real_)
+
+  lag_eps <- function(i, m) {
+    j <- .near_idx(a$pe, a$pe[i] - round(m * 365.25), 35)
+    if (is.na(j) || j >= i) NA_real_ else a$value[j]
+  }
+  egrowth <- function(i) {
+    if (is.na(i)) return(NA_real_)
+    e0 <- a$value[i]; e1 <- lag_eps(i, 1); e2 <- lag_eps(i, 2)
+    if (is.na(e0) || is.na(e1) || is.na(e2)) return(NA_real_)
+    den <- 0.5 * (abs(e1) + abs(e2))
+    if (den < 1e-9) return(NA_real_)
+    (e0 - e1) / den
+  }
+
+  idx <- vapply(0:4, function(m) {
+    if (m == 0) return(ti)
+    j <- .near_idx(a$pe, a$pe[ti] - round(m * 365.25), 35)
+    if (is.na(j) || j >= ti) NA_integer_ else j
+  }, integer(1))
+  egs <- vapply(idx, egrowth, numeric(1))
+
+  e0 <- a$value[ti]; e1 <- lag_eps(ti, 1)
+  if (is.na(e1)) return(NA_real_)
+  if (isTRUE(abs(e0 / e1) > 6)) return(NA_real_)
+  eg0 <- egs[1]; eg1 <- egs[2]
+  if (isTRUE(eg0 > 0 & eg1 < 0)) return(NA_real_)
+  if (!is.na(eg0) && eg0 < 0 && (is.na(eg1) || eg1 > 0)) return(NA_real_)
+
+  if (all(is.na(egs))) return(NA_real_)
+  mean(egs, na.rm = TRUE)
+}
+
+.compute_surprise <- function(fund_dt, target_fy, splits = NULL) {
+
+  out <- list(
+    ch_tax = NA_real_, num_earn_increase = NA_real_,
+    revenue_surprise = NA_real_, earnings_surprise = NA_real_,
+    earnings_consistency = NA_real_, roaq = NA_real_,
+    # panel-based QoQ revenue growth (Wave 1 follow-up): reported
+    # separately so the caller can fall back to the legacy label-based
+    # selection only when no revenue panel exists at all (synthetic
+    # inputs without period_start).
+    has_rev_panel = FALSE, rev_qoq = NA_real_
+  )
+
+  ni  <- .flow_quarter_series(fund_dt, "net_income")
+  tax <- .flow_quarter_series(fund_dt, "income_tax_expense")
+  rev <- .flow_quarter_series(fund_dt, "revenue")
+  eps <- .flow_quarter_series(fund_dt, "eps_diluted", splits,
+                              split_adjust = TRUE)
+  at  <- .instant_series(fund_dt, "total_assets")
+
+  # -- Thomas & Zhang (2011): seasonal change in quarterly tax expense
+  #    over total assets at the lag quarter's balance-sheet date.
+  if (!is.null(tax) && nrow(tax) >= 2 && !is.null(at)) {
+    i <- nrow(tax)
+    j <- .q_lag_idx(tax$qend, i, 365, 35)
+    if (!is.na(j)) {
+      k <- .near_idx(at$qend, tax$qend[j], 10)
+      if (!is.na(k)) {
+        out$ch_tax <- .safe_divide(tax$value[i] - tax$value[j], at$value[k])
+      }
+    }
+  }
+
+  # -- Balakrishnan, Bartov, Faurel (2010): quarterly NI over prior
+  #    quarter's total assets.
+  if (!is.null(ni) && nrow(ni) >= 2 && !is.null(at)) {
+    i <- nrow(ni)
+    j <- .q_lag_idx(ni$qend, i, 91, 40)
+    if (!is.na(j)) {
+      k <- .near_idx(at$qend, ni$qend[j], 10)
+      if (!is.na(k)) out$roaq <- .safe_divide(ni$value[i], at$value[k])
+    }
+  }
+
+  # -- Loh & Warachka (2012) streak, OpenAP-exact: chearn_q = NI_q -
+  #    NI_{q-4}; streak = k when the current and first k-1 lagged chearn
+  #    are positive OR MISSING and lag k is reported non-positive.
+  #    Faithful quirks: a missing quarter continues a streak, and a
+  #    streak of 9+ (no reported non-positive lag within 8) scores 0.
+  if (!is.null(ni) && nrow(ni) >= 1) {
+    q <- ni$qend; v <- ni$value; n <- nrow(ni)
+    chearn_at <- function(i) {
+      j <- .q_lag_idx(q, i, 365, 35)
+      if (is.na(j)) NA_real_ else v[i] - v[j]
+    }
+    ch <- vapply(0:8, function(m) {
+      i <- if (m == 0) n else .q_lag_idx(q, n, round(m * 91.3), 40)
+      if (is.na(i)) NA_real_ else chearn_at(i)
+    }, numeric(1))
+    pos <- is.na(ch) | ch > 0
+    nincr <- 0L
+    for (k in 1:8) {
+      if (!all(pos[1:k])) break
+      if (!is.na(ch[k + 1]) && ch[k + 1] <= 0) { nincr <- k; break }
+    }
+    out$num_earn_increase <- as.numeric(nincr)
+  }
+
+  # -- Foster, Olsen, Shevlin (1984): SUE on split-adjusted diluted EPS
+  #    (OpenAP uses basic EPS ex-extraordinaries; diluted is what we
+  #    cache -- documented deviation).
+  if (!is.null(eps)) {
+    out$earnings_surprise <- .seasonal_surprise(eps$qend, eps$value, 1e-10)
+  }
+
+  # -- Jegadeesh & Livnat (2006): revenue surprise per share, shares on
+  #    the current split basis so the per-share series is coherent.
+  if (!is.null(rev)) {
+    shr <- vapply(rev$qend, .q_shares_at, numeric(1),
+                  fund_dt = fund_dt, splits = splits)
+    revps <- fifelse(is.na(shr) | shr <= 0, NA_real_, rev$value / shr)
+    out$revenue_surprise <- .seasonal_surprise(rev$qend, revps, 1e-8)
+  }
+
+  # -- Alwathainani (2009): annual EPS growth consistency.
+  out$earnings_consistency <-
+    .compute_earnings_consistency(fund_dt, target_fy, splits)
+
+  # -- Panel-based QoQ revenue growth (latest standalone quarter vs the
+  #    one before it, matched by period_end -- not by labels).
+  if (!is.null(rev)) {
+    out$has_rev_panel <- TRUE
+    i <- nrow(rev)
+    j <- .q_lag_idx(rev$qend, i, 91, 40)
+    if (!is.na(j)) out$rev_qoq <- .safe_growth(rev$value[i], rev$value[j])
+  }
+
+  out
+}
+
+
+# =============================================================================
 # SECTION 7: CROSS-SECTIONAL Z-SCORING
 # =============================================================================
 
@@ -1442,6 +1819,14 @@ compute_ticker_indicators <- function(fund_dt, price_on_filed, sector,
     lag5 <- .lag_fy_row(fund_dt, target_fy, lag_years = 5L)
     fin  <- .compute_financing(fund_dt, target_fy, curr, prior, lag5,
                                val$market_cap, splits)
+    sur  <- .compute_surprise(fund_dt, target_fy, splits)
+
+    # Wave 1 follow-up: when a standalone-quarter revenue panel exists,
+    # its period_end-matched QoQ replaces the label-based selection above
+    # (labels mis-pair quarters once a later filing re-reports them).
+    if (isTRUE(sur$has_rev_panel)) {
+      grow$revenue_growth_qoq <- sur$rev_qoq
+    }
 
     # PEG ratio: depends on growth (computed after growth)
     peg <- NA_real_
@@ -1545,7 +1930,14 @@ compute_ticker_indicators <- function(fund_dt, price_on_filed, sector,
       composite_debt_issuance = fin$composite_debt_issuance,
       share_iss_1y            = fin$share_iss_1y,
       share_iss_5y            = fin$share_iss_5y,
-      net_payout_yield        = fin$net_payout_yield
+      net_payout_yield        = fin$net_payout_yield,
+      # Wave 3: quarterly seasonal-surprise family (6)
+      ch_tax               = sur$ch_tax,
+      num_earn_increase    = sur$num_earn_increase,
+      revenue_surprise     = sur$revenue_surprise,
+      earnings_surprise    = sur$earnings_surprise,
+      earnings_consistency = sur$earnings_consistency,
+      roaq                 = sur$roaq
     )
 
     # Financial sector: NA-out meaningless indicators

@@ -1287,6 +1287,286 @@ test("dedup: .duration_match_rank accepts 16-week Q1 (111-120 days)", {
 
 
 # ============================================================================
+# UNIT TESTS: Wave 3 -- quarter panel + seasonal-surprise family
+# ============================================================================
+message("\n=== Wave 3: Quarter Panel + Surprise Family ===")
+
+# Duration-row builder: long-format rows with period_start (the quarter
+# panel classifies by reported duration, never by labels).
+.make_qrow <- function(concept, value, ps, pe, filed,
+                       fy = 2024L, pt = "Q1", form = "10-Q",
+                       tag = NA_character_) {
+  data.table(concept = concept, value = value,
+             period_start = as.Date(ps), period_end = as.Date(pe),
+             fiscal_year = fy, period_type = pt,
+             filed = as.Date(filed), form = form, tag = tag)
+}
+
+# Instant-row builder (period_start NA, excluded from duration series)
+.make_irow <- function(concept, value, pe, filed, fy = 2024L, pt = "FY",
+                       tag = NA_character_) {
+  data.table(concept = concept, value = value,
+             period_start = as.Date(NA), period_end = as.Date(pe),
+             fiscal_year = fy, period_type = pt,
+             filed = as.Date(filed), form = "10-K", tag = tag)
+}
+
+# -- .classify_duration --
+test("classify_duration: bands and NA gaps",
+     identical(.classify_duration(c(90L, 112L, 181L, 272L, 363L, 140L,
+                                    NA_integer_)),
+               c("3mo", "3mo", "2Q", "3Q", "FY", NA, NA)))
+
+# -- .flow_quarter_series: YTD-only filer --
+# Cumulative revenue 100 / 220 / 360 / 520 -> standalone 100/120/140/160
+ytd_filer <- rbindlist(list(
+  .make_qrow("revenue", 100, "2024-01-01", "2024-03-31", "2024-05-01"),
+  .make_qrow("revenue", 220, "2024-01-01", "2024-06-30", "2024-08-01", pt = "Q2"),
+  .make_qrow("revenue", 360, "2024-01-01", "2024-09-30", "2024-11-01", pt = "Q3"),
+  .make_qrow("revenue", 520, "2024-01-01", "2024-12-31", "2025-02-15",
+             pt = "FY", form = "10-K")
+))
+
+ytd_ser <- .flow_quarter_series(ytd_filer, "revenue")
+
+test("quarter panel: YTD-only filer yields 4 standalone quarters",
+     nrow(ytd_ser) == 4)
+
+test("quarter panel: YTD differencing recovers standalone values",
+     identical(ytd_ser$value, c(100, 120, 140, 160)))
+
+test("quarter panel: Q4 = FY - Q3ytd",
+     ytd_ser[qend == as.Date("2024-12-31"), value] == 160)
+
+# -- direct 3-month rows win over derived values --
+mixed_filer <- rbindlist(list(
+  ytd_filer,
+  # direct Q2 standalone reported at a slightly different value (rounding
+  # in the filing); the direct row must win
+  .make_qrow("revenue", 121, "2024-04-01", "2024-06-30", "2024-08-01", pt = "Q2")
+))
+test("quarter panel: direct 3mo row preferred over YTD difference",
+     .flow_quarter_series(mixed_filer, "revenue")[
+       qend == as.Date("2024-06-30"), value] == 121)
+
+# -- missing Q3 YTD -> no Q4 --
+no_q3 <- ytd_filer[!(period_end == as.Date("2024-09-30"))]
+test("quarter panel: missing Q3ytd -> Q4 absent, not wrong",
+     !(as.Date("2024-12-31") %in% .flow_quarter_series(no_q3, "revenue")$qend))
+
+# -- 16-week Q1 (Kroger/AAP calendar) --
+kr_filer <- rbindlist(list(
+  .make_qrow("revenue", 160, "2024-02-01", "2024-05-23", "2024-06-20"),  # 112d
+  .make_qrow("revenue", 280, "2024-02-01", "2024-08-15", "2024-09-12",
+             pt = "Q2")                                                  # 196d
+))
+kr_ser <- .flow_quarter_series(kr_filer, "revenue")
+test("quarter panel: 16-week Q1 classifies and differences (Q2 = 120)",
+     nrow(kr_ser) == 2 && kr_ser$value[2] == 120)
+
+# -- fiscal-year-transition stub is not force-classified --
+stub <- .make_qrow("revenue", 300, "2024-01-01", "2024-05-31", "2024-07-15",
+                   pt = "FY", form = "10-K")  # 151d stub "FY"
+test("quarter panel: transition-stub duration lands in a band gap",
+     is.null(.flow_quarter_series(stub, "revenue")))
+
+# -- split-spanning EPS chain --
+# 4:1 split between the two filings: pre-split EPS 4.00 must be
+# normalized to 1.00 (current basis) before seasonal differencing.
+eps_split <- rbindlist(list(
+  .make_qrow("eps_diluted", 4.00, "2023-01-01", "2023-03-31", "2023-05-01",
+             fy = 2023L),
+  .make_qrow("eps_diluted", 1.05, "2024-01-01", "2024-03-31", "2024-05-01")
+))
+split_tbl <- data.table(ex_date = as.Date("2023-08-31"), ratio = 0.25)
+eps_ser <- .flow_quarter_series(eps_split, "eps_diluted",
+                                splits = split_tbl, split_adjust = TRUE)
+test("quarter panel: split-spanning EPS normalized to current basis",
+     abs(eps_ser$value[1] - 1.00) < 1e-9 && abs(eps_ser$value[2] - 1.05) < 1e-9)
+
+# -- .q_shares_at: DEI cover instant preferred, split-adjusted --
+share_rows <- rbindlist(list(
+  .make_irow("shares_outstanding", 1012, "2024-12-31", "2025-02-15",
+             tag = "CommonStockSharesOutstanding"),
+  .make_irow("shares_outstanding", 610, "2025-01-20", "2025-02-15",
+             tag = "EntityCommonStockSharesOutstanding")
+))
+test("q_shares_at: DEI cover instant wins over balance-sheet line",
+     .q_shares_at(share_rows, as.Date("2024-12-31")) == 610)
+
+test("q_shares_at: split after filed maps count to current basis",
+     .q_shares_at(share_rows, as.Date("2024-12-31"),
+                  splits = data.table(ex_date = as.Date("2025-06-30"),
+                                      ratio = 0.25)) == 2440)
+
+# -- .seasonal_surprise --
+# 14 quarters, seasonal diffs d5..d14 = (0,1,...,8,10): hand-computed
+# su_14 = 5.5, sd(su_6..su_13) = 0.5 * sd(1:8) -> SUE = 4.4907
+qe14 <- seq(as.Date("2021-03-31"), by = "quarter", length.out = 14)
+d <- c(0, 1, 2, 3, 4, 5, 6, 7, 8, 10)
+x14 <- rep(100, 14)
+for (i in 5:14) x14[i] <- x14[i - 4] + d[i - 4]
+test("seasonal_surprise: hand-computed SUE",
+     abs(.seasonal_surprise(qe14, x14, 1e-10) - 4.490732) < 1e-4)
+
+test("seasonal_surprise: ultra-stable diffs hit the sd floor -> NA",
+     is.na(.seasonal_surprise(qe14, seq(100, 230, by = 10), 1e-10)))
+
+test("seasonal_surprise: fewer than 2 prior surprises -> NA",
+     is.na(.seasonal_surprise(qe14[1:6], x14[1:6], 1e-10)))
+
+test("seasonal_surprise: short series -> NA",
+     is.na(.seasonal_surprise(qe14[1:3], x14[1:3], 1e-10)))
+
+# -- full-ticker fixture: 17 calendar quarters of direct 3mo rows --
+# (17 = the 13 SUE needs plus history for streak edge cases)
+.q_fixture <- function(ni_vals, tax_vals = NULL, at_vals = NULL) {
+  n <- length(ni_vals)
+  qs <- seq(as.Date("2021-01-01"), by = "quarter", length.out = n)
+  qe <- seq(as.Date("2021-03-31"), by = "quarter", length.out = n)
+  rows <- list()
+  for (i in seq_len(n)) {
+    fy <- as.integer(format(qe[i], "%Y"))
+    rows[[length(rows) + 1]] <- .make_qrow("net_income", ni_vals[i],
+                                           qs[i], qe[i], qe[i] + 40, fy = fy)
+    if (!is.null(tax_vals)) {
+      rows[[length(rows) + 1]] <- .make_qrow("income_tax_expense",
+                                             tax_vals[i], qs[i], qe[i],
+                                             qe[i] + 40, fy = fy)
+    }
+    if (!is.null(at_vals)) {
+      rows[[length(rows) + 1]] <- .make_irow("total_assets", at_vals[i],
+                                             qe[i], qe[i] + 40, fy = fy)
+    }
+  }
+  rbindlist(rows)
+}
+
+# -- ch_tax --
+tax_fund <- .q_fixture(ni_vals = rep(50, 8),
+                       tax_vals = c(20, 20, 20, 20, 20, 20, 20, 30),
+                       at_vals = rep(1000, 8))
+sur_tax <- .compute_surprise(tax_fund, target_fy = 2022L)
+test("ch_tax: seasonal tax change over lag-quarter assets",
+     abs(sur_tax$ch_tax - (30 - 20) / 1000) < 1e-9)
+
+# -- roaq --
+test("roaq: quarterly NI over prior-quarter assets",
+     abs(sur_tax$roaq - 50 / 1000) < 1e-9)
+
+# -- num_earn_increase streaks --
+# base 100 for quarters 1-4; +1 seasonal growth through quarter 12; then
+# quarter 13 breaks (NI_13 < NI_9), 14-16 grow again -> streak of 3
+ni_streak3 <- rep(100, 16)
+for (i in 5:16) ni_streak3[i] <- ni_streak3[i - 4] + 1
+ni_streak3[13] <- ni_streak3[9] - 1
+ni_streak3[14:16] <- ni_streak3[10:12] + 1
+sur_s3 <- .compute_surprise(.q_fixture(ni_streak3), target_fy = 2024L)
+test("num_earn_increase: broken quarter 3 lags back -> streak 3",
+     sur_s3$num_earn_increase == 3)
+
+# exactly 8: break at lag 8, growth since
+ni_streak8 <- rep(100, 16)
+for (i in 5:16) ni_streak8[i] <- ni_streak8[i - 4] + 1
+ni_streak8[8] <- ni_streak8[4] - 1   # chearn_8 <= 0
+for (i in 9:16) ni_streak8[i] <- ni_streak8[i - 4] + 1
+sur_s8 <- .compute_surprise(.q_fixture(ni_streak8), target_fy = 2024L)
+test("num_earn_increase: reported break at lag 8 -> streak 8",
+     sur_s8$num_earn_increase == 8)
+
+# unbroken growth through all 16 quarters: the OpenAP-exact >= 9 quirk
+ni_streak9 <- rep(100, 16)
+for (i in 5:16) ni_streak9[i] <- ni_streak9[i - 4] + 1
+sur_s9 <- .compute_surprise(.q_fixture(ni_streak9), target_fy = 2024L)
+test("num_earn_increase: 9+ streak scores 0 (OpenAP-exact)",
+     sur_s9$num_earn_increase == 0)
+
+# current quarter down -> 0
+ni_down <- ni_streak9
+ni_down[16] <- ni_down[12] - 5
+sur_dn <- .compute_surprise(.q_fixture(ni_down), target_fy = 2024L)
+test("num_earn_increase: current seasonal decline -> 0",
+     sur_dn$num_earn_increase == 0)
+
+# missing quarter continues a streak (OpenAP NA-as-positive convention)
+gap_fund <- .q_fixture(ni_streak3)
+gap_fund <- gap_fund[!(concept == "net_income" &
+                         period_end == as.Date("2024-09-30"))]  # drop lag 1
+sur_gap <- .compute_surprise(gap_fund, target_fy = 2024L)
+test("num_earn_increase: missing lag quarter treated as continuing",
+     sur_gap$num_earn_increase == 3)
+
+# -- earnings_surprise via full fixture: split must not distort SUE --
+eps16 <- rep(1, 16)
+for (i in 5:16) eps16[i] <- eps16[i - 4] * 1.10
+qs16 <- seq(as.Date("2021-01-01"), by = "quarter", length.out = 16)
+qe16 <- seq(as.Date("2021-03-31"), by = "quarter", length.out = 16)
+eps_rows <- rbindlist(lapply(1:16, function(i) {
+  .make_qrow("eps_diluted", eps16[i], qs16[i], qe16[i], qe16[i] + 40,
+             fy = as.integer(format(qe16[i], "%Y")))
+}))
+# 4:1 split mid-2023: as-filed EPS before the split are 4x current basis
+splt <- as.Date("2023-08-31")
+eps_asfiled <- copy(eps_rows)
+eps_asfiled[filed < splt, value := value * 4]
+sur_eps_clean <- .compute_surprise(eps_rows, target_fy = 2024L)
+sur_eps_split <- .compute_surprise(
+  eps_asfiled, target_fy = 2024L,
+  splits = data.table(ex_date = splt, ratio = 0.25))
+test("earnings_surprise: split-adjusted SUE equals no-split SUE",
+     abs(sur_eps_clean$earnings_surprise -
+           sur_eps_split$earnings_surprise) < 1e-6)
+
+test("earnings_surprise: unadjusted split would have distorted SUE",
+     is.na(.compute_surprise(eps_asfiled, target_fy = 2024L)$earnings_surprise) ||
+       abs(.compute_surprise(eps_asfiled, target_fy = 2024L)$earnings_surprise -
+             sur_eps_clean$earnings_surprise) > 0.5)
+
+# -- earnings_consistency --
+# steady 10% grower: every egrowth = 0.1 / (0.5 * (1 + 1/1.1)) = 0.104762
+ec_years <- 2018:2024
+ec_eps <- 1.1^(0:6)
+ec_rows <- rbindlist(lapply(seq_along(ec_years), function(i) {
+  y <- ec_years[i]
+  rbindlist(list(
+    .make_qrow("eps_diluted", ec_eps[i],
+               sprintf("%d-01-01", y), sprintf("%d-12-31", y),
+               sprintf("%d-02-15", y + 1), fy = as.integer(y), pt = "FY",
+               form = "10-K"),
+    .make_irow("total_assets", 1000, sprintf("%d-12-31", y),
+               sprintf("%d-02-15", y + 1), fy = as.integer(y))
+  ))
+}))
+test("earnings_consistency: steady grower mean growth",
+     abs(.compute_earnings_consistency(ec_rows, 2024L) - 0.1047619) < 1e-5)
+
+# sign flip: negative growth after positive -> NA
+ec_flip <- copy(ec_rows)
+ec_flip[concept == "eps_diluted" & fiscal_year == 2024L, value := 1.1^5 * 0.9]
+test("earnings_consistency: sign flip vs prior year -> NA",
+     is.na(.compute_earnings_consistency(ec_flip, 2024L)))
+
+# extreme ratio (> 6x) -> NA
+ec_jump <- copy(ec_rows)
+ec_jump[concept == "eps_diluted" & fiscal_year == 2024L, value := 1.1^5 * 7]
+test("earnings_consistency: EPS ratio above 6 -> NA",
+     is.na(.compute_earnings_consistency(ec_jump, 2024L)))
+
+# -- panel-based revenue_growth_qoq inside .compute_surprise --
+rev_panel_fund <- ytd_filer
+sur_rev <- .compute_surprise(rev_panel_fund, target_fy = 2024L)
+test("rev_qoq: panel flag set when a revenue panel exists",
+     isTRUE(sur_rev$has_rev_panel))
+
+test("rev_qoq: latest standalone quarter vs the one before",
+     abs(sur_rev$rev_qoq - (160 - 140) / 140) < 1e-9)
+
+test("rev_qoq: no period_start data -> no panel, legacy fallback",
+     !isTRUE(.compute_surprise(
+       .make_long("revenue", 1000), target_fy = 2024L)$has_rev_panel))
+
+
+# ============================================================================
 # UNIT TESTS: Z-scoring
 # ============================================================================
 message("\n=== Z-Scoring ===")
@@ -1415,8 +1695,8 @@ test("zscore: pre-winsorization capped at [p2.5, p97.5] of input", {
 # ============================================================================
 message("\n=== Public API ===")
 
-test("get_indicator_names returns 81 names",
-     length(get_indicator_names()) == 81)
+test("get_indicator_names returns 87 names",
+     length(get_indicator_names()) == 87)
 
 test("get_indicator_names has no duplicates",
      !anyDuplicated(get_indicator_names()))
@@ -1470,8 +1750,8 @@ result <- compute_ticker_indicators(synth_long, 150, "Technology")
 test("compute_ticker: returns named numeric vector",
      is.numeric(result) && !is.null(names(result)))
 
-test("compute_ticker: correct length (81)",
-     length(result) == 81)
+test("compute_ticker: correct length (87)",
+     length(result) == 87)
 
 test("compute_ticker: pe_trailing = 150/3.8",
      abs(result[["pe_trailing"]] - 150/3.8) < 0.01)

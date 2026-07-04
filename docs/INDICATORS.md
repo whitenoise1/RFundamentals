@@ -1,6 +1,6 @@
 # RFundamentals: Indicator Reference
 
-81 fundamental indicators computed from SEC EDGAR XBRL filings and Yahoo Finance
+87 fundamental indicators computed from SEC EDGAR XBRL filings and Yahoo Finance
 market data. Each indicator is listed with its formula, data sources, and
 interpretation.
 
@@ -608,6 +608,46 @@ ratios between the two rows' filed dates (empty window when both survive
 from one filing). Tickers without cached split events (cache/splits) are
 computed unadjusted. `net_payout_yield` is price-sensitive and updates
 daily in the timeseries layer.
+
+---
+
+## 13. Quarterly Seasonal-Surprise Family (6 indicators, Wave 3)
+
+Quarterly indicators from the OpenAP expansion (full references and
+construction notes in docs/RESEARCH_INDICATORS.md, WAVE 3). Built on a
+label-free standalone-quarter panel: duration rows are grouped by
+period_start and classified by reported duration (3mo / 2Q / 3Q / FY with
+NA gaps); a directly reported 3-month row wins, otherwise the standalone
+value is recovered by differencing consecutive YTD rows (Q4 = FY - Q3ytd).
+Seasonal lags are matched by period_end distance (4-quarter gap must fall
+in [330, 400] days), never by fiscal labels. `q-4` = same quarter one
+year earlier.
+
+| Indicator | Formula | Source study (CZ t-stat) |
+|---|---|---|
+| `ch_tax` | (tax_q - tax_{q-4}) / total assets at q-4 | Thomas-Zhang 2011 (9.50) |
+| `num_earn_increase` | consecutive quarters with NI_q > NI_{q-4}, OpenAP-exact | Loh-Warachka 2012 (6.75) |
+| `revenue_surprise` | standardized seasonal surprise in revenue per share | Jegadeesh-Livnat 2006 (5.99) |
+| `earnings_surprise` | standardized seasonal surprise in diluted EPS (SUE) | Foster-Olsen-Shevlin 1984 (4.94) |
+| `earnings_consistency` | mean annual EPS growth over 5y, sign-consistent only | Alwathainani 2009 (2.51) |
+| `roaq` | NI_q / total assets at q-1 | Balakrishnan 2010 (5.90) |
+
+Surprise standardization (OpenAP-exact): surprise = seasonal diff minus
+the mean of the prior 8 seasonal diffs (available-case), divided by the
+sd of the prior 8 drift-adjusted surprises (at least 2 required; sd at or
+below the floor -> NA). Per-share series are normalized to the current
+split basis before differencing. All quarterly values reflect the latest
+standalone quarter filed as of the snapshot date. Computed for
+financials (taxes, NI, EPS are well-defined for banks); revenue-based
+values degrade to NA where bank revenue tags are sparse.
+`earnings_consistency` is NA by construction for firms whose growth sign
+flipped year-over-year or whose EPS ratio exceeds 6 in magnitude
+(Alwathainani's consistency filter, ~40-60% of the cross-section at any
+snapshot).
+
+`revenue_growth_qoq` (section 4) is also computed from this panel since
+Wave 3: latest standalone quarter vs the one before it, matched by
+period_end.
 
 ---
 
