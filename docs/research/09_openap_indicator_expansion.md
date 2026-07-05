@@ -455,6 +455,32 @@ Plan review notes (code-verified 2026-07-03, pre-implementation):
 
 ### Wave 4 -- levels and simple ratios (17 indicators, t-stats 2.2-5.8)
 
+STATUS: COMPLETED 2026-07-05 as 29 indicators (87 -> 116), families
+"levels" (19) and "investment" (10). Canonical names/formulas in
+docs/INDICATORS.md sections 14-15 and RESEARCH_INDICATORS.md
+W4.1-W4.22. Ten ME-scaled levels are price-sensitive in the timeseries
+layer (8 new stubs; shared .level_components resolver keeps compute
+and stub paths identical). ch_inv_ia demeaned at all three
+cross-section assembly points; daily reader degrades it to NA when the
+sector lookup is missing. Financial NA additions live (12 -> 13 with
+net_debt_price also stub-masked + current-sector re-masked in the
+daily reader). Code review (8 finder angles, verified): 10 findings
+fixed, including the investment prior-gate 2-of-3 bug, un-demeaned
+ch_inv_ia in the feature layer's historical path, and the TCJA
+straddle now using the true fiscal-year start when a prior row exists.
+Tests: indicator_compute 312/312, timeseries 217/217, assembler 55/55,
+pipeline 34/34, standardizer 46/46, integration A-F 54/54. Coverage
+(2024-06-30, 498 tickers): most levels 85-98%, ebm/bpebm 73.5%,
+net_debt_price 71.3%; by-design low: rd_me 41% (R&D reporters only),
+surprise_rd 42.6%, oper_prof 34.1% (OpenAP all-four-inputs rule,
+interest_expense binding). 2015-06-30 median Wave 4 coverage 85.1%.
+Full regeneration done via tools/regen_wave4.R: 66/66 snapshots at
+116, 639 fund layers force-rebuilt with Wave 4 stubs, 595 daily
+layers rebuilt from scratch (append-only updater cannot backfill new
+columns), TTM augment reapplied. Anchors: AAPL effective_tax_rate
+14.7% (= reported FY2023 ETR), tang/oper_prof/payout_yield match
+hand computation from the FY2023 10-K, JPM daily net_debt_price NA.
+
 Mostly one-liners on existing + Phase 0 concepts.
 
 | # | Acronym | t | Original study | Formula |

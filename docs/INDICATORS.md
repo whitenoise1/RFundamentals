@@ -1,6 +1,6 @@
 # RFundamentals: Indicator Reference
 
-87 fundamental indicators computed from SEC EDGAR XBRL filings and Yahoo Finance
+116 fundamental indicators computed from SEC EDGAR XBRL filings and Yahoo Finance
 market data. Each indicator is listed with its formula, data sources, and
 interpretation.
 
@@ -651,6 +651,81 @@ period_end.
 
 ---
 
+## 14. Levels Family (19 indicators, Wave 4)
+
+Current-year level ratios from the OpenAP expansion (full references,
+guards and OpenAP deviations in docs/RESEARCH_INDICATORS.md, W4.1-W4.13).
+ME = market cap on the filing date. che = cash + short-term investments
+(STI zero-if-na, cash required per the C-3 coverage rule). ND = FINL -
+che with FINL = LTD + STD + preferred (>= 1 component reported). LT =
+total liabilities (identity fallback AT - CEQ - NCI). Component
+resolution is shared with the timeseries stub layer via
+.level_components() so the two paths cannot drift.
+
+| Indicator | Formula | Source study (CZ t-stat) |
+|---|---|---|
+| `rd_me` | R&D / ME (NA when R&D unreported) | Chan 2001 (5.82) |
+| `ebm` | (BE + net cash) / (ME + net cash) | Penman 2007 (4.14) |
+| `bpebm` | BE/ME - ebm | Penman 2007 (2.83) |
+| `cf_me` | (NI + depreciation) / ME | LSV 1994 (4.04) |
+| `cfp` | CFO / ME | Desai 2004 (2.18) |
+| `net_debt_price` | ND / ME | Penman 2007 (3.88) |
+| `tang` | (che + .715 REC + .547 INV + .535 PPE gross) / AT | Hahn-Lee 2009 (3.67) |
+| `tax_to_book` | (tax / statutory rate) / NI; = 1 if tax > 0, NI <= 0 | Lev-Nissim 2004 (3.52) |
+| `effective_tax_rate` | tax / pretax income | (database level) |
+| `am` | AT / ME | Fama-French 1992 (3.50) |
+| `book_leverage` | AT / BE, BE > 0 | Fama-French 1992 (3.30) |
+| `leverage_mkt` | total liabilities / ME | Bhandari 1988 (2.64) |
+| `cash_prod` | (ME - AT) / che | Chandrashekar-Rao (3.40) |
+| `oper_prof` | (rev - COGS - SGA - interest) / BE, all required, BE > 0 | Fama-French 2006 (3.00) |
+| `cash_assets` | che / AT | Palazzo 2012 (2.97) |
+| `op_leverage` | (COGS + SGA) / AT, SGA zero-if-na | Novy-Marx 2011 (2.50) |
+| `payout_yield` | (\|dividends\| + \|buybacks\|) / ME | Boudoukh 2007 (2.27) |
+| `salecash` | revenue / che | Ou-Penman (placebo) |
+| `depr_rate` | depreciation / PPE net | (placebo) |
+
+Statutory rate for `tax_to_book`: 35% for fiscal years ending on or
+before 2017-12-31, TCJA section 15 day-weighted blend for years
+straddling 2018-01-01 (true fiscal-year start from the prior row when
+available), 21% after. Ten indicators (rd_me, ebm, bpebm, cf_me, cfp,
+net_debt_price, am, leverage_mkt, cash_prod, payout_yield) are
+price-sensitive and update daily in the timeseries layer from the
+Wave 4 stubs.
+
+---
+
+## 15. Investment Family (10 indicators, Wave 4)
+
+Lagged and industry-adjusted constructions (references and deviations in
+docs/RESEARCH_INDICATORS.md, W4.14-W4.22). Lag rows are label-free and
+gap-guarded (.lag_fy_row). g2(x) denotes the Abarbanell-Bushee growth:
+base = mean of the two prior years, 1-year fallback when unavailable.
+
+| Indicator | Formula | Source study (CZ t-stat) |
+|---|---|---|
+| `pchdepr` | %change in (depreciation / PPE net) | (placebo) |
+| `grcapx` | (capex_t - capex_{t-2}) / capex_{t-2}, base > 0 | Anderson-GF 2006 (4.96) |
+| `grcapx3y` | 3 capex_t / (capex_{t-1} + capex_{t-2} + capex_{t-3}) | Anderson-GF 2006 (4.77) |
+| `pct_tot_acc` | (dWC + dNCO + dFIN) / \|NI\| | Hafzalla 2011 (4.70) |
+| `ch_asset_turnover` | (rev/avgNOA)_t - (rev/avgNOA)_{t-1}, negative -> NA | Soliman 2008 (3.77) |
+| `gr_sale_to_gr_inv` | g2(sales) - g2(inventory) | Abarbanell-Bushee 1998 (3.30) |
+| `surprise_rd` | 1 if R&D growth > 5% and R&D/AT growth > 5% | Eberhart 2004 (3.00) |
+| `investment` | (capex/rev)_t / mean over t, t-1, t-2 (>= 2 years, rev >= $10M) | Titman 2004 (2.28) |
+| `rd_cap` | (R&D + .8 lag1 + .6 lag2 + .4 lag3 + .2 lag4) / AT, 5 years required | Li 2011 (2.32) |
+| `ch_inv_ia` | g2(capex) - sector mean of g2(capex) | Abarbanell-Bushee 1998 (5.50) |
+
+`ch_inv_ia` is finalized at the cross-section stage: the compute layer
+emits the firm-level g2(capex) ingredient and every cross-section
+assembly point (compute_cross_section, load_daily_cross_section, the
+feature layer's extraction) calls industry_adjust_cross_section to
+subtract the equal-weighted sector mean. When the sector lookup is
+unavailable the daily reader degrades the column to NA rather than
+serving the un-demeaned ingredient. Per-ticker daily parquets store the
+ingredient by design. `rd_cap` zero-fills missing R&D within existing
+years (non-R&D firms get 0) but requires all five fiscal-year rows.
+
+---
+
 ## XBRL Tag Alias Map
 
 Each canonical concept maps to multiple XBRL tags. First match wins during
@@ -728,6 +803,10 @@ under the "Financial" sector:
 - `capex_depreciation`
 - `inventory_sales_change`
 - `inventory_change`, `inventory_growth`, `ppe_inv_change` (Wave 1)
+- `tang`, `op_leverage`, `ch_asset_turnover`, `gr_sale_to_gr_inv`,
+  `net_debt_price` (Wave 4; net_debt_price follows OpenAP's SIC
+  6000-6999 exclusion and is additionally stub-masked in the daily
+  layer and re-masked with current sector in load_daily_cross_section)
 
 During z-scoring, these indicators are computed excluding financial sector firms,
 so the cross-sectional distribution is not distorted by forced NAs.
