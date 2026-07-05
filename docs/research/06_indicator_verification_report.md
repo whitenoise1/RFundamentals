@@ -8,6 +8,17 @@ Last updated: 2026-04-20 (C-1 rollout complete: universe sweep + 2 new
 non-conformer classes resolved, 13 tickers rebuilt, alias map expanded)
 Scope: formula correctness (constitution) and code replication (implementation fidelity)
 
+> **Status note (2026-07-05).** Historical review of the original
+> 57-indicator set; the library has since grown to 130 indicators
+> across 18 families (OpenAP Waves 1-5, 09_openap_indicator_expansion.md)
+> and the wave indicators are not covered here. Still current: the ROIC
+> WARN (NI instead of NOPAT) remains open, and the section-12 robust
+> z-score pipeline (winsorize p2.5/97.5, median/MAD*1.4826, clip [-5,5])
+> is still in force. Superseded detail: financial-NA masking is now the
+> sector map .SECTOR_NA_INDICATORS (Financial / Utilities / Real
+> Estate), of which .FINANCIAL_NA_INDICATORS is the Financial entry.
+> Section 16's working-tree / session-handoff state is obsolete.
+
 ---
 
 ## Executive Summary

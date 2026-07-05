@@ -4,6 +4,11 @@ Research compiled 2026-04-16. Informs the architectural decision on how to
 standardize 47 fundamental indicators before feeding into BSTAR's
 regime-conditional return forecasting pipeline.
 
+Note (2026-07-05): compiled when the library had 47 indicators; it now
+has 130 across 18 families (see 09_openap_indicator_expansion.md and
+docs/INDICATORS.md). This folder has also grown beyond standardization
+research -- see the full file list below.
+
 ## Core Question
 
 How to handle three standardization dimensions:
@@ -20,7 +25,11 @@ How to handle three standardization dimensions:
 | 03_sector_neutralization.md | Within-sector construction, double sort |
 | 04_regime_conditional_factors.md | Interaction with regime models |
 | 05_practitioner_methodologies.md | Barra, AQR, Robeco approaches + pitfalls |
-| 08_cross_sectional_signal_extraction.md | **Deferred** research branch: per-stock signal from the 57-indicator cross-section. Literature + open questions. |
+| 06_indicator_verification_report.md | Formula/code verification of the original 57-indicator set (2026-04); source of the robust z-score pipeline |
+| 07_cfo_cumulation_issue.md | CFO YTD de-cumulation investigation log (RESOLVED 2026-04-20) |
+| 08_cross_sectional_signal_extraction.md | **Dropped 2026-07-01** (out of scope -- forecasting) research branch: per-stock signal from the indicator cross-section. Literature + open questions. |
+| 09_openap_indicator_expansion.md | Chen-Zimmermann OpenAP expansion plan and wave-by-wave status, Waves 0-5 (59 -> 130) |
+| 10_data_alignment_impact.md | Impact assessment of the two PIT alignment fixes (2026-07-02) |
 
 ## Key Conclusions
 

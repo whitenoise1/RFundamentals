@@ -1,6 +1,6 @@
 # RFundamentals: Indicator Reference
 
-116 fundamental indicators computed from SEC EDGAR XBRL filings and Yahoo Finance
+130 fundamental indicators computed from SEC EDGAR XBRL filings and Yahoo Finance
 market data. Each indicator is listed with its formula, data sources, and
 interpretation.
 
@@ -726,6 +726,98 @@ years (non-R&D firms get 0) but requires all five fiscal-year rows.
 
 ---
 
+## 16. Mohanram Family (9 indicators, Wave 5)
+
+Mohanram (2005 RAS) G-score components, stored individually like the
+Piotroski family (references and OpenAP deviations in
+docs/RESEARCH_INDICATORS.md, W5.1-W5.5). Each median component is a 0/1
+binary formed at the CROSS-SECTION stage against the within-finviz-sector
+median (>= 3 non-NA contributors; "Unknown" sector gives NA); the
+compute layer emits raw ingredients in hidden ing_ms_* columns and
+industry_adjust_cross_section binarizes them. Per-ticker timeseries
+layers therefore carry NA finals plus the ingredients; only ms_accrual
+(no median needed) is live per ticker. avgAT = (AT_t + AT_{t-1})/2.
+
+| Indicator | 1 when | Ingredient |
+|---|---|---|
+| `ms_roa` | NI/avgAT > sector median | FY level |
+| `ms_cfroa` | CFO/avgAT > sector median | FY level |
+| `ms_accrual` | CFO > NI (firm-level, no median) | final per ticker |
+| `ms_roa_vol` | sd(quarterly NI_q/AT_q) < sector median | 16q window, min 6 |
+| `ms_rev_vol` | sd(quarterly rev_q/rev_{q-4}) < sector median | 16q window, min 6 |
+| `ms_rd` | R&D/AT_{t-1} > sector median | zero-filled |
+| `ms_capex` | capex/AT_{t-1} > sector median | FY level |
+| `ms_adv` | advertising/AT_{t-1} > sector median | zero-filled |
+| `ms_score` | sum of the 8 components (0-8), NA if any NA | -- |
+
+CZ replication t-stat for the composite: 5.44. Deviations from OpenAP
+(documented in the research doc): full-universe sector medians instead
+of the lowest-B/M-quintile 2-digit-SIC medians (the largest deviation);
+FY filing-frequency levels instead of TTM sums for m1-m3/m6-m8; the raw
+0-8 sum is stored instead of the {1..6} clamp; the Stata
+missing=+infinity artifact is not replicated (missing inputs give NA
+components). Advertising coverage ~48%: the zero-fill keeps `ms_adv`
+computable, but sector medians of adv/AT sit at/near 0, so it largely
+degenerates to "discloses advertising at all". Like the Piotroski f_*
+binaries, the 8 components z-score to all-NA (binary MAD = 0) -- use
+the raw file; `ms_score` z-scores normally.
+
+---
+
+## 17. Distress Family (2 indicators, Wave 5)
+
+Bankruptcy-risk composites per Dichev (1998) (W5.6-W5.8). Higher =
+more distressed for `o_score`; higher = safer for `z_score`. Both are
+**NA for Financial, Utilities and Real Estate** (OpenAP excludes SIC
+4000-4999 and > 5999; finviz sectors cannot isolate transports).
+log(AT) uses AT in millions (Compustat units) so raw levels match the
+literature; the units and the omitted GNP deflator are constant within
+a snapshot, so cross-sectional ordering is exact.
+
+| Indicator | Formula | Source study (CZ t-stat) |
+|---|---|---|
+| `o_score` | -1.32 - 0.407 log(AT) + 6.03 LT/AT - 1.43 WC/AT + 0.076 LCT/ACT - 1.72 1{LT>AT} - 2.37 NI/AT - 1.83 CFO/LT + 0.285 1{NI_t + NI_{t-1} < 0} - 0.521 (NI_t - NI_{t-1})/(\|NI_t\| + \|NI_{t-1}\|) | Ohlson 1980 via Dichev (3.39) |
+| `z_score` | 1.2 WC/AT + 1.4 RE/AT + 3.3 (NI + interest + tax)/AT + 0.6 ME/LT + revenue/AT | Altman 1968 via Dichev (placebo, 1.20) |
+
+`o_score` notes: FFO = CFO (the post-1987 Compustat fallback -- our
+whole sample); the two-year-loss dummy is the replicated SUM-negative
+form; NA when NI_t = NI_{t-1} = 0 (CHIN denominator); OpenAP's
+top-decile binary discretization is not applied (continuous score
+stored). `z_score` notes: EBIT proxy = NI + interest (zero-if-na) +
+tax expense; leverage term uses total LIABILITIES; price-sensitive
+(recomputed daily from `stub_z_prefix` + 0.6 ME/LT; the stub is NA'd
+at fund-layer build for masked sectors). `o_score` is price-free and
+lives in the timeseries fund layer.
+
+---
+
+## 18. Structure Family (3 indicators, Wave 5)
+
+Industry concentration and financing-constraint indices (W5.10-W5.13).
+KZ and WW are OpenAP Placebos, stored as database quantities.
+
+| Indicator | Formula | Source study (CZ t-stat) |
+|---|---|---|
+| `herf` | within-industry HHI of revenue shares, mean over current + up to 2 lagged FYs | Hou-Robinson 2006 (2.30) |
+| `kz_index` | -1.002 (NI+DP)/PPE + 0.283 (AT + ME - BE)/AT + 3.139 debt/(debt+BE) - 39.368 \|div\|/PPE - 1.315 che/PPE | Lamont 2001 (placebo) |
+| `ww_index` | -0.091 (NI+DP)/(4 AT) - 0.062 1{div>0} + 0.021 LTD/AT - 0.044 log(AT) + 0.102 (industry rev growth)/4 - 0.035 (firm rev growth)/4 | Whited-Wu 2006 (placebo) |
+
+`herf` is cross-section-only: computed per finviz INDUSTRY (~120
+groups) at the assembler stage from `revenue_raw` + hidden lagged
+revenues (ing_rev_lag1/2); a year contributes only with
+>= max(2, half the current-year contributor count) firms, so
+singleton industries and sparsely-lagged years are NA. NA for
+Utilities (OpenAP's permanent SIC-49 exclusion). Concentration is
+relative to S&P 500 large-cap peers, not the full market. `kz_index`:
+txdb (deferred taxes) not fetched, omitted; price-sensitive
+(stub_kz_prefix + 0.283 ME/AT). `ww_index`: firm terms travel as
+ing_ww_partial; the industry sales-growth term (aggregate revenue of
+the >= 2 firms with both current and lag-1 revenue) is added at the
+cross-section stage; OpenAP's 1-month panel-lag artifact in the firm
+growth term is not replicated (proper FY-over-FY growth used).
+
+---
+
 ## XBRL Tag Alias Map
 
 Each canonical concept maps to multiple XBRL tags. First match wins during
@@ -791,7 +883,7 @@ in Waves 1-5.
 
 ---
 
-## Financial Sector Exclusions
+## Sector Exclusions
 
 Banks and financial institutions lack standard COGS, inventory, and operating
 income structure. The following indicators are set to NA for tickers classified
@@ -807,9 +899,24 @@ under the "Financial" sector:
   `net_debt_price` (Wave 4; net_debt_price follows OpenAP's SIC
   6000-6999 exclusion and is additionally stub-masked in the daily
   layer and re-masked with current sector in load_daily_cross_section)
+- `o_score`, `z_score` (Wave 5)
 
-During z-scoring, these indicators are computed excluding financial sector firms,
-so the cross-sectional distribution is not distorted by forced NAs.
+Since Wave 5 the mask is a sector -> indicators map
+(`.SECTOR_NA_INDICATORS` in indicator_compute.R) rather than
+Financial-only:
+
+- **Financial**: the full list above (15 indicators)
+- **Utilities**: `o_score`, `z_score`, `herf` (OpenAP excludes SIC
+  4000-4999 for the distress scores and SIC 49xx permanently for Herf)
+- **Real Estate**: `o_score`, `z_score` (part of OpenAP's SIC > 5999
+  exclusion)
+
+During z-scoring, masked indicators are computed excluding the masked
+sector's firms, so the cross-sectional distribution is not distorted by
+forced NAs. Price-sensitive masked indicators (`net_debt_price`,
+`z_score`) are additionally stub-masked at fund-layer build
+(`.MASKED_STUB_OF`) and re-masked with the current sector at every
+cross-section assembly point.
 
 ---
 

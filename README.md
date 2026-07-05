@@ -1,11 +1,11 @@
 # RFundamentals
 
-Point-in-time fundamental database for S&P 500 constituents. Builds a daily-frequency matrix of 81 indicators for ~500 stocks from free public data (SEC EDGAR + Yahoo Finance). Designed as input to quantitative factor models.
+Point-in-time fundamental database for S&P 500 constituents. Builds a daily-frequency matrix of 130 indicators for ~500 stocks from free public data (SEC EDGAR + Yahoo Finance). Designed as input to quantitative factor models.
 
 ## What it does
 
-- Fetches XBRL financial statements from SEC EDGAR for all current and historical S&P 500 members
-- Computes 81 fundamental indicators per ticker per trading day (valuation, profitability, growth, leverage, efficiency, cash flow quality, shareholder return, size, plus academic anomaly factors)
+- Fetches XBRL financial statements from SEC EDGAR for all current and historical S&P 500 members; the cache preserves reporting vintages so any past date can be reconstructed as it was known then
+- Computes 130 fundamental indicators per ticker per trading day (valuation, profitability, growth, leverage, efficiency, cash flow quality, shareholder return, size, plus 71 academic anomaly factors from the Chen-Zimmermann open asset pricing catalog: accrual decompositions, external financing, seasonal surprises, level ratios, investment, and composite scores)
 - Maintains a two-layer storage system: sparse fundamentals (one row per fiscal year) and dense daily series (one row per trading day, price-sensitive ratios updated with market close)
 - Produces cross-sectional snapshots with raw values and z-scores, ready for factor model consumption
 - All data is stamped by SEC filing date (not period end) to prevent look-ahead bias
@@ -73,7 +73,7 @@ After the initial build, the library provides data as in-memory data.tables. Ful
 ### Load a single stock's time series
 
 ```r
-# data.table: date, price, pe_trailing, roe, ... (81 indicator columns)
+# data.table: date, price, pe_trailing, roe, ... (130 indicator columns)
 aapl <- load_ticker_timeseries("AAPL")
 
 # filter by date range
@@ -83,7 +83,7 @@ aapl_2024 <- load_ticker_timeseries("AAPL", from = "2024-01-01")
 ### Load a cross-section for one date
 
 ```r
-# list with $raw and $zscored data.tables (~500 tickers x 81 indicators)
+# list with $raw and $zscored data.tables (~500 tickers x 130 indicators)
 cs <- load_daily_cross_section("2024-06-28")
 
 # raw factor matrix
@@ -128,13 +128,13 @@ sector_profile <- model_input[, lapply(.SD, median, na.rm = TRUE),
 | `load_daily_cross_section(date, zscore)` | list ($raw, $zscored) | All tickers, one date |
 | `get_fundamentals(ticker)` | data.table | Raw SEC filings (long format) |
 | `list_timeseries_tickers()` | character vector | Available tickers |
-| `get_indicator_names()` | character vector | 81 indicator names |
+| `get_indicator_names()` | character vector | 130 indicator names |
 | `build_timeseries()` | (side effect) | Historical build, all tickers |
 | `update_all_daily()` | (side effect) | Daily incremental update |
 
 ## Indicators
 
-81 indicators across 12 categories. Full formulas, XBRL tags, academic references, and interpretation in [`docs/INDICATORS.md`](docs/INDICATORS.md).
+130 indicators across 18 families. Full formulas, XBRL tags, academic references, and interpretation in [`docs/INDICATORS.md`](docs/INDICATORS.md); construction provenance and OpenAP replication notes in `docs/RESEARCH_INDICATORS.md`.
 
 | Category | Count | Examples |
 |----------|-------|---------|
@@ -150,26 +150,38 @@ sector_profile <- model_input[, lapply(.SD, median, na.rm = TRUE),
 | Tier 2 Research | 6 | Cash-Based OP, FCF Stability, SGA Efficiency, CapEx/DA, DSO Change, Inventory/Sales Change |
 | Balance-Sheet Change (Wave 1) | 15 | dNOA, DelFINL, DelNetFin, Total Accruals, Inventory/PPE Investment, Equity Growth, LTNOA Growth |
 | External Financing (Wave 2) | 7 | Net Debt/Equity Financing, XFIN, Composite Debt Issuance, Share Issuance 1y/5y, Net Payout Yield |
+| Seasonal Surprise (Wave 3) | 6 | ChTax, Earnings-Increase Streak, Revenue Surprise, SUE, Earnings Consistency, ROA-quarterly |
+| Levels (Wave 4) | 19 | R&D/ME, Enterprise B/M, CF/ME, Tangibility, Tax-to-Book, AT/ME, Book/Market Leverage, Operating Leverage |
+| Investment (Wave 4) | 10 | Capex Growth 2y/3y, Percent Total Accruals, ChAssetTurnover, Industry-Adjusted Capex Growth |
+| Mohanram (Wave 5) | 9 | G-score: 8 binary components vs sector medians + composite |
+| Distress (Wave 5) | 2 | Ohlson O-Score, Altman Z-Score |
+| Structure (Wave 5) | 3 | Industry Herfindahl, KZ Index, WW Index |
 
-13 indicators are price-sensitive (update daily with market close). 68 are fundamental-only (update when a new SEC filing appears).
+25 indicators are price-sensitive (update daily with market close). 105 are fundamental-only (update when a new SEC filing appears). A small set is finalized at the cross-section stage (Mohanram binaries, Herfindahl, WW industry term, industry-adjusted capex growth): per-ticker series carry ingredients, and any cross-section reader (`load_daily_cross_section`, snapshots) serves the finalized values. Sector exclusions: financials are NA for COGS/inventory-based indicators; financials, utilities and real estate are NA for the distress scores; utilities for Herfindahl.
 
 ## Architecture
 
 ```
 R/
   constituent_master.R     CIK resolution, roster cleanup
-  fundamental_fetcher.R    EDGAR XBRL fetch, dedup, cache
+  fundamental_fetcher.R    EDGAR XBRL fetch, vintage-preserving cache
   sector_classifier.R      Finviz sector/industry lookup
-  indicator_compute.R      Pure computation, 81 indicators
+  indicator_compute.R      Pure computation, 130 indicators
   pit_assembler.R          Point-in-time cross-sectional snapshots
   pipeline_runner.R        Orchestration, validation
   timeseries_builder.R     Daily time series builder
+  ttm_eps.R                Split-adjusted trailing-TTM EPS augment
+  feature_standardizer.R   Causal rolling / cross-sectional features
+  feature_compute_rF.R     r_F factor-model feature pipeline
+  company_info.R           Company metadata helpers
 
 cache/                     (generated, not in repo)
-  fundamentals/            EDGAR XBRL per ticker
+  fundamentals/            EDGAR XBRL per ticker (filing vintages)
   prices/                  Yahoo OHLCV per ticker
+  splits/                  split events per ticker
   lookups/                 constituent master, sector map
   timeseries/              two-layer daily time series
+  snapshots/               PIT cross-sections (raw + z-score per date)
 ```
 
 ## Data sources

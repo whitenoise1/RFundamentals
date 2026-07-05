@@ -584,6 +584,30 @@ implementation for line-level reference.
 
 ### Wave 5 -- composite scores (4-6 indicators)
 
+STATUS: CODE COMPLETE + COMMITTED 2026-07-05 (commit e9e64b1) as 14
+indicators (mohanram 9, distress 2, structure 3), 116 -> 130.
+Canonical names/formulas in docs/INDICATORS.md sections 16-18 and
+RESEARCH_INDICATORS.md W5.1-W5.14, which SUPERSEDE the table below
+where they differ (notably: continuous scores stored, no traded-signal
+discretizations; log(AT) in Compustat millions; INTWO is the
+replicated sum-negative form). Cross-section-finalized columns travel
+as explicit ing_* ingredients and industry_adjust_cross_section is
+idempotent on finalized data; the financial mask generalized to the
+.SECTOR_NA_INDICATORS sector map. Gates: 341+231+47+55+34 unit tests,
+integration A-F 54/54. Coverage (2024-06-30): ms components 85-99%,
+ms_score 75.7%, o_score 90.6% / z_score 84.4% within unmasked sectors,
+herf 94.0% ex-Utilities, ww_index 83.3%; kz_index 62.0% -- FLAGGED
+below the 70% bar (structural: debt-free firms without debt tags,
+missing cash, no filing-date price; OpenAP is stricter still), and its
+z-mean (-0.76) joins the known skewed set alongside the pre-existing
+zscore_mean_near_zero failures. Anchors: AAPL o_score -2.81 / z_score
+7.79 / ms_score 5; AAL/DAL/UAL o_score -1.2..-0.9 with z_score ~1;
+banks and utilities masked; Internet Retail herf 0.95 vs
+Semiconductors 0.13. MS binaries z-score to all-NA like the f_*
+components (binary MAD = 0; the raw file carries them). Full
+regeneration (66 snapshots + timeseries via tools/regen_wave5.R)
+launched 2026-07-05, in progress.
+
 | Acronym | t | Original study | Notes |
 |---|---|---|---|
 | MS (G-score) | 5.44 | Mohanram (2005 RAS) | 8 binary components vs sector medians (ROA, CFROA, CFO>NI, σROA, σrev growth, R&D/AT, capex/AT, adv/AT). Store components individually like F-score. Advertising component may be NA-heavy (sparse tag) -- document degradation to 7 components. |

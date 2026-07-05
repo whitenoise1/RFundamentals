@@ -1,8 +1,12 @@
-# Cross-Sectional Signal Extraction (Deferred Research Branch)
+# Cross-Sectional Signal Extraction (Dropped Research Branch)
 
-Status: **deferred** -- parked 2026-04-21 in favor of the time-series fundamental
-factor build for beta3 of the multifactor regime model. To be revisited once
-beta3 is wired into the downstream regime pipeline.
+Status: **dropped 2026-07-01** -- out of scope. RFundamentals is a
+fundamental-indicator database (recollection), not a forecasting engine;
+this forecasting branch will not be resumed here. Kept as a
+literature/design record. (Originally parked 2026-04-21 in favor of the
+time-series fundamental factor build.) Note also that its empirical
+results predate the 2026-07-02 PIT alignment fixes (see
+10_data_alignment_impact.md) and are contaminated.
 
 ## Scope
 
