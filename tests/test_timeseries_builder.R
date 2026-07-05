@@ -59,14 +59,14 @@ test("all price-sensitive are valid indicator names",
 test("all fundamental-only are valid indicator names",
      all(.FUNDAMENTAL_INDICATORS %in% all_indicators))
 
-test("23 price-sensitive indicators (13 + 10 Wave 4 ME-scaled)",
-     length(.PRICE_SENSITIVE_INDICATORS) == 23)
+test("25 price-sensitive indicators (13 + 10 Wave 4 + 2 Wave 5)",
+     length(.PRICE_SENSITIVE_INDICATORS) == 25)
 
-test("93 fundamental-only indicators (74 + 29 Wave 4 - 10 price-sensitive)",
-     length(.FUNDAMENTAL_INDICATORS) == 93)
+test("105 fundamental-only indicators (130 - 25 price-sensitive)",
+     length(.FUNDAMENTAL_INDICATORS) == 105)
 
-test("20 stubs (12 + 8 Wave 4 components)",
-     length(.STUB_NAMES) == 20)
+test("22 stubs (12 + 8 Wave 4 + 2 Wave 5 prefixes)",
+     length(.STUB_NAMES) == 22)
 
 test("all stub names start with stub_",
      all(grepl("^stub_", .STUB_NAMES)))
@@ -132,8 +132,8 @@ test("dividend_yield = 15e9 / 150e9",
 test("buyback_yield = 80e9 / 150e9",
      abs(ps_result$buyback_yield - (80e9 / 150e9)) < 0.0001)
 
-test("returns data.table with 23 columns (13 + 10 Wave 4)",
-     is.data.table(ps_result) && ncol(ps_result) == 23)
+test("returns data.table with 25 columns (13 + 10 Wave 4 + 2 Wave 5)",
+     is.data.table(ps_result) && ncol(ps_result) == 25)
 
 
 # -- 3. Vectorized: multiple elements --
@@ -592,7 +592,9 @@ if (!master_exists || !sector_exists) {
       cfo     = stubs$stub_cfo,
       che     = stubs$stub_che,
       ncash   = stubs$stub_net_cash,
-      ndp_num = stubs$stub_ndp_num
+      ndp_num = stubs$stub_ndp_num,
+      z_prefix  = stubs$stub_z_prefix,
+      kz_prefix = stubs$stub_kz_prefix
     )
 
     # All 12 price-sensitive indicators must match

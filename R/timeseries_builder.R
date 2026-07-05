@@ -8,8 +8,12 @@
 #      year. Stores fundamental-only indicators and accounting stubs for
 #      price-sensitive recomputation. Updates only on new filings.
 #   2. Daily layer ({ticker}_daily.parquet): dense, one row per trading day.
-#      Stores all 57 indicators. Price-sensitive indicators recomputed daily
-#      from stubs + closing price; fundamental-only carried forward.
+#      Stores every canonical indicator (get_indicator_names()) plus the
+#      hidden cross-section ingredient columns. Price-sensitive indicators
+#      recomputed daily from stubs + closing price; fundamental-only
+#      carried forward; cross-section-finalized columns (ms_*, herf,
+#      ww_index, ch_inv_ia) are per-ticker NA/ingredients until a
+#      cross-section reader finalizes them.
 #
 # Storage:
 #   cache/timeseries/{ticker}_fund.parquet
@@ -52,7 +56,9 @@ suppressPackageStartupMessages({
   "net_payout_yield",
   # Wave 4 ME-scaled levels
   "rd_me", "ebm", "bpebm", "cf_me", "cfp", "net_debt_price",
-  "am", "leverage_mkt", "cash_prod", "payout_yield"
+  "am", "leverage_mkt", "cash_prod", "payout_yield",
+  # Wave 5 ME-completed composites (Altman leverage term, KZ Tobin-q)
+  "z_score", "kz_index"
 )
 
 # Accounting stubs: raw items stored in the fundamentals layer that enable
@@ -68,17 +74,31 @@ suppressPackageStartupMessages({
 #   stub_che      cash + st_investments (Compustat CHE equivalent)
 #   stub_net_cash che - total_debt (Penman EBM net cash)
 #   stub_ndp_num  FINL - che (net_debt_price numerator; NA for financials)
+# Wave 5 stubs are the price-free composite prefixes from
+# .composite_prefixes (indicator_compute.R Section 6g):
+#   stub_z_prefix  Altman terms ex the 0.6*ME/LT leverage term (NA for
+#                  sectors whose mask covers z_score)
+#   stub_kz_prefix KZ terms ex the 0.283*ME/AT Tobin-q piece
 .STUB_NAMES <- c(
   "stub_shares", "stub_eps", "stub_equity",
   "stub_revenue", "stub_fcf", "stub_ebitda",
   "stub_total_debt", "stub_net_debt", "stub_cash",
   "stub_dividends", "stub_buybacks", "stub_equity_issuance",
   "stub_rnd", "stub_assets", "stub_liabilities", "stub_cf_num",
-  "stub_cfo", "stub_che", "stub_net_cash", "stub_ndp_num"
+  "stub_cfo", "stub_che", "stub_net_cash", "stub_ndp_num",
+  "stub_z_prefix", "stub_kz_prefix"
 )
 
 # Fundamental-only indicators: change only when a new filing appears
 .FUNDAMENTAL_INDICATORS <- setdiff(get_indicator_names(), .PRICE_SENSITIVE_INDICATORS)
+
+# Stub feeding each sector-masked price-sensitive indicator: when a
+# ticker's sector NA-masks the indicator, its stub is NA'd at fund-layer
+# build so the daily recompute cannot resurrect the value.
+.MASKED_STUB_OF <- c(
+  net_debt_price = "stub_ndp_num",
+  z_score        = "stub_z_prefix"
+)
 
 
 # =============================================================================
@@ -116,9 +136,11 @@ suppressPackageStartupMessages({
   curr <- fy_rows[curr_idx[1]]
 
   # Wave 4 components come from .level_components (indicator_compute.R
-  # Section 6e) -- the SAME resolver the compute path uses, so the
-  # filing-date and daily-recompute values cannot drift.
-  lc <- .level_components(curr)
+  # Section 6e), Wave 5 prefixes from .composite_prefixes (Section 6g)
+  # -- the SAME resolvers the compute path uses, so the filing-date and
+  # daily-recompute values cannot drift.
+  lc  <- .level_components(curr)
+  pfx <- .composite_prefixes(curr, lc = lc)
 
   list(
     stub_shares     = .col(curr, "shares_outstanding"),
@@ -140,7 +162,9 @@ suppressPackageStartupMessages({
     stub_cfo        = .col(curr, "operating_cashflow"),
     stub_che        = lc$che,
     stub_net_cash   = lc$ncash,
-    stub_ndp_num    = lc$ndp_num
+    stub_ndp_num    = lc$ndp_num,
+    stub_z_prefix   = pfx$z_prefix,
+    stub_kz_prefix  = pfx$kz_prefix
   )
 }
 
@@ -148,10 +172,11 @@ suppressPackageStartupMessages({
 #' Vectorized computation of price-sensitive indicators
 #'
 #' Given vectors of accounting stubs and prices (one element per trading day),
-#' computes all 23 price-sensitive indicators. Replicates the logic from
-#' .compute_valuation, .compute_shareholder and .compute_levels in
-#' indicator_compute.R. Wave 4 stub params default to NA so pre-Wave-4
-#' fund layers degrade to NA columns instead of erroring.
+#' computes all 25 price-sensitive indicators. Replicates the logic from
+#' .compute_valuation, .compute_shareholder, .compute_levels and the
+#' Wave 5 composite completions in indicator_compute.R. Wave 4/5 stub
+#' params default to NA so older fund layers degrade to NA columns
+#' instead of erroring.
 #'
 #' @param p Numeric vector. Closing prices.
 #' @param shares Numeric vector. Shares outstanding.
@@ -174,7 +199,9 @@ suppressPackageStartupMessages({
 #' @param che Numeric vector. Cash + ST investments (stub_che).
 #' @param ncash Numeric vector. che - total debt (stub_net_cash).
 #' @param ndp_num Numeric vector. FINL - che (stub_ndp_num).
-#' @return data.table with 23 price-sensitive indicator columns.
+#' @param z_prefix Numeric vector. Altman price-free terms (stub_z_prefix).
+#' @param kz_prefix Numeric vector. KZ price-free terms (stub_kz_prefix).
+#' @return data.table with 25 price-sensitive indicator columns.
 .compute_price_sensitive_vec <- function(p, shares, eps, equity, rev,
                                          fcf_v, ebitda, td, nd,
                                          div, buy, eps_g,
@@ -183,7 +210,9 @@ suppressPackageStartupMessages({
                                          lt_v = NA_real_, cf_num = NA_real_,
                                          cfo = NA_real_, che = NA_real_,
                                          ncash = NA_real_,
-                                         ndp_num = NA_real_) {
+                                         ndp_num = NA_real_,
+                                         z_prefix = NA_real_,
+                                         kz_prefix = NA_real_) {
 
   # Market cap & enterprise value
   mc <- ifelse(!is.na(p) & !is.na(shares), p * shares, NA_real_)
@@ -282,6 +311,15 @@ suppressPackageStartupMessages({
   # and gpy_num are computed once above, next to net payout yield)
   payout_yield <- ifelse(any_gross & mc_ok, gpy_num / mc, NA_real_)
 
+  # -- Wave 5 composite completions (indicator_compute.R Section 6g) --
+  # Altman: prefix + 0.6*ME/LT; KZ: prefix + 0.283*ME/AT
+  z_score <- ifelse(mc_ok & !is.na(z_prefix) & !is.na(lt_v) &
+                      abs(lt_v) >= 1e-9,
+                    z_prefix + 0.6 * mc / lt_v, NA_real_)
+  kz_index <- ifelse(mc_ok & !is.na(kz_prefix) & !is.na(at_v) &
+                       abs(at_v) >= 1e-9,
+                     kz_prefix + 0.283 * mc / at_v, NA_real_)
+
   data.table(
     pe_trailing      = pe,
     peg              = peg,
@@ -305,7 +343,9 @@ suppressPackageStartupMessages({
     am               = am_v,
     leverage_mkt     = lev_mkt,
     cash_prod        = cash_prod,
-    payout_yield     = payout_yield
+    payout_yield     = payout_yield,
+    z_score          = z_score,
+    kz_index         = kz_index
   )
 }
 
@@ -401,18 +441,24 @@ build_ticker_fundamentals <- function(ticker, cik, sector,
     )
     if (is.null(indicators)) next
 
-    # Extract fundamental-only indicator values
-    fund_only <- as.list(indicators[.FUNDAMENTAL_INDICATORS])
+    # Extract fundamental-only indicator values, plus the hidden
+    # cross-section ingredient columns (lagged revenues) that the daily
+    # cross-section reader needs to finalize herf / ww_index.
+    fund_only <- as.list(indicators[c(.FUNDAMENTAL_INDICATORS,
+                                      .CS_INGREDIENT_COLS)])
 
     # Extract accounting stubs from the as-of pivoted data
     stubs <- .extract_stubs(wide, fy)
     if (is.null(stubs)) next
 
-    # net_debt_price is financial-NA (OpenAP SIC 6000-6999 exclusion);
-    # the compute-path mask cannot reach the daily recompute, so NA the
-    # stub at the source for financial tickers.
-    if (!is.na(sector) && sector == "Financial") {
-      stubs$stub_ndp_num <- NA_real_
+    # Sector-masked price-sensitive indicators are recomputed daily from
+    # stubs, out of reach of the compute-path mask -- NA the stubs at
+    # the source, driven by the declarative indicator -> stub map so a
+    # future masked price-sensitive indicator cannot silently miss it.
+    if (!is.na(sector) && sector %in% names(.SECTOR_NA_INDICATORS)) {
+      masked_here <- intersect(names(.MASKED_STUB_OF),
+                               .SECTOR_NA_INDICATORS[[sector]])
+      for (ind in masked_here) stubs[[.MASKED_STUB_OF[[ind]]]] <- NA_real_
     }
 
     n_ok <- n_ok + 1L
@@ -555,8 +601,9 @@ update_ticker_daily <- function(ticker,
     filed_date  = fund_dt$filed_date[fund_idx]
   )
 
-  # -- Map fundamental-only indicators from fund layer --
-  for (col in .FUNDAMENTAL_INDICATORS) {
+  # -- Map fundamental-only indicators (plus hidden cross-section
+  #    ingredients for the herf / ww_index finalization) from fund layer --
+  for (col in c(.FUNDAMENTAL_INDICATORS, .CS_INGREDIENT_COLS)) {
     if (col %in% names(fund_dt)) {
       set(result_dt, j = col, value = as.numeric(fund_dt[[col]][fund_idx]))
     } else {
@@ -587,7 +634,9 @@ update_ticker_daily <- function(ticker,
     cfo     = .stub_or_na(fund_dt, "stub_cfo", fund_idx),
     che     = .stub_or_na(fund_dt, "stub_che", fund_idx),
     ncash   = .stub_or_na(fund_dt, "stub_net_cash", fund_idx),
-    ndp_num = .stub_or_na(fund_dt, "stub_ndp_num", fund_idx)
+    ndp_num = .stub_or_na(fund_dt, "stub_ndp_num", fund_idx),
+    z_prefix  = .stub_or_na(fund_dt, "stub_z_prefix", fund_idx),
+    kz_prefix = .stub_or_na(fund_dt, "stub_kz_prefix", fund_idx)
   )
 
   # Bind price-sensitive columns into result
@@ -893,32 +942,35 @@ load_daily_cross_section <- function(target_date,
     cs[is.na(sector), sector := "Unknown"]
     cs[is.na(industry), industry := "Unknown"]
 
-    # Finalize sector-demeaned indicators (ch_inv_ia): the per-ticker
-    # daily layers store the firm-level ingredient; the cross-section
-    # is where the sector mean exists. Runs before z-scoring so both
-    # raw and z-scored outputs carry the industry-adjusted value.
+    # Finalize cross-section-stage indicators (ch_inv_ia demean,
+    # Mohanram binarization, herf, ww_index): the per-ticker daily
+    # layers store firm-level ingredients; the cross-section is where
+    # sector medians / industry aggregates exist. Runs before z-scoring
+    # so both raw and z-scored outputs carry the finalized values.
+    # Also drops the hidden ingredient columns.
     industry_adjust_cross_section(cs)
 
-    # Financial-sector mask on the raw cross-section. Fundamental
-    # indicators are already NA'd per ticker at compute time, but the
-    # price-sensitive net_debt_price is recomputed daily from stubs
-    # frozen at fund-layer build -- masking here with the CURRENT
-    # sector also covers tickers built before their sector resolved.
-    fin_rows <- which(cs$sector %in% "Financial")
-    if (length(fin_rows)) {
-      for (cn in intersect(.FINANCIAL_NA_INDICATORS, names(cs))) {
-        set(cs, i = fin_rows, j = cn, value = NA_real_)
-      }
+    # Sector NA mask on the raw cross-section. Fundamental indicators
+    # are already NA'd per ticker at compute time, but price-sensitive
+    # sector-masked indicators (net_debt_price, z_score) are recomputed
+    # daily from stubs frozen at fund-layer build -- masking here with
+    # the CURRENT sector also covers tickers built before their sector
+    # resolved.
+    for (cn in intersect(names(.SECTOR_NA_COL_MAP), names(cs))) {
+      m <- .sector_na_mask(cn, cs$sector)
+      if (any(m)) set(cs, i = which(m), j = cn, value = NA_real_)
     }
   } else {
-    # Without the sector lookup the demean cannot run; a value under
-    # the ch_inv_ia name must be the industry-adjusted quantity, so
-    # degrade to NA rather than serving the raw ingredient.
+    # Without the sector lookup the finalize pass cannot run; a value
+    # under a cross-section-finalized name must be the finalized
+    # quantity, so degrade to NA rather than serving raw ingredients.
     warning("load_daily_cross_section: sector lookup missing; ",
-            "sector-demeaned indicators set to NA", call. = FALSE)
-    for (cn in intersect(.SECTOR_DEMEAN_INDICATORS, names(cs))) {
+            "cross-section-finalized indicators set to NA", call. = FALSE)
+    for (cn in intersect(.CROSS_SECTION_FINALIZED, names(cs))) {
       set(cs, j = cn, value = NA_real_)
     }
+    ing_cols <- intersect(.CS_INGREDIENT_COLS, names(cs))
+    if (length(ing_cols)) cs[, (ing_cols) := NULL]
   }
 
   # Order columns: metadata, then indicators in canonical order
@@ -929,6 +981,14 @@ load_daily_cross_section <- function(target_date,
   present_ind  <- intersect(ind_names, names(cs))
   other_cols   <- setdiff(names(cs), c(present_meta, present_ind))
   setcolorder(cs, c(present_meta, present_ind, other_cols))
+
+  .assert_output_ts(cs, "load_daily_cross_section", list(
+    "is data.table"     = is.data.table,
+    "has ticker col"    = function(x) "ticker" %in% names(x),
+    "no ingredient cols" = function(x) {
+      !any(.CS_INGREDIENT_COLS %in% names(x))
+    }
+  ))
 
   if (!zscore) return(cs)
 

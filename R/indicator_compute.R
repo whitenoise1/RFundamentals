@@ -4,7 +4,7 @@
 # Pure computation layer: no I/O. Receives data.tables and price scalars,
 # returns named vectors and data.tables.
 #
-# Computes 116 output fields from EDGAR XBRL data + market prices:
+# Computes 130 output fields from EDGAR XBRL data + market prices:
 #   - 36 baseline indicators (valuation, profitability, growth, leverage,
 #     efficiency, cash flow quality, shareholder return, size)
 #   - 2 size extras (shares outstanding, public float)
@@ -24,6 +24,10 @@
 #   - 29 Wave 4 levels and investment indicators (ME-scaled levels, tax,
 #     tangibility, capex growth family, AB98 constructions, R&D capital)
 #     -- see docs/research/09 Wave 4 preflight, RESEARCH_INDICATORS.md W4.*
+#   - 14 Wave 5 composite scores (Mohanram G-score components, Ohlson
+#     O-Score, Altman Z-Score, Herfindahl industry concentration, KZ and
+#     WW constraint indices) -- see docs/research/09 Wave 5 preflight,
+#     RESEARCH_INDICATORS.md W5.*
 #
 # Public API:
 #   compute_ticker_indicators(fund_dt, price, sector, target_fy, target_period)
@@ -54,8 +58,46 @@ suppressPackageStartupMessages({
   # banks; net_debt_price follows OpenAP's SIC 6000-6999 exclusion (a
   # bank's debt is operating raw material, not net financing)
   "tang", "op_leverage", "ch_asset_turnover", "gr_sale_to_gr_inv",
-  "net_debt_price"
+  "net_debt_price",
+  # Wave 5: Ohlson/Altman coefficients presume industrials; OpenAP sets
+  # both to missing for SIC > 5999
+  "o_score", "z_score"
 )
+
+# Sector -> indicators NA map (Wave 5 generalization of the financial
+# mask). OpenAP's OScore/ZScore exclusion is SIC 4000-4999 and > 5999:
+# transport/utilities plus financials-and-beyond. Finviz sectors cannot
+# isolate transports (inside Industrials), so the mapping is Financial +
+# Utilities + Real Estate (documented deviation, docs/research/09 Wave 5
+# item 9). Herf's permanent SIC-49 exclusion maps to Utilities.
+.SECTOR_NA_INDICATORS <- list(
+  "Financial"   = .FINANCIAL_NA_INDICATORS,
+  "Utilities"   = c("o_score", "z_score", "herf"),
+  "Real Estate" = c("o_score", "z_score")
+)
+
+# Reverse map (indicator -> masking sectors), built once so per-column
+# mask lookups in the z-scoring loops are O(1) for unmasked columns.
+.SECTOR_NA_COL_MAP <- local({
+  m <- list()
+  for (sec in names(.SECTOR_NA_INDICATORS)) {
+    for (cn in .SECTOR_NA_INDICATORS[[sec]]) m[[cn]] <- c(m[[cn]], sec)
+  }
+  m
+})
+
+# TRUE for cross-section rows whose sector NA-masks this indicator.
+.sector_na_mask <- function(col_name, sectors) {
+  secs <- .SECTOR_NA_COL_MAP[[col_name]]
+  if (is.null(secs)) rep(FALSE, length(sectors)) else sectors %in% secs
+}
+
+# FALSE for benchmark-group labels that cannot anchor a cross-sectional
+# comparison: NA or the "Unknown" placeholder assemblers use for failed
+# finviz lookups.
+.benchmark_group_ok <- function(label) {
+  !is.na(label) && label != "Unknown"
+}
 
 # Indicators finalized by sector demeaning at the cross-section stage.
 # compute_ticker_indicators emits the firm-level ingredient (for
@@ -63,6 +105,43 @@ suppressPackageStartupMessages({
 # cross-section functions subtract the equal-weighted sector mean --
 # the compute module never sees the cross-section (pure, per-ticker).
 .SECTOR_DEMEAN_INDICATORS <- c("ch_inv_ia")
+
+# Wave 5 columns finalized at the cross-section stage. The per-ticker
+# vector (and the per-ticker timeseries layers) carry these as NA plus
+# explicitly named ing_* ingredient columns; the finalize pass
+# (industry_adjust_cross_section) populates a final column ONLY when its
+# ingredients are present, so re-running the pass on finalized data is a
+# no-op rather than a silent re-binarization. ms_accrual (CFO > NI) is
+# genuinely per-ticker and is emitted final; ms_score is assembled from
+# the finalized components. Any cross-section assembly point must run
+# industry_adjust_cross_section or NA these columns (same rule as
+# .SECTOR_DEMEAN_INDICATORS).
+.MS_MEDIAN_GT <- c("ms_roa", "ms_cfroa", "ms_rd", "ms_capex", "ms_adv")
+.MS_MEDIAN_LT <- c("ms_roa_vol", "ms_rev_vol")
+.MS_COMPONENTS <- c("ms_roa", "ms_cfroa", "ms_accrual", "ms_roa_vol",
+                    "ms_rev_vol", "ms_rd", "ms_capex", "ms_adv")
+
+# Ingredient carrier per median-binarized MS component (final -> ing_).
+.MS_INGREDIENT_OF <- setNames(
+  paste0("ing_", c(.MS_MEDIAN_GT, .MS_MEDIAN_LT)),
+  c(.MS_MEDIAN_GT, .MS_MEDIAN_LT)
+)
+
+# Revenue columns consumed by the Herfindahl 3-year average (current +
+# two lagged FYs). Declared per consumer so the generic ingredient
+# registry can grow without silently feeding herf non-revenue columns.
+.HERF_REV_COLS <- c("revenue_raw", "ing_rev_lag1", "ing_rev_lag2")
+
+.CROSS_SECTION_FINALIZED <- c(.SECTOR_DEMEAN_INDICATORS,
+                              c(.MS_MEDIAN_GT, .MS_MEDIAN_LT),
+                              "ms_score", "herf", "ww_index")
+
+# Hidden ingredient columns appended to the per-ticker vector after the
+# canonical indicators; consumed by the finalize pass and dropped from
+# cross-section outputs. Per-ticker timeseries layers persist them so
+# the daily cross-section reader can finalize.
+.CS_INGREDIENT_COLS <- c(unname(.MS_INGREDIENT_OF), "ing_ww_partial",
+                         "ing_rev_lag1", "ing_rev_lag2")
 
 # XBRL tags that should not contribute to a concept when read from cache.
 # InterestIncomeExpenseNet is net of interest income and can be negative
@@ -73,10 +152,11 @@ suppressPackageStartupMessages({
   interest_expense = c("InterestIncomeExpenseNet")
 )
 
-# Canonical indicator names in output order (116 entries):
+# Canonical indicator names in output order (130 entries):
 # 36 baseline + 2 size (shares_outstanding, public_float) + 5 tier1 +
 # 10 piotroski (9 components + composite) + 6 tier2 + 15 wave1 + 7 wave2 +
-# 6 wave3 + 29 wave4 (19 levels + 10 investment)
+# 6 wave3 + 29 wave4 (19 levels + 10 investment) + 14 wave5 (9 mohanram +
+# 2 distress + 3 structure)
 .INDICATOR_NAMES <- c(
   # Valuation (8)
   "pe_trailing", "peg", "pb", "ps", "pfcf",
@@ -130,10 +210,17 @@ suppressPackageStartupMessages({
   # Wave 4: investment family (10) -- OpenAP expansion
   "pchdepr", "grcapx", "grcapx3y", "pct_tot_acc",
   "ch_asset_turnover", "gr_sale_to_gr_inv", "surprise_rd",
-  "investment", "rd_cap", "ch_inv_ia"
+  "investment", "rd_cap", "ch_inv_ia",
+  # Wave 5: mohanram family (8 components + composite) -- OpenAP expansion
+  "ms_roa", "ms_cfroa", "ms_accrual", "ms_roa_vol", "ms_rev_vol",
+  "ms_rd", "ms_capex", "ms_adv", "ms_score",
+  # Wave 5: distress family (2) -- OpenAP expansion
+  "o_score", "z_score",
+  # Wave 5: structure family (3) -- OpenAP expansion
+  "herf", "kz_index", "ww_index"
 )
 
-# Family-to-indicator mapping (canonical groupings, 10 families)
+# Family-to-indicator mapping (canonical groupings, 18 families)
 .INDICATOR_FAMILIES <- list(
   valuation         = c("pe_trailing", "peg", "pb", "ps", "pfcf",
                          "ev_ebitda", "ev_revenue", "earnings_yield"),
@@ -174,7 +261,12 @@ suppressPackageStartupMessages({
                          "salecash", "depr_rate"),
   investment        = c("pchdepr", "grcapx", "grcapx3y", "pct_tot_acc",
                          "ch_asset_turnover", "gr_sale_to_gr_inv",
-                         "surprise_rd", "investment", "rd_cap", "ch_inv_ia")
+                         "surprise_rd", "investment", "rd_cap", "ch_inv_ia"),
+  mohanram          = c("ms_roa", "ms_cfroa", "ms_accrual", "ms_roa_vol",
+                         "ms_rev_vol", "ms_rd", "ms_capex", "ms_adv",
+                         "ms_score"),
+  distress          = c("o_score", "z_score"),
+  structure         = c("herf", "kz_index", "ww_index")
 )
 
 
@@ -1593,7 +1685,19 @@ pivot_fundamentals <- function(fund_dt) {
   mean(egs, na.rm = TRUE)
 }
 
-.compute_surprise <- function(fund_dt, target_fy, splits = NULL) {
+# Quarter panels shared by .compute_surprise and .compute_ms_ingredients
+# within one compute_ticker_indicators call -- the de-cumulation scan is
+# the most expensive per-ticker step, so it must run once.
+.quarter_panels <- function(fund_dt) {
+  list(
+    ni  = .flow_quarter_series(fund_dt, "net_income"),
+    rev = .flow_quarter_series(fund_dt, "revenue"),
+    at  = .instant_series(fund_dt, "total_assets")
+  )
+}
+
+.compute_surprise <- function(fund_dt, target_fy, splits = NULL,
+                              panels = NULL) {
 
   out <- list(
     ch_tax = NA_real_, num_earn_increase = NA_real_,
@@ -1606,12 +1710,13 @@ pivot_fundamentals <- function(fund_dt) {
     has_rev_panel = FALSE, rev_qoq = NA_real_
   )
 
-  ni  <- .flow_quarter_series(fund_dt, "net_income")
+  if (is.null(panels)) panels <- .quarter_panels(fund_dt)
+  ni  <- panels$ni
+  rev <- panels$rev
+  at  <- panels$at
   tax <- .flow_quarter_series(fund_dt, "income_tax_expense")
-  rev <- .flow_quarter_series(fund_dt, "revenue")
   eps <- .flow_quarter_series(fund_dt, "eps_diluted", splits,
                               split_adjust = TRUE)
-  at  <- .instant_series(fund_dt, "total_assets")
 
   # -- Thomas & Zhang (2011): seasonal change in quarterly tax expense
   #    over total assets at the lag quarter's balance-sheet date.
@@ -1771,7 +1876,7 @@ pivot_fundamentals <- function(fund_dt) {
   )
 }
 
-.compute_levels <- function(curr, market_cap, fy_start = NULL) {
+.compute_levels <- function(curr, market_cap, fy_start = NULL, lc = NULL) {
 
   out <- list(
     rd_me = NA_real_, ebm = NA_real_, bpebm = NA_real_,
@@ -1784,7 +1889,7 @@ pivot_fundamentals <- function(fund_dt) {
     salecash = NA_real_, depr_rate = NA_real_
   )
 
-  lc <- .level_components(curr)
+  if (is.null(lc)) lc <- .level_components(curr)
   at     <- lc$at
   ceq    <- lc$ceq
   ni     <- lc$ni
@@ -2101,6 +2206,229 @@ pivot_fundamentals <- function(fund_dt) {
 
 
 # =============================================================================
+# SECTION 6g: WAVE 5 -- COMPOSITE SCORES
+# =============================================================================
+# 14 indicators from the OpenAP expansion (docs/research/09, Wave 5).
+# Constructions verified against the OpenAP Stata/pyCode on 2026-07-03;
+# canonical formulas, guards and deviations in RESEARCH_INDICATORS.md
+# W5.1-W5.14. Traded-signal discretizations (MS clamp to {1..6}, OScore
+# top-decile binary) are NOT applied -- continuous database quantities.
+#
+# Split of work: o_score, z_score, kz_index and the WW firm-level terms
+# are per-ticker; MS sector-median binarization, the Herfindahl HHI and
+# the WW industry sales-growth term need the cross-section and are
+# finalized in industry_adjust_cross_section.
+
+# Shared price-free prefixes of the two price-sensitive composites, used
+# by BOTH the compute path and the timeseries stub extraction
+# (.extract_stubs in timeseries_builder.R) -- one source of truth, the
+# Wave 4 .level_components rule.
+#   z_prefix:  1.2*WC/AT + 1.4*RE/AT + 3.3*EBIT/AT + REV/AT, where
+#              EBIT = NI + interest-zero-if-na + tax (ni + xint + txt,
+#              the OpenAP proxy; interest absence = no debt, tax
+#              required). Completed by + 0.6*ME/LT.
+#   kz_prefix: -1.002*(NI+DP)/PPENT + 0.283*(AT - CEQ)/AT
+#              + 3.139*DEBT/(DEBT+CEQ) - 39.368*|DIV|/PPENT
+#              - 1.315*CHE/PPENT, txdb omitted (not fetched, W5.11).
+#              Completed by + 0.283*ME/AT.
+.composite_prefixes <- function(row, lc = NULL) {
+  if (is.null(lc)) lc <- .level_components(row)
+  at  <- lc$at
+  act <- .col(row, "current_assets")
+  lct <- .col(row, "current_liabilities")
+
+  z_prefix <- NA_real_
+  re  <- .col(row, "retained_earnings")
+  rev <- .col(row, "revenue")
+  tax <- .col(row, "income_tax_expense")
+  if (!is.na(at) && at > 0 && !is.na(act) && !is.na(lct) &&
+      !is.na(re) && !is.na(lc$ni) && !is.na(tax) && !is.na(rev)) {
+    ebit <- lc$ni + .zero_if_na(.col(row, "interest_expense")) + tax
+    z_prefix <- (1.2 * (act - lct) + 1.4 * re + 3.3 * ebit + rev) / at
+  }
+
+  kz_prefix <- NA_real_
+  ppent <- .col(row, "ppe_net")
+  dv    <- abs(.zero_if_na(.col(row, "dividends_paid")))
+  if (!is.na(ppent) && abs(ppent) >= 1 && !is.na(lc$cf_num) &&
+      !is.na(lc$che) && !is.na(lc$td) && !is.na(lc$ceq) &&
+      !is.na(at) && at > 0) {
+    lever <- .safe_divide(lc$td, lc$td + lc$ceq)
+    if (!is.na(lever)) {
+      kz_prefix <- -1.002 * lc$cf_num / ppent +
+        0.283 * (at - lc$ceq) / at +
+        3.139 * lever -
+        39.368 * dv / ppent -
+        1.315 * lc$che / ppent
+    }
+  }
+
+  list(z_prefix = z_prefix, kz_prefix = kz_prefix,
+       at = at, lt = lc$lt, act = act, lct = lct, ni = lc$ni,
+       cf_num = lc$cf_num)
+}
+
+# Ohlson (1980) O-Score as replicated by OpenAP via Dichev (1998) and
+# Altman (1968) Z-Score (OpenAP Placebo). Deviations (W5.6-W5.8): FFO =
+# operating cash flow (the post-1987 fopt fallback, our whole sample);
+# the GNP deflator in log(AT) is omitted (constant within a snapshot,
+# cross-sectionally exact); INTWO is the replicated sum-negative form,
+# not loss-in-both-years; continuous scores stored, higher o_score =
+# more distressed. ME = market cap on the filing date.
+.compute_distress <- function(curr, prior, market_cap, pfx) {
+
+  out <- list(o_score = NA_real_, z_score = NA_real_)
+
+  at   <- pfx$at
+  lt   <- pfx$lt
+  act  <- pfx$act
+  lct  <- pfx$lct
+  ni   <- pfx$ni
+  ni_p <- if (is.null(prior)) NA_real_ else .col(prior, "net_income")
+  cfo  <- .col(curr, "operating_cashflow")
+
+  if (!is.na(at) && at > 0 && !is.na(lt) && !is.na(act) && !is.na(lct) &&
+      !is.na(ni) && !is.na(ni_p) && !is.na(cfo)) {
+    chin  <- .safe_divide(ni - ni_p, abs(ni) + abs(ni_p))
+    ffolt <- .safe_divide(cfo, lt)
+    lctact <- .safe_divide(lct, act)
+    if (!is.na(chin) && !is.na(ffolt) && !is.na(lctact)) {
+      # log size in Compustat millions so raw levels match the
+      # literature; the unit choice (like the omitted GNP deflator) is
+      # a constant within a snapshot -- cross-sectionally exact
+      out$o_score <- -1.32 - 0.407 * log(at / 1e6) + 6.03 * lt / at -
+        1.43 * (act - lct) / at + 0.076 * lctact -
+        1.72 * as.numeric(lt > at) - 2.37 * ni / at - 1.83 * ffolt +
+        0.285 * as.numeric(ni + ni_p < 0) - 0.521 * chin
+    }
+  }
+
+  # z_prefix carries the four accounting terms; the leverage term is
+  # 0.6 * ME / total LIABILITIES (OpenAP uses lt, not debt -- W5.8).
+  me_lt <- .safe_divide(market_cap, pfx$lt)
+  if (!is.na(pfx$z_prefix) && !is.na(me_lt)) {
+    out$z_score <- pfx$z_prefix + 0.6 * me_lt
+  }
+
+  out
+}
+
+# Kaplan-Zingales index (Lamont, Polk, Saa-Requejo 2001) and the
+# firm-level part of the Whited-Wu (2006) index -- both OpenAP Placebos,
+# stored for database completeness (W5.11-W5.13). kz_index needs ME (the
+# Tobin-q term); ww is completed at the cross-section stage by
+# + 0.102 * (industry sales growth)/4. The /4 factors approximate
+# quarterly rates (WW was estimated on quarterly data). OpenAP's 1-month
+# firm sales-growth lag on the monthly-expanded panel is a port artifact
+# -- proper FY-over-FY growth is used instead (W5.12).
+.compute_kz_ww <- function(curr, prior, market_cap, pfx) {
+
+  out <- list(kz_index = NA_real_, ww_partial = NA_real_)
+
+  me_at <- .safe_divide(market_cap, pfx$at)
+  if (!is.na(pfx$kz_prefix) && !is.na(me_at)) {
+    out$kz_index <- pfx$kz_prefix + 0.283 * me_at
+  }
+
+  at    <- pfx$at
+  rev   <- .col(curr, "revenue")
+  rev_p <- if (is.null(prior)) NA_real_ else .col(prior, "revenue")
+  if (!is.na(at) && at > 0 && !is.na(pfx$cf_num)) {
+    g_firm <- .safe_growth(rev, rev_p)
+    if (!is.na(g_firm)) {
+      dv <- .col(curr, "dividends_paid")
+      divpos <- as.numeric(!is.na(dv) && abs(dv) > 0)
+      dltt <- .zero_if_na(.col(curr, "long_term_debt"))
+      # log size in Compustat millions (same rationale as o_score)
+      out$ww_partial <- -0.091 * pfx$cf_num / (4 * at) - 0.062 * divpos +
+        0.021 * dltt / at - 0.044 * log(at / 1e6) - 0.035 * g_firm / 4
+    }
+  }
+
+  out
+}
+
+# Mohanram (2005) G-score ingredients. Level components (m1-m3, m6-m8)
+# are FY filing-frequency values per repo convention; the volatility
+# components (m4, m5) follow OpenAP's quarterly construction: sd of
+# quarterly ROA (NI_q / AT_q, contemporaneous assets) and sd of the
+# quarterly seasonal sales ratio (rev_q / rev_{q-4}) over a 4-year
+# window ending at the target FY's balance-sheet date, minimum 6
+# observations (OpenAP: 48-month window, min 18 monthly obs ~ 6
+# quarters). R&D and advertising are zero-filled (absence = immaterial
+# spend, the OpenAP fill list); the Stata missing=+infinity artifact is
+# NOT replicated -- missing profitability inputs give NA components
+# (W5.1-W5.5). Binarization vs sector medians happens at the
+# cross-section stage; ms_accrual needs no median and is emitted as the
+# final binary.
+.compute_ms_ingredients <- function(fund_dt, curr, prior, panels = NULL) {
+
+  out <- list(ms_roa = NA_real_, ms_cfroa = NA_real_, ms_accrual = NA_real_,
+              ms_roa_vol = NA_real_, ms_rev_vol = NA_real_,
+              ms_rd = NA_real_, ms_capex = NA_real_, ms_adv = NA_real_)
+
+  at_t <- .col(curr, "total_assets")
+  at_p <- if (is.null(prior)) NA_real_ else .col(prior, "total_assets")
+  ni   <- .col(curr, "net_income")
+  cfo  <- .col(curr, "operating_cashflow")
+
+  if (!is.na(at_t) && !is.na(at_p)) {
+    avgat <- (at_t + at_p) / 2
+    out$ms_roa   <- .safe_divide(ni, avgat)
+    out$ms_cfroa <- .safe_divide(cfo, avgat)
+    out$ms_rd    <- .safe_divide(.zero_if_na(.col(curr, "rnd")), at_p)
+    out$ms_capex <- .safe_divide(.col(curr, "capex"), at_p)
+    out$ms_adv   <- .safe_divide(.zero_if_na(.col(curr, "advertising")), at_p)
+  }
+  if (!is.na(cfo) && !is.na(ni)) {
+    out$ms_accrual <- as.numeric(cfo > ni)
+  }
+
+  # Volatility components on the label-free quarter panel (Wave 3
+  # machinery, built once by the caller), anchored at the target FY's
+  # period_end so the annual indicator moves with annual filings.
+  fy_pe <- if ("period_end" %in% names(curr)) {
+    as.Date(curr$period_end[1])
+  } else as.Date(NA)
+  if (is.na(fy_pe)) return(out)
+  if (is.null(panels)) panels <- .quarter_panels(fund_dt)
+  ni_q  <- panels$ni
+  rev_q <- panels$rev
+  at_q  <- panels$at
+
+  # Trailing-16-quarter window: the oldest admitted quarter ends ~15
+  # quarters (1369 d) before fy_pe; 1415 tolerates 52/53-week drift
+  # while excluding the 17th quarter back (~1461 d).
+  win_lo <- fy_pe - 1415L
+
+  # sd of the values indexed by `idx` (in-window quarters), min 6 obs.
+  win_sd <- function(vals) {
+    if (sum(!is.na(vals)) >= 6) stats::sd(vals, na.rm = TRUE) else NA_real_
+  }
+
+  if (!is.null(ni_q) && !is.null(at_q)) {
+    idx <- which(ni_q$qend > win_lo & ni_q$qend <= fy_pe)
+    out$ms_roa_vol <- win_sd(vapply(idx, function(i) {
+      k <- .near_idx(at_q$qend, ni_q$qend[i], 10)
+      if (is.na(k)) NA_real_ else .safe_divide(ni_q$value[i], at_q$value[k])
+    }, numeric(1)))
+  }
+
+  if (!is.null(rev_q)) {
+    idx <- which(rev_q$qend > win_lo & rev_q$qend <= fy_pe)
+    out$ms_rev_vol <- win_sd(vapply(idx, function(i) {
+      j <- .q_lag_idx(rev_q$qend, i, 365, 35)
+      if (is.na(j)) NA_real_ else {
+        .safe_divide(rev_q$value[i], rev_q$value[j])
+      }
+    }, numeric(1)))
+  }
+
+  out
+}
+
+
+# =============================================================================
 # SECTION 7: CROSS-SECTIONAL Z-SCORING
 # =============================================================================
 
@@ -2109,12 +2437,12 @@ pivot_fundamentals <- function(fund_dt) {
 #' Per-snapshot robust standardization. Winsorizes raw values cross-
 #' sectionally at the [p2.5, p97.5] percentiles of the current snapshot,
 #' then standardizes using median / MAD of the winsorized cross-section.
-#' Financial-sector-invalid indicators (gpa, inventory_turnover,
-#' cash_based_op, capex_depreciation, inventory_sales_change) are
-#' computed excluding financial rows and then NA-masked for financials.
+#' Sector-masked indicators (.SECTOR_NA_INDICATORS: the financial mask
+#' plus the Wave 5 Utilities / Real Estate exclusions) are computed
+#' excluding masked rows and then NA-masked on output.
 #'
 #' @param indicator_dt data.table. Rows = tickers, columns = indicator values.
-#'   Must also have 'sector' column for financial sector handling.
+#'   Must also have 'sector' column for sector mask handling.
 #' @param clip Numeric length-2 or NULL. Post-standardization clip bounds.
 #'   Defaults to c(-5, 5) -- see .robust_zscore docstring and
 #'   tools/diag_zscore_tails.R for the tail-diagnostic evidence that
@@ -2125,21 +2453,21 @@ zscore_cross_section <- function(indicator_dt, clip = c(-5, 5)) {
   if (is.null(indicator_dt) || nrow(indicator_dt) == 0) return(indicator_dt)
 
   dt <- copy(indicator_dt)
-  is_financial <- dt[["sector"]] %in% "Financial"
+  sectors_vec <- dt[["sector"]]
 
   ind_cols <- setdiff(names(dt), c("ticker", "sector"))
 
   for (col_name in ind_cols) {
     vals <- dt[[col_name]]
-    financial_masked <- col_name %in% .FINANCIAL_NA_INDICATORS
+    masked <- .sector_na_mask(col_name, sectors_vec)
 
-    # For financial-NA indicators, exclude financials from the winsorization
-    # and standardization sample, then NA-mask financial rows on output.
-    if (financial_masked) {
+    # For sector-masked indicators, exclude masked rows from the
+    # winsorization and standardization sample, then NA-mask on output.
+    if (any(masked)) {
       vals_in <- vals
-      vals_in[is_financial] <- NA_real_
+      vals_in[masked] <- NA_real_
       z <- .robust_zscore(vals_in, clip = clip)
-      z[is_financial] <- NA_real_
+      z[masked] <- NA_real_
     } else {
       z <- .robust_zscore(vals, clip = clip)
     }
@@ -2147,38 +2475,171 @@ zscore_cross_section <- function(indicator_dt, clip = c(-5, 5)) {
   }
 
   dt[, sector := NULL]
+
+  .assert_output(dt, "zscore_cross_section", list(
+    "is data.table"       = is.data.table,
+    "row count preserved" = function(x) nrow(x) == nrow(indicator_dt)
+  ))
   dt
 }
 
 
-#' Finalize sector-demeaned indicators on an assembled cross-section
+#' Finalize cross-section-stage indicators on an assembled cross-section
 #'
-#' compute_ticker_indicators emits the firm-level ingredient for the
-#' indicators in .SECTOR_DEMEAN_INDICATORS (ch_inv_ia: AB98 capex
-#' growth); this subtracts the equal-weighted within-sector mean, per
-#' snapshot. OpenAP demeans within 2-digit CRSP SIC over the full CRSP
-#' universe; ours is the 11-sector map over ~500 large caps -- the
-#' large-cap-relative caveat is documented (docs/research/09, risk 3).
+#' compute_ticker_indicators emits explicit ing_* ingredient columns for
+#' the indicators in .CROSS_SECTION_FINALIZED (which are per-ticker NA);
+#' this pass completes them against the assembled cross-section, per
+#' snapshot:
+#'   - ch_inv_ia: subtracts the equal-weighted within-sector mean of the
+#'     AB98 capex growth (Wave 4; the one non-idempotent block, since
+#'     its ingredient travels under the final name).
+#'   - ms_* / ms_score: binarizes the ing_ms_* ingredients against
+#'     within-sector medians (>= 3 non-NA contributors) -- ms_roa,
+#'     ms_cfroa, ms_rd, ms_capex, ms_adv score 1 strictly ABOVE the
+#'     median, ms_roa_vol and ms_rev_vol strictly BELOW; ms_accrual
+#'     arrives as the final binary. ms_score = sum of the 8 components,
+#'     NA if any NA (f_score convention).
+#'   - herf: within-industry HHI of revenue shares, averaged over the
+#'     current + up to 2 lagged fiscal years (.HERF_REV_COLS); a year
+#'     contributes only with >= max(2, half the current-year count)
+#'     contributing firms -- singletons and sparsely-lagged years NA.
+#'   - ww_index: ing_ww_partial + 0.102 * (industry sales growth)/4,
+#'     industry growth from aggregate revenue of the >= 2 firms with
+#'     both current and lag-1 revenue.
+#' Benchmark groups labeled "Unknown" or NA give NA. Each block runs
+#' only when its ingredients are present, so a second pass over
+#' finalized data is a no-op (except ch_inv_ia, above); the sector-NA
+#' sweep at the end re-applies .SECTOR_NA_INDICATORS to every finalized
+#' column. OpenAP benchmarks within 2/3/4-digit SIC over the full CRSP
+#' universe; ours is the finviz sector (medians, demean) / industry
+#' (herf, ww) map over ~500 large caps -- the large-cap-relative caveat
+#' is documented (docs/research/09, Wave 5 risk 1).
 #' Called by compute_cross_section and the timeseries cross-section
 #' reader BEFORE z-scoring, so raw and z-scored outputs both carry the
-#' industry-adjusted value. Per-ticker layers (daily parquet) store the
-#' un-demeaned ingredient by design.
+#' finalized values. Per-ticker layers (fund/daily parquet) store NA
+#' finals plus the ing_* ingredients by design. Without an industry
+#' column, herf and ww_index degrade to NA. Hidden ingredient columns
+#' (.CS_INGREDIENT_COLS) are dropped after use.
 #'
-#' @param dt data.table with a sector column and indicator columns.
-#'   Modified in place; also returned.
+#' @param dt data.table with a sector column (industry column needed for
+#'   herf / ww_index) and indicator columns. Modified in place; also
+#'   returned.
 industry_adjust_cross_section <- function(dt) {
   if (is.null(dt) || nrow(dt) == 0 || !"sector" %in% names(dt)) return(dt)
   n_in <- nrow(dt)
+
+  # -- ch_inv_ia: within-sector demean (Wave 4). Unknown/NA sector
+  #    groups cannot anchor the demean -> NA (Wave 5 review fix; the
+  #    ingredient-under-final-name design makes this block, unlike the
+  #    ingredient-guarded ones below, non-idempotent by construction).
   for (cn in intersect(.SECTOR_DEMEAN_INDICATORS, names(dt))) {
     dt[, (cn) := {
       v <- .SD[[1]]
-      m <- mean(v, na.rm = TRUE)
-      if (is.finite(m)) v - m else v
+      if (!.benchmark_group_ok(.BY[[1]])) {
+        rep(NA_real_, length(v))
+      } else {
+        m <- mean(v, na.rm = TRUE)
+        if (is.finite(m)) v - m else v
+      }
     }, by = sector, .SDcols = cn]
   }
+
+  # -- Mohanram components: within-sector median binarization, one
+  #    grouped pass over all ingredient columns. Runs only when the
+  #    ingredients are present (fresh cross-section); on already-
+  #    finalized data the ing_ columns are gone and the binaries are
+  #    left untouched.
+  ms_final <- names(.MS_INGREDIENT_OF)
+  ms_ing   <- unname(.MS_INGREDIENT_OF)
+  if (all(c(ms_ing, ms_final) %in% names(dt))) {
+    dt[, (ms_final) := {
+      grp_ok <- .benchmark_group_ok(.BY[[1]])
+      lapply(seq_along(ms_ing), function(k) {
+        v <- .SD[[ms_ing[k]]]
+        n_ok <- sum(!is.na(v))
+        if (!grp_ok || n_ok < 3L) return(rep(NA_real_, length(v)))
+        med <- median(v, na.rm = TRUE)
+        if (ms_final[k] %in% .MS_MEDIAN_LT) {
+          as.numeric(v < med)
+        } else {
+          as.numeric(v > med)
+        }
+      })
+    }, by = sector, .SDcols = ms_ing]
+
+    # ms_score: sum of the 8 components, NA if any NA (f_score
+    # convention) -- assembled only in the same pass that binarized.
+    comp <- as.matrix(dt[, .MS_COMPONENTS, with = FALSE])
+    dt[, ms_score := as.numeric(rowSums(comp))]
+  }
+
+  # -- herf: within-industry HHI of revenue shares, 3-year average.
+  #    A lag year contributes only when its contributor count is at
+  #    least 2 AND at least half the current year's (sparse lagged
+  #    coverage -- pre-Wave-5 layers, recent listings -- would otherwise
+  #    inflate concentration several-fold).
+  has_ind <- "industry" %in% names(dt)
+  if (has_ind && all(.HERF_REV_COLS %in% names(dt))) {
+    dt[, herf := {
+      if (!.benchmark_group_ok(.BY[[1]])) {
+        rep(NA_real_, .N)
+      } else {
+        n_curr <- sum(!is.na(.SD[["revenue_raw"]]) &
+                        .SD[["revenue_raw"]] > 0)
+        hhi <- vapply(.HERF_REV_COLS, function(rc) {
+          v <- .SD[[rc]]
+          v <- v[!is.na(v) & v > 0]
+          if (length(v) < max(2L, ceiling(n_curr / 2))) return(NA_real_)
+          sum((v / sum(v))^2)
+        }, numeric(1))
+        h <- if (all(is.na(hhi))) NA_real_ else mean(hhi, na.rm = TRUE)
+        rep(h, .N)
+      }
+    }, by = industry, .SDcols = .HERF_REV_COLS]
+  } else if (!has_ind && "herf" %in% names(dt) &&
+             any(.CS_INGREDIENT_COLS %in% names(dt))) {
+    # Fresh cross-section without an industry map: cannot finalize.
+    dt[, herf := NA_real_]
+  }
+
+  # -- ww_index: firm terms + 0.102 * (industry sales growth)/4.
+  #    Industry growth needs >= 2 firms with both current and lag-1
+  #    revenue (one firm's idiosyncratic growth must not set the
+  #    industry term).
+  ww_need <- c("ing_ww_partial", "revenue_raw", "ing_rev_lag1")
+  if (has_ind && all(ww_need %in% names(dt))) {
+    dt[, ww_index := {
+      r0 <- .SD[["revenue_raw"]]
+      r1 <- .SD[["ing_rev_lag1"]]
+      both <- !is.na(r0) & !is.na(r1)
+      g <- if (.benchmark_group_ok(.BY[[1]]) && sum(both) >= 2L &&
+                 sum(r1[both]) > 0) {
+        sum(r0[both]) / sum(r1[both]) - 1
+      } else NA_real_
+      .SD[["ing_ww_partial"]] + 0.102 * g / 4
+    }, by = industry, .SDcols = ww_need]
+  } else if (!has_ind && "ww_index" %in% names(dt) &&
+             any(.CS_INGREDIENT_COLS %in% names(dt))) {
+    dt[, ww_index := NA_real_]
+  }
+
+  # -- Sector NA sweep over every cross-section-finalized column
+  #    (values created here bypass the compute-time per-ticker mask) --
+  for (cn in intersect(.CROSS_SECTION_FINALIZED, names(dt))) {
+    masked <- .sector_na_mask(cn, dt[["sector"]])
+    if (any(masked)) dt[masked, (cn) := NA_real_]
+  }
+
+  # -- Drop hidden ingredient columns --
+  drop_cols <- intersect(.CS_INGREDIENT_COLS, names(dt))
+  if (length(drop_cols)) dt[, (drop_cols) := NULL]
+
   .assert_output(dt, "industry_adjust_cross_section", list(
     "is data.table"       = is.data.table,
-    "row count preserved" = function(x) nrow(x) == n_in
+    "row count preserved" = function(x) nrow(x) == n_in,
+    "ingredients dropped" = function(x) {
+      !any(.CS_INGREDIENT_COLS %in% names(x))
+    }
   ))
   dt
 }
@@ -2216,8 +2677,9 @@ compute_ticker_indicators <- function(fund_dt, price_on_filed, sector,
                                       target_period = "FY",
                                       splits = NULL) {
 
-  # All-NA fallback
-  all_na <- setNames(rep(NA_real_, length(.INDICATOR_NAMES)), .INDICATOR_NAMES)
+  # All-NA fallback (canonical indicators + hidden cross-section ingredients)
+  out_names <- c(.INDICATOR_NAMES, .CS_INGREDIENT_COLS)
+  all_na <- setNames(rep(NA_real_, length(out_names)), out_names)
 
   result <- tryCatch({
 
@@ -2299,7 +2761,8 @@ compute_ticker_indicators <- function(fund_dt, price_on_filed, sector,
     lag5 <- .lag_fy_row(fund_dt, target_fy, lag_years = 5L)
     fin  <- .compute_financing(fund_dt, target_fy, curr, prior, lag5,
                                val$market_cap, splits)
-    sur  <- .compute_surprise(fund_dt, target_fy, splits)
+    qp   <- .quarter_panels(fund_dt)
+    sur  <- .compute_surprise(fund_dt, target_fy, splits, panels = qp)
     # lag3/lag4 feed only grcapx3y and rd_cap, both of which also need
     # the prior row -- skip the fund_dt rescans when prior is absent.
     lag2 <- .lag_fy_row(fund_dt, target_fy, lag_years = 2L)
@@ -2309,11 +2772,17 @@ compute_ticker_indicators <- function(fund_dt, price_on_filed, sector,
     lag4 <- if (is.null(prior)) NULL else {
       .lag_fy_row(fund_dt, target_fy, lag_years = 4L)
     }
+    lc_curr <- .level_components(curr)
     lvl  <- .compute_levels(curr, val$market_cap,
                             fy_start = if (!is.null(prior)) {
                               prior$period_end[1] + 1L
-                            } else NULL)
+                            } else NULL,
+                            lc = lc_curr)
     invt <- .compute_investment(curr, prior, lag2, lag3, lag4)
+    pfx  <- .composite_prefixes(curr, lc = lc_curr)
+    dis  <- .compute_distress(curr, prior, val$market_cap, pfx)
+    kzww <- .compute_kz_ww(curr, prior, val$market_cap, pfx)
+    msi  <- .compute_ms_ingredients(fund_dt, curr, prior, panels = qp)
 
     # Wave 1 follow-up: when a standalone-quarter revenue panel exists,
     # its period_end-matched QoQ replaces the label-based selection above
@@ -2463,12 +2932,51 @@ compute_ticker_indicators <- function(fund_dt, price_on_filed, sector,
       surprise_rd        = invt$surprise_rd,
       investment         = invt$investment,
       rd_cap             = invt$rd_cap,
-      ch_inv_ia          = invt$ch_inv_ia
+      ch_inv_ia          = invt$ch_inv_ia,
+      # Wave 5: mohanram family. The median-binarized components and
+      # ms_score are cross-section-only: per-ticker they are NA and
+      # their raw ingredients travel in the ing_ms_* columns below.
+      # ms_accrual (CFO > NI) needs no cross-section and is final here.
+      ms_roa     = NA_real_,
+      ms_cfroa   = NA_real_,
+      ms_accrual = msi$ms_accrual,
+      ms_roa_vol = NA_real_,
+      ms_rev_vol = NA_real_,
+      ms_rd      = NA_real_,
+      ms_capex   = NA_real_,
+      ms_adv     = NA_real_,
+      ms_score   = NA_real_,
+      # Wave 5: distress family
+      o_score = dis$o_score,
+      z_score = dis$z_score,
+      # Wave 5: structure family (herf and the ww_index completion are
+      # cross-section-only)
+      herf     = NA_real_,
+      kz_index = kzww$kz_index,
+      ww_index = NA_real_,
+      # Hidden ingredients consumed by the cross-section finalize pass
+      # (.CS_INGREDIENT_COLS order: MS levels/volatilities, WW firm
+      # terms, lagged revenues for herf / industry growth)
+      ing_ms_roa     = msi$ms_roa,
+      ing_ms_cfroa   = msi$ms_cfroa,
+      ing_ms_rd      = msi$ms_rd,
+      ing_ms_capex   = msi$ms_capex,
+      ing_ms_adv     = msi$ms_adv,
+      ing_ms_roa_vol = msi$ms_roa_vol,
+      ing_ms_rev_vol = msi$ms_rev_vol,
+      ing_ww_partial = kzww$ww_partial,
+      ing_rev_lag1 = if (is.null(prior)) NA_real_ else {
+        .col(prior, "revenue")
+      },
+      ing_rev_lag2 = if (is.null(lag2)) NA_real_ else {
+        .col(lag2, "revenue")
+      }
     )
 
-    # Financial sector: NA-out meaningless indicators
-    if (!is.na(sector) && sector == "Financial") {
-      out[.FINANCIAL_NA_INDICATORS] <- NA_real_
+    # Sector NA masks (Financial and, since Wave 5, Utilities and Real
+    # Estate for the Ohlson/Altman family)
+    if (!is.na(sector) && sector %in% names(.SECTOR_NA_INDICATORS)) {
+      out[.SECTOR_NA_INDICATORS[[sector]]] <- NA_real_
     }
 
     out
@@ -2482,7 +2990,9 @@ compute_ticker_indicators <- function(fund_dt, price_on_filed, sector,
   .assert_output(result, "compute_ticker_indicators", list(
     "is numeric vector"   = is.numeric,
     "has names"           = function(x) !is.null(names(x)),
-    "correct length"      = function(x) length(x) == length(.INDICATOR_NAMES)
+    "correct length"      = function(x) {
+      length(x) == length(.INDICATOR_NAMES) + length(.CS_INGREDIENT_COLS)
+    }
   ))
 
   result
@@ -2495,25 +3005,34 @@ compute_ticker_indicators <- function(fund_dt, price_on_filed, sector,
 #'   as returned by compute_ticker_indicators().
 #' @param tickers Character vector. Ticker symbols (same order as indicator_list).
 #' @param sectors Character vector. Sector per ticker (same order).
+#' @param industries Character vector or NULL. Finviz industry per ticker
+#'   (same order). Needed by the herf / ww_index finalization; when NULL
+#'   those indicators degrade to NA.
 #' @return List with $raw (data.table) and $zscored (data.table).
 #'   Both have ticker column + indicator columns.
 compute_cross_section <- function(indicator_list, tickers, sectors,
+                                  industries = NULL,
                                   clip = c(-5, 5)) {
 
   stopifnot(length(indicator_list) == length(tickers))
   stopifnot(length(indicator_list) == length(sectors))
+  stopifnot(is.null(industries) || length(industries) == length(tickers))
 
   # Stack named vectors into data.table
   raw_dt <- rbindlist(lapply(indicator_list, as.list), fill = TRUE)
   raw_dt[, ticker := tickers]
   raw_dt[, sector := sectors]
+  if (!is.null(industries)) raw_dt[, industry := industries]
 
-  # Reorder columns: ticker first, then indicators
+  # Reorder columns: ticker first, then indicators (hidden ingredient
+  # columns, if present, trail and are consumed by the finalize pass)
   setcolorder(raw_dt, c("ticker", "sector", .INDICATOR_NAMES))
 
-  # Finalize sector-demeaned indicators (ch_inv_ia) before z-scoring so
-  # both raw and z-scored outputs carry the industry-adjusted value.
+  # Finalize cross-section-stage indicators (ch_inv_ia demean, Mohanram
+  # binarization, herf, ww_index) before z-scoring so both raw and
+  # z-scored outputs carry the finalized values.
   industry_adjust_cross_section(raw_dt)
+  if (!is.null(industries)) raw_dt[, industry := NULL]
 
   # Z-score
   zscore_input <- copy(raw_dt)

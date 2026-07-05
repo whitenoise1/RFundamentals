@@ -66,8 +66,11 @@ test("standardizable count = all indicators minus passthrough",
      length(.STANDARDIZABLE_INDICATORS) ==
        length(get_indicator_names()) - length(.PASSTHROUGH_INDICATORS))
 
-test("9 passthrough indicators (Piotroski binaries)",
-     length(.PASSTHROUGH_INDICATORS) == 9)
+test("17 passthrough indicators (9 Piotroski + 8 Mohanram binaries)",
+     length(.PASSTHROUGH_INDICATORS) == 17)
+
+test("composites f_score / ms_score stay standardizable",
+     all(c("f_score", "ms_score") %in% .STANDARDIZABLE_INDICATORS))
 
 test("5 log-transform indicators (size/level)",
      length(.LOG_TRANSFORM_INDICATORS) == 5)
@@ -75,11 +78,13 @@ test("5 log-transform indicators (size/level)",
 test("all log-transform indicators are standardizable",
      all(.LOG_TRANSFORM_INDICATORS %in% .STANDARDIZABLE_INDICATORS))
 
-test("13 financial-NA indicators (8 pre-Wave-4 + 5 Wave 4)",
-     length(.FEAT_FINANCIAL_NA) == 13)
+test("sector NA map covers Financial, Utilities, Real Estate",
+     identical(sort(names(.SECTOR_NA_INDICATORS)),
+               c("Financial", "Real Estate", "Utilities")) &&
+       length(.SECTOR_NA_INDICATORS$Financial) == 15)
 
-test("all financial-NA indicators are standardizable",
-     all(.FEAT_FINANCIAL_NA %in% .STANDARDIZABLE_INDICATORS))
+test("sector-masked indicators are valid indicator names",
+     all(unlist(.SECTOR_NA_INDICATORS) %in% get_indicator_names()))
 
 test("TS window = 1260 (5yr trading days)",
      .TS_WINDOW == 1260L)

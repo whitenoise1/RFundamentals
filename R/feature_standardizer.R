@@ -57,18 +57,22 @@ suppressPackageStartupMessages({
 # Minimum sector size for meaningful CS z-scores
 .MIN_SECTOR_SIZE <- 5L
 
-# Piotroski binary (0/1) components: passed through untransformed, since
-# z-scoring a binary is meaningless. The composite `f_score` (0-9) is NOT
-# listed here on purpose -- it is continuous enough to standardize like any
-# other quality factor and stays in .STANDARDIZABLE_INDICATORS.
+# Binary (0/1) components: passed through untransformed, since z-scoring
+# a binary is meaningless. Piotroski f_* plus the Wave 5 Mohanram
+# components (0/1 after cross-section binarization). The composites
+# `f_score` (0-9) and `ms_score` (0-8) are NOT listed on purpose -- they
+# are continuous enough to standardize like any other quality factor and
+# stay in .STANDARDIZABLE_INDICATORS.
 .PASSTHROUGH_INDICATORS <- c(
   "f_roa", "f_droa", "f_cfo", "f_accrual",
   "f_dlever", "f_dliquid", "f_eq_off",
-  "f_dmargin", "f_dturn"
+  "f_dmargin", "f_dturn",
+  "ms_roa", "ms_cfroa", "ms_accrual", "ms_roa_vol",
+  "ms_rev_vol", "ms_rd", "ms_capex", "ms_adv"
 )
 
-# Indicators to standardize: full set minus the 9 Piotroski binaries.
-# (59 - 9 = 50; derived from get_indicator_names() so it tracks the schema.)
+# Indicators to standardize: full set minus the 17 binary components
+# (derived from get_indicator_names() so it tracks the schema).
 .STANDARDIZABLE_INDICATORS <- setdiff(get_indicator_names(),
                                        .PASSTHROUGH_INDICATORS)
 
@@ -78,9 +82,10 @@ suppressPackageStartupMessages({
 .LOG_TRANSFORM_INDICATORS <- c("market_cap", "enterprise_value", "revenue_raw",
                                "shares_outstanding", "public_float")
 
-# Financial-NA indicators: reuse the single source of truth from
-# indicator_compute.R so the two lists can never drift apart.
-.FEAT_FINANCIAL_NA <- .FINANCIAL_NA_INDICATORS
+# Sector masking reuses the single source of truth from
+# indicator_compute.R (.SECTOR_NA_INDICATORS via .sector_na_mask) so the
+# lists can never drift apart. Since Wave 5 the mask covers Utilities
+# and Real Estate (o_score / z_score / herf) in addition to Financial.
 
 
 # =============================================================================
@@ -244,11 +249,17 @@ suppressPackageStartupMessages({
       d <- as.data.table(arrow::read_parquet(daily_files[i]))
       d[, date := as.Date(date)]
       d[, ticker := tk]
-      # Attach sector
+      # Attach sector + industry (industry feeds the herf / ww_index
+      # finalization in industry_adjust_cross_section)
       if (!is.null(sec_dt) && tk %in% sec_dt$ticker) {
         d[, sector := sec_dt[ticker == tk, sector][1]]
+        ind_val <- if ("industry" %in% names(sec_dt)) {
+          sec_dt[ticker == tk, industry][1]
+        } else NA_character_
+        d[, industry := if (is.na(ind_val)) "Unknown" else ind_val]
       } else {
         d[, sector := "Unknown"]
+        d[, industry := "Unknown"]
       }
       d
     }, error = function(e) NULL)
@@ -608,8 +619,6 @@ build_cs_sec <- function(target_date,
     set(dt, j = col, value = .log_safe(dt[[col]]))
   }
 
-  is_financial <- dt$sector %in% "Financial"
-
   # Initialize result
   result <- data.table(date = target_date, ticker = dt$ticker)
 
@@ -617,9 +626,12 @@ build_cs_sec <- function(target_date,
     vals <- as.numeric(dt[[col]])
     cs_col <- paste0(col, "_cs_sec")
 
-    # Financial-NA indicators: exclude financials from computation
-    if (col %in% .FEAT_FINANCIAL_NA) {
-      vals[is_financial] <- NA_real_
+    # Sector-masked indicators (.SECTOR_NA_INDICATORS: Financial plus
+    # the Wave 5 Utilities / Real Estate exclusions): exclude masked
+    # rows from computation
+    masked <- .sector_na_mask(col, dt$sector)
+    if (any(masked)) {
+      vals[masked] <- NA_real_
     }
 
     # Group by sector, z-score within each

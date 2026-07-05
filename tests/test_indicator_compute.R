@@ -1695,8 +1695,8 @@ test("zscore: pre-winsorization capped at [p2.5, p97.5] of input", {
 # ============================================================================
 message("\n=== Public API ===")
 
-test("get_indicator_names returns 116 names",
-     length(get_indicator_names()) == 116)
+test("get_indicator_names returns 130 names",
+     length(get_indicator_names()) == 130)
 
 test("get_indicator_names has no duplicates",
      !anyDuplicated(get_indicator_names()))
@@ -1750,8 +1750,10 @@ result <- compute_ticker_indicators(synth_long, 150, "Technology")
 test("compute_ticker: returns named numeric vector",
      is.numeric(result) && !is.null(names(result)))
 
-test("compute_ticker: correct length (116)",
-     length(result) == 116)
+test("compute_ticker: correct length (130 + 10 ingredients)",
+     length(result) == 140 &&
+       identical(names(result),
+                 c(get_indicator_names(), .CS_INGREDIENT_COLS)))
 
 test("compute_ticker: pe_trailing = 150/3.8",
      abs(result[["pe_trailing"]] - 150/3.8) < 0.01)
@@ -2216,11 +2218,265 @@ test("w4: cash_prod NA on near-zero cash", {
   is.na(r[["cash_prod"]]) && is.na(r[["salecash"]])
 })
 
-# -- industry_adjust_cross_section --
+# ============================================================================
+# UNIT TESTS: Wave 5 composite scores
+# ============================================================================
+message("\n=== Wave 5: Composite Scores ===")
+
+.w5_concepts <- c("revenue", "net_income", "total_assets",
+                  "total_liabilities", "current_assets",
+                  "current_liabilities", "retained_earnings",
+                  "income_tax_expense", "interest_expense",
+                  "operating_cashflow", "ppe_net", "long_term_debt",
+                  "short_term_debt", "cash", "st_investments",
+                  "stockholders_equity", "dividends_paid", "depreciation",
+                  "rnd", "capex", "advertising", "shares_outstanding")
+.w5_curr  <- c(900, 80, 1000, 600, 400, 200, 150, 20, 10,
+               100, 300, 250, 50, 40, 10, 380, -20, 30, 25, 45, 5, 100)
+.w5_prior <- c(800, 60, 900, 550, 380, 190, 120, 18, 9,
+               90, 280, 240, 40, 35, 8, 350, -18, 28, 20, 40, 4, 100)
+w5_fund <- rbindlist(list(
+  .make_long(.w5_concepts, .w5_curr),
+  .make_long(.w5_concepts, .w5_prior, fy = 2023L,
+             pe = as.Date("2023-12-31"), filed = as.Date("2024-02-15"))
+))
+w5 <- compute_ticker_indicators(w5_fund, 10, "Technology", target_fy = 2024)
+
+# Hand-computed: -1.32 - 0.407*log(1000/1e6) + 6.03*0.6 - 1.43*0.2
+# + 0.076*0.5 - 1.72*0 - 2.37*0.08 - 1.83*(100/600) + 0.285*0
+# - 0.521*(20/140) = 4.292427
+test("w5: o_score hand-computed",
+     abs(w5[["o_score"]] - 4.292427) < 1e-4)
+
+# 1.2*0.2 + 1.4*0.15 + 3.3*(110/1000) + 0.9 + 0.6*(1000/600) = 2.713
+test("w5: z_score hand-computed",
+     abs(w5[["z_score"]] - 2.713) < 1e-4)
+
+# -1.002*110/300 + 0.283*0.62 + 3.139*300/680 - 39.368*20/300
+# - 1.315*50/300 + 0.283*1000/1000 = -1.367787
+test("w5: kz_index hand-computed",
+     abs(w5[["kz_index"]] - (-1.367787)) < 1e-4)
+
+# -0.091*110/4000 - 0.062 + 0.021*0.25 - 0.044*log(1000/1e6)
+# - 0.035*0.125/4 = 0.2435949 (per-ticker: travels as ing_ww_partial)
+test("w5: ww firm terms hand-computed",
+     abs(w5[["ing_ww_partial"]] - 0.2435949) < 1e-4 &&
+       is.na(w5[["ww_index"]]))
+
+test("w5: ms ingredients (levels over avgAT / lagged AT)",
+     abs(w5[["ing_ms_roa"]] - 80 / 950) < 1e-9 &&
+       abs(w5[["ing_ms_cfroa"]] - 100 / 950) < 1e-9 &&
+       abs(w5[["ing_ms_rd"]] - 25 / 900) < 1e-9 &&
+       abs(w5[["ing_ms_capex"]] - 45 / 900) < 1e-9 &&
+       abs(w5[["ing_ms_adv"]] - 5 / 900) < 1e-9 &&
+       is.na(w5[["ms_roa"]]) && is.na(w5[["ms_score"]]))
+
+test("w5: ms_accrual is the final per-ticker binary (CFO > NI)",
+     w5[["ms_accrual"]] == 1)
+
+test("w5: revenue lags travel as ingredients",
+     w5[["ing_rev_lag1"]] == 800 && is.na(w5[["ing_rev_lag2"]]))
+
+test("w5: herf is cross-section-only (per-ticker NA)",
+     is.na(w5[["herf"]]))
+
+# OENEG dummy: lt = 1100 > at flips the dummy and reprices lt terms
+test("w5: o_score OENEG dummy (lt > at)", {
+  f <- copy(w5_fund)
+  f[concept == "total_liabilities" & fiscal_year == 2024, value := 1100]
+  r <- compute_ticker_indicators(f, 10, "Technology", target_fy = 2024)
+  abs(r[["o_score"]] - 5.726064) < 1e-4
+})
+
+# INTWO dummy: replicated sum-negative form (ni + ni_p < 0)
+test("w5: o_score INTWO dummy (sum of two years negative)", {
+  f <- copy(w5_fund)
+  f[concept == "net_income" & fiscal_year == 2024, value := -100]
+  f[concept == "net_income" & fiscal_year == 2023, value := -40]
+  r <- compute_ticker_indicators(f, 10, "Technology", target_fy = 2024)
+  abs(r[["o_score"]] - 5.301742) < 1e-4
+})
+
+test("w5: o_score NA when CHIN denominator is zero (NI = 0 both years)", {
+  f <- copy(w5_fund)
+  f[concept == "net_income", value := 0]
+  r <- compute_ticker_indicators(f, 10, "Technology", target_fy = 2024)
+  is.na(r[["o_score"]])
+})
+
+test("w5: z_score NA without retained earnings, o_score unaffected", {
+  f <- w5_fund[concept != "retained_earnings"]
+  r <- compute_ticker_indicators(f, 10, "Technology", target_fy = 2024)
+  is.na(r[["z_score"]]) && !is.na(r[["o_score"]])
+})
+
+test("w5: kz_index NA without net PP&E", {
+  f <- w5_fund[concept != "ppe_net"]
+  r <- compute_ticker_indicators(f, 10, "Technology", target_fy = 2024)
+  is.na(r[["kz_index"]])
+})
+
+test("w5: non-payer flips DIVPOS and drops the KZ dividend term", {
+  f <- w5_fund[concept != "dividends_paid"]
+  r <- compute_ticker_indicators(f, 10, "Technology", target_fy = 2024)
+  abs(r[["ing_ww_partial"]] - (0.2435949 + 0.062)) < 1e-4 &&
+    abs(r[["kz_index"]] - (-1.367787 + 39.368 * 20 / 300)) < 1e-4
+})
+
+test("w5: sector masks (Financial / Utilities / Real Estate)", {
+  r_fin  <- compute_ticker_indicators(w5_fund, 10, "Financial",
+                                      target_fy = 2024)
+  r_util <- compute_ticker_indicators(w5_fund, 10, "Utilities",
+                                      target_fy = 2024)
+  r_re   <- compute_ticker_indicators(w5_fund, 10, "Real Estate",
+                                      target_fy = 2024)
+  is.na(r_fin[["o_score"]]) && is.na(r_fin[["z_score"]]) &&
+    is.na(r_util[["o_score"]]) && is.na(r_util[["z_score"]]) &&
+    is.na(r_re[["o_score"]]) && is.na(r_re[["z_score"]]) &&
+    !is.na(r_fin[["kz_index"]]) && !is.na(r_util[["kz_index"]]) &&
+    !is.na(r_fin[["ms_accrual"]])
+})
+
+# -- MS volatility components on the quarter panel --
+# 17 quarterly NI rows ending 2020-12-31 .. 2024-12-31; the oldest ends
+# exactly 1461 d before fy_pe and must fall OUTSIDE the trailing-16
+# window (its extreme value would explode the sd).
+.w5_qends <- as.Date(paste0(rep(2021:2024, each = 4),
+                            c("-03-31", "-06-30", "-09-30", "-12-31")))
+.w5_q_all <- c(as.Date("2020-12-31"), .w5_qends)
+.w5_qstarts <- .w5_q_all - 89L
+.w5_ni_vals <- c(1e6, seq(10, 25, length.out = 16))
+w5_qfund <- rbindlist(c(
+  lapply(seq_along(.w5_q_all), function(i) {
+    .make_qrow("net_income", .w5_ni_vals[i], .w5_qstarts[i], .w5_q_all[i],
+               .w5_q_all[i] + 40)
+  }),
+  lapply(seq_along(.w5_q_all), function(i) {
+    .make_qrow("revenue", 100 + 5 * i, .w5_qstarts[i], .w5_q_all[i],
+               .w5_q_all[i] + 40)
+  }),
+  lapply(seq_along(.w5_q_all), function(i) {
+    .make_irow("total_assets", 1000, .w5_q_all[i], .w5_q_all[i] + 40)
+  })
+))
+.w5_curr_row <- data.table(total_assets = 1000, net_income = 20,
+                           operating_cashflow = 30,
+                           period_end = as.Date("2024-12-31"))
+.w5_prior_row <- data.table(total_assets = 900)
+
+test("w5: ms_roa_vol over trailing 16 quarters, 17th-back excluded", {
+  msi <- .compute_ms_ingredients(w5_qfund, .w5_curr_row, .w5_prior_row)
+  expected <- sd(seq(10, 25, length.out = 16) / 1000)
+  abs(msi$ms_roa_vol - expected) < 1e-9
+})
+
+test("w5: ms_rev_vol computed from seasonal revenue ratios", {
+  msi <- .compute_ms_ingredients(w5_qfund, .w5_curr_row, .w5_prior_row)
+  !is.na(msi$ms_rev_vol) && msi$ms_rev_vol >= 0
+})
+
+test("w5: ms_roa_vol NA below 6 in-window observations", {
+  few <- w5_qfund[!(concept == "net_income" &
+                      period_end < as.Date("2023-12-01"))]
+  msi <- .compute_ms_ingredients(few, .w5_curr_row, .w5_prior_row)
+  is.na(msi$ms_roa_vol)
+})
+
+# -- Cross-section finalize pass (industry_adjust_cross_section) --
+.mk_w5_cs <- function() {
+  data.table(
+    sector   = c("Tech", "Tech", "Tech", "Tech", "Unknown"),
+    industry = c("Software", "Software", "Chips", "Chips", "Unknown"),
+    ms_roa = NA_real_, ms_cfroa = NA_real_, ms_rd = NA_real_,
+    ms_capex = NA_real_, ms_adv = NA_real_, ms_roa_vol = NA_real_,
+    ms_rev_vol = NA_real_,
+    ms_accrual = c(1, 0, 1, 1, 1), ms_score = NA_real_,
+    herf = NA_real_, ww_index = NA_real_,
+    revenue_raw = c(100, 300, 200, 200, 50),
+    ing_ms_roa = c(1, 2, 3, 4, 5), ing_ms_cfroa = c(4, 3, 2, 1, 5),
+    ing_ms_rd = c(1, 1, 2, 2, 1), ing_ms_capex = c(1, 2, 3, NA, 1),
+    ing_ms_adv = c(0, 0, 0, 1, 0),
+    ing_ms_roa_vol = c(1, 2, 3, 4, 5), ing_ms_rev_vol = c(4, 3, 2, 1, 5),
+    ing_ww_partial = c(0.1, 0.2, 0.3, 0.4, 0.5),
+    ing_rev_lag1 = c(80, 240, 150, NA, 40),
+    ing_rev_lag2 = c(60, 200, NA, NA, 30)
+  )
+}
+
+test("w5 finalize: median binarization, strict inequalities and ties", {
+  out <- industry_adjust_cross_section(.mk_w5_cs())
+  identical(out$ms_roa[1:4], c(0, 0, 1, 1)) &&        # > med 2.5
+    identical(out$ms_roa_vol[1:4], c(1, 1, 0, 0)) &&  # < med 2.5
+    identical(out$ms_adv[1:4], c(0, 0, 0, 1))         # med 0, tie -> 0
+})
+
+test("w5 finalize: NA ingredient gives NA component, others computed", {
+  out <- industry_adjust_cross_section(.mk_w5_cs())
+  is.na(out$ms_capex[4]) && identical(out$ms_capex[1:3], c(0, 0, 1))
+})
+
+test("w5 finalize: Unknown sector group gives NA components", {
+  out <- industry_adjust_cross_section(.mk_w5_cs())
+  all(is.na(unlist(out[5, .MS_COMPONENTS[.MS_COMPONENTS != "ms_accrual"],
+                       with = FALSE])))
+})
+
+test("w5 finalize: ms_score sums 8 components, NA if any NA", {
+  out <- industry_adjust_cross_section(.mk_w5_cs())
+  out$ms_score[1] == 3 && is.na(out$ms_score[4])
+})
+
+test("w5 finalize: herf 3-year average with lag coverage rule", {
+  out <- industry_adjust_cross_section(.mk_w5_cs())
+  soft <- mean(c(0.625, 0.625, (60/260)^2 + (200/260)^2))
+  abs(out$herf[1] - soft) < 1e-9 && abs(out$herf[2] - soft) < 1e-9 &&
+    abs(out$herf[3] - 0.5) < 1e-9 &&   # lag years fail the >= 2 rule
+    is.na(out$herf[5])                  # Unknown industry
+})
+
+test("w5 finalize: ww industry growth needs >= 2 contributing firms", {
+  out <- industry_adjust_cross_section(.mk_w5_cs())
+  g <- (100 + 300) / (80 + 240) - 1
+  abs(out$ww_index[1] - (0.1 + 0.102 * g / 4)) < 1e-9 &&
+    abs(out$ww_index[2] - (0.2 + 0.102 * g / 4)) < 1e-9 &&
+    all(is.na(out$ww_index[3:5]))       # Chips: 1 contributor; Unknown
+})
+
+test("w5 finalize: ingredient columns dropped", {
+  out <- industry_adjust_cross_section(.mk_w5_cs())
+  !any(.CS_INGREDIENT_COLS %in% names(out))
+})
+
+test("w5 finalize: idempotent on finalized data", {
+  out1 <- industry_adjust_cross_section(.mk_w5_cs())
+  snap <- copy(out1)
+  out2 <- industry_adjust_cross_section(out1)
+  identical(as.list(snap[, .(ms_roa, ms_score, herf, ww_index)]),
+            as.list(out2[, .(ms_roa, ms_score, herf, ww_index)]))
+})
+
+test("w5 finalize: Utilities herf masked by sector sweep", {
+  dt <- .mk_w5_cs()
+  dt[3, sector := "Utilities"]
+  out <- industry_adjust_cross_section(dt)
+  is.na(out$herf[3]) && !is.na(out$herf[1])
+})
+
+test("w5: sector_na_mask reverse map", {
+  identical(.sector_na_mask("o_score",
+                            c("Financial", "Utilities", "Real Estate",
+                              "Technology")),
+            c(TRUE, TRUE, TRUE, FALSE)) &&
+    identical(.sector_na_mask("herf", c("Utilities", "Financial")),
+              c(TRUE, FALSE)) &&
+    !any(.sector_na_mask("roa", c("Financial", "Utilities")))
+})
+
+# -- industry_adjust_cross_section (Wave 4 demean, updated counts) --
 test("industry_adjust: demeans ch_inv_ia within sector", {
-  il <- list(setNames(rep(0.10, 116), get_indicator_names()),
-             setNames(rep(0.30, 116), get_indicator_names()),
-             setNames(rep(0.50, 116), get_indicator_names()))
+  il <- list(setNames(rep(0.10, 130), get_indicator_names()),
+             setNames(rep(0.30, 130), get_indicator_names()),
+             setNames(rep(0.50, 130), get_indicator_names()))
   cs <- compute_cross_section(il, c("A", "B", "C"),
                               c("Tech", "Tech", "Financial"))
   all(abs(cs$raw$ch_inv_ia - c(-0.1, 0.1, 0)) < 1e-12) &&
@@ -2237,6 +2493,14 @@ test("industry_adjust: all-NA sector group stays NA", {
   dt <- data.table(sector = c("X", "X"), ch_inv_ia = c(NA_real_, NA_real_))
   out <- industry_adjust_cross_section(dt)
   all(is.na(out$ch_inv_ia))
+})
+
+test("industry_adjust: Unknown sector group gives NA ch_inv_ia", {
+  dt <- data.table(sector = c("Unknown", "Unknown", "Tech", "Tech"),
+                   ch_inv_ia = c(0.1, 0.3, 0.2, 0.4))
+  out <- industry_adjust_cross_section(dt)
+  all(is.na(out$ch_inv_ia[1:2])) &&
+    all(abs(out$ch_inv_ia[3:4] - c(-0.1, 0.1)) < 1e-12)
 })
 
 

@@ -525,6 +525,7 @@ assemble_snapshot <- function(snapshot_date,
   # which is the default output. It is overwritten below only when the caller
   # opts into zscore_mode = "expanding_window".
   cs <- compute_cross_section(indicator_list, valid_tickers, valid_sectors,
+                              industries = valid_industries,
                               clip = zscore_clip)
 
   # Add metadata columns to raw
@@ -699,16 +700,16 @@ build_historical_snapshots <- function(
 
 # Concat pool of winsorized per-snapshot values for one indicator column.
 # history_dt_list: list of prior raw snapshots (strictly < current date).
-# raw_dt: current snapshot. Both are included in the pool.
-.build_pooled_calib <- function(ind_col, raw_dt, history_dt_list,
-                                financial_masked) {
+# raw_dt: current snapshot. Both are included in the pool. Rows whose
+# sector NA-masks the indicator (.SECTOR_NA_INDICATORS) are excluded.
+.build_pooled_calib <- function(ind_col, raw_dt, history_dt_list) {
   snapshots <- c(history_dt_list, list(raw_dt))
   pool <- numeric(0)
   for (s in snapshots) {
     if (is.null(s) || !(ind_col %in% names(s))) next
     vals <- s[[ind_col]]
-    if (financial_masked && "sector" %in% names(s)) {
-      vals[s[["sector"]] %in% "Financial"] <- NA_real_
+    if ("sector" %in% names(s)) {
+      vals[.sector_na_mask(ind_col, s[["sector"]])] <- NA_real_
     }
     vals <- vals[!is.na(vals)]
     if (length(vals) < 3L) next  # too small to winsorize meaningfully
@@ -771,25 +772,24 @@ zscore_expanding_window <- function(raw_dt,
   dt <- copy(raw_dt)
   meta_cols <- intersect(c("date", "ticker", "industry", "sector"),
                          names(dt))
-  is_financial <- if ("sector" %in% names(dt)) {
-    dt[["sector"]] %in% "Financial"
+  sectors_vec <- if ("sector" %in% names(dt)) {
+    dt[["sector"]]
   } else {
-    rep(FALSE, nrow(dt))
+    rep(NA_character_, nrow(dt))
   }
   ind_cols <- setdiff(names(dt), meta_cols)
 
   for (col_name in ind_cols) {
     vals <- dt[[col_name]]
-    financial_masked <- col_name %in% .FINANCIAL_NA_INDICATORS
+    masked <- .sector_na_mask(col_name, sectors_vec)
 
-    pool <- .build_pooled_calib(col_name, raw_dt, history_dt_list,
-                                financial_masked)
+    pool <- .build_pooled_calib(col_name, raw_dt, history_dt_list)
 
-    if (financial_masked) {
+    if (any(masked)) {
       vals_in <- vals
-      vals_in[is_financial] <- NA_real_
+      vals_in[masked] <- NA_real_
       z <- .robust_zscore(vals_in, calib_sample = pool, clip = clip)
-      z[is_financial] <- NA_real_
+      z[masked] <- NA_real_
     } else {
       z <- .robust_zscore(vals, calib_sample = pool, clip = clip)
     }
