@@ -289,6 +289,14 @@ suppressPackageStartupMessages({
   if (n_ok == 0L) return(NULL)
   cs <- rbindlist(rows[seq_len(n_ok)], fill = TRUE)
 
+  # Finalize sector-demeaned indicators (ch_inv_ia): per-ticker daily
+  # layers store the firm-level ingredient; every cross-section assembly
+  # point must demean before use (same call as compute_cross_section and
+  # load_daily_cross_section). Sector is attached by .preload_all_daily.
+  if (exists("industry_adjust_cross_section")) {
+    industry_adjust_cross_section(cs)
+  }
+
   # Ensure required columns exist
   meta <- c("date", "ticker", "sector")
   present_meta <- intersect(meta, names(cs))

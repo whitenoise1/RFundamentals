@@ -4,7 +4,7 @@
 # Pure computation layer: no I/O. Receives data.tables and price scalars,
 # returns named vectors and data.tables.
 #
-# Computes 87 output fields from EDGAR XBRL data + market prices:
+# Computes 116 output fields from EDGAR XBRL data + market prices:
 #   - 36 baseline indicators (valuation, profitability, growth, leverage,
 #     efficiency, cash flow quality, shareholder return, size)
 #   - 2 size extras (shares outstanding, public float)
@@ -21,6 +21,9 @@
 #   - 6 Wave 3 seasonal-surprise indicators (ChTax, earnings-increase
 #     streak, revenue/earnings surprise, earnings consistency, roaq)
 #     built on a label-free standalone-quarter panel -- see docs/research/09
+#   - 29 Wave 4 levels and investment indicators (ME-scaled levels, tax,
+#     tangibility, capex growth family, AB98 constructions, R&D capital)
+#     -- see docs/research/09 Wave 4 preflight, RESEARCH_INDICATORS.md W4.*
 #
 # Public API:
 #   compute_ticker_indicators(fund_dt, price, sector, target_fy, target_period)
@@ -46,8 +49,20 @@ suppressPackageStartupMessages({
   "capex_depreciation", "inventory_sales_change",
   # Wave 1 inventory/PPE-investment indicators (banks hold no inventory;
   # their PPE is immaterial to the investment anomaly)
-  "inventory_change", "inventory_growth", "ppe_inv_change"
+  "inventory_change", "inventory_growth", "ppe_inv_change",
+  # Wave 4: COGS/inventory/NOA-turnover constructions are undefined for
+  # banks; net_debt_price follows OpenAP's SIC 6000-6999 exclusion (a
+  # bank's debt is operating raw material, not net financing)
+  "tang", "op_leverage", "ch_asset_turnover", "gr_sale_to_gr_inv",
+  "net_debt_price"
 )
+
+# Indicators finalized by sector demeaning at the cross-section stage.
+# compute_ticker_indicators emits the firm-level ingredient (for
+# ch_inv_ia: the AB98 two-year-average-base capex growth); the
+# cross-section functions subtract the equal-weighted sector mean --
+# the compute module never sees the cross-section (pure, per-ticker).
+.SECTOR_DEMEAN_INDICATORS <- c("ch_inv_ia")
 
 # XBRL tags that should not contribute to a concept when read from cache.
 # InterestIncomeExpenseNet is net of interest income and can be negative
@@ -58,10 +73,10 @@ suppressPackageStartupMessages({
   interest_expense = c("InterestIncomeExpenseNet")
 )
 
-# Canonical indicator names in output order (87 entries):
+# Canonical indicator names in output order (116 entries):
 # 36 baseline + 2 size (shares_outstanding, public_float) + 5 tier1 +
 # 10 piotroski (9 components + composite) + 6 tier2 + 15 wave1 + 7 wave2 +
-# 6 wave3
+# 6 wave3 + 29 wave4 (19 levels + 10 investment)
 .INDICATOR_NAMES <- c(
   # Valuation (8)
   "pe_trailing", "peg", "pb", "ps", "pfcf",
@@ -106,7 +121,16 @@ suppressPackageStartupMessages({
   "net_payout_yield",
   # Wave 3: quarterly seasonal-surprise family (6) -- OpenAP expansion
   "ch_tax", "num_earn_increase", "revenue_surprise",
-  "earnings_surprise", "earnings_consistency", "roaq"
+  "earnings_surprise", "earnings_consistency", "roaq",
+  # Wave 4: levels family (19) -- OpenAP expansion
+  "rd_me", "ebm", "bpebm", "cf_me", "cfp",
+  "net_debt_price", "tang", "tax_to_book", "effective_tax_rate",
+  "am", "book_leverage", "leverage_mkt", "cash_prod", "oper_prof",
+  "cash_assets", "op_leverage", "payout_yield", "salecash", "depr_rate",
+  # Wave 4: investment family (10) -- OpenAP expansion
+  "pchdepr", "grcapx", "grcapx3y", "pct_tot_acc",
+  "ch_asset_turnover", "gr_sale_to_gr_inv", "surprise_rd",
+  "investment", "rd_cap", "ch_inv_ia"
 )
 
 # Family-to-indicator mapping (canonical groupings, 10 families)
@@ -141,7 +165,16 @@ suppressPackageStartupMessages({
                          "composite_debt_issuance", "share_iss_1y",
                          "share_iss_5y", "net_payout_yield"),
   surprise          = c("ch_tax", "num_earn_increase", "revenue_surprise",
-                         "earnings_surprise", "earnings_consistency", "roaq")
+                         "earnings_surprise", "earnings_consistency", "roaq"),
+  levels            = c("rd_me", "ebm", "bpebm", "cf_me", "cfp",
+                         "net_debt_price", "tang", "tax_to_book",
+                         "effective_tax_rate", "am", "book_leverage",
+                         "leverage_mkt", "cash_prod", "oper_prof",
+                         "cash_assets", "op_leverage", "payout_yield",
+                         "salecash", "depr_rate"),
+  investment        = c("pchdepr", "grcapx", "grcapx3y", "pct_tot_acc",
+                         "ch_asset_turnover", "gr_sale_to_gr_inv",
+                         "surprise_rd", "investment", "rd_cap", "ch_inv_ia")
 )
 
 
@@ -1060,6 +1093,18 @@ pivot_fundamentals <- function(fund_dt) {
        fna = fna, finl = finl, fin = fin, noa = noa)
 }
 
+# Richardson total-accruals numerator dWC + dNCO + dFIN (all three
+# required). Shared by total_accruals (scaled by avgAT, Wave 1) and
+# pct_tot_acc (scaled by |NI|, Wave 4) so the pair cannot drift.
+.ta_numerator <- function(b_t, b_p) {
+  d_wc  <- b_t$wc  - b_p$wc
+  d_nco <- b_t$nco - b_p$nco
+  d_fin <- b_t$fin - b_p$fin
+  if (is.na(d_wc) || is.na(d_nco) || is.na(d_fin)) {
+    NA_real_
+  } else d_wc + d_nco + d_fin
+}
+
 .compute_bs_change <- function(curr, prior) {
 
   out <- list(
@@ -1102,11 +1147,7 @@ pivot_fundamentals <- function(fund_dt) {
   # TotalAccruals = dWC + dNCO + dFIN over avgAT (Richardson eq. 5)
   d_wc  <- d(b_t$wc,  b_p$wc)
   d_nco <- d(b_t$nco, b_p$nco)
-  d_fin <- d(b_t$fin, b_p$fin)
-  ta_num <- if (is.na(d_wc) || is.na(d_nco) || is.na(d_fin)) {
-    NA_real_
-  } else d_wc + d_nco + d_fin
-  out$total_accruals <- .safe_divide(ta_num, avg_at)
+  out$total_accruals <- .safe_divide(.ta_numerator(b_t, b_p), avg_at)
 
   # -- Hirshleifer, Hou, Teoh, Zhang (2004 JAE): change in net operating
   #    assets over lagged total assets --
@@ -1654,6 +1695,412 @@ pivot_fundamentals <- function(fund_dt) {
 
 
 # =============================================================================
+# SECTION 6e: WAVE 4 -- LEVELS FAMILY
+# =============================================================================
+# 19 indicators from the OpenAP expansion (docs/research/09, Wave 4).
+# Constructions verified against the OpenAP Stata code
+# (Signals/LegacyStataCode) on 2026-07-03; canonical formulas, guards and
+# deviations in RESEARCH_INDICATORS.md W4.1-W4.13. All current-year
+# ratios; ME = market cap on the filing date (our PIT rule).
+#
+# che_eq = cash + st_investments approximates Compustat CHE (which
+# includes short-term investments). STI is absence-means-zero; cash NA
+# propagates (C-3: missing cash is a coverage gap, not zero).
+# OpenAP backtest-only sample filters (size terciles, B/M quintiles,
+# manufacturing-only, positive-payout, seasoning) are NOT applied --
+# this is a database, not a backtest.
+
+# Top statutory federal tax rate for the fiscal year ending at pe:
+# 0.35 through 2017-12-31, 0.21 from 2018-01-01, day-weighted blend for
+# fiscal years straddling the boundary (TCJA sec. 15). fy_start is the
+# true fiscal-year start when the caller knows it (prior FY period_end
+# + 1 -- covers 52/53-week calendars); the 365-day fallback misblends
+# only short transition periods (10-KT) straddling the boundary, whose
+# prior row the gap guard rejects anyway. XBRL history starts ~2009,
+# earlier regimes are moot. OpenAP's legacy table stops at 0.35 -- the
+# TCJA regime is a deliberate correction (docs/research/09, item 9).
+.statutory_rate <- function(pe, fy_start = NULL) {
+  if (is.null(pe) || is.na(pe)) return(NA_real_)
+  pe  <- as.Date(pe)
+  cut <- as.Date("2017-12-31")
+  if (pe <= cut) return(0.35)
+  fs_ok <- !is.null(fy_start) && !is.na(fy_start)
+  if (fs_ok) {
+    fy_start <- as.Date(fy_start)
+    n <- as.integer(pe - fy_start) + 1L
+    if (n < 150L || n > 400L) fs_ok <- FALSE
+  }
+  if (!fs_ok) fy_start <- pe - 364L
+  if (fy_start > cut) return(0.21)
+  d_old <- as.integer(cut - fy_start) + 1L
+  n_day <- as.integer(pe - fy_start) + 1L
+  (0.35 * d_old + 0.21 * (n_day - d_old)) / n_day
+}
+
+# Shared resolution of the Compustat-style level components used by BOTH
+# the compute path (.compute_levels) and the timeseries stub extraction
+# (.extract_stubs in timeseries_builder.R). One source of truth: the
+# filing-date and daily-recompute paths must not drift (Wave 4 review).
+# Policies: che = cash + STI-zero-if-na (cash required, C-3); LT via the
+# Wave 1 identity fallback AT - CEQ - NCI; FINL = LTD + STD + PS with
+# >= 1 component reported (Wave 1 convention).
+.level_components <- function(row) {
+  at   <- .col(row, "total_assets")
+  ceq  <- .col(row, "stockholders_equity")
+  ni   <- .col(row, "net_income")
+  cash <- .col(row, "cash")
+  che  <- if (is.na(cash)) NA_real_ else {
+    cash + .zero_if_na(.col(row, "st_investments"))
+  }
+  lt <- .col(row, "total_liabilities")
+  if (is.na(lt) && !is.na(at) && !is.na(ceq)) {
+    lt <- at - ceq - .zero_if_na(.col(row, "minority_interest"))
+  }
+  td   <- .col(row, "total_debt")
+  finl <- .sum_available(.col(row, "long_term_debt"),
+                         .col(row, "short_term_debt"),
+                         .col(row, "preferred_stock"))
+  list(
+    at = at, ceq = ceq, ni = ni, che = che, lt = lt, td = td,
+    finl    = finl,
+    ncash   = if (!is.na(che) && !is.na(td)) che - td else NA_real_,
+    ndp_num = if (!is.na(finl) && !is.na(che)) finl - che else NA_real_,
+    cf_num  = if (is.na(ni)) NA_real_ else {
+      ni + .zero_if_na(.col(row, "depreciation"))
+    }
+  )
+}
+
+.compute_levels <- function(curr, market_cap, fy_start = NULL) {
+
+  out <- list(
+    rd_me = NA_real_, ebm = NA_real_, bpebm = NA_real_,
+    cf_me = NA_real_, cfp = NA_real_, net_debt_price = NA_real_,
+    tang = NA_real_, tax_to_book = NA_real_,
+    effective_tax_rate = NA_real_, am = NA_real_,
+    book_leverage = NA_real_, leverage_mkt = NA_real_,
+    cash_prod = NA_real_, oper_prof = NA_real_, cash_assets = NA_real_,
+    op_leverage = NA_real_, payout_yield = NA_real_,
+    salecash = NA_real_, depr_rate = NA_real_
+  )
+
+  lc <- .level_components(curr)
+  at     <- lc$at
+  ceq    <- lc$ceq
+  ni     <- lc$ni
+  che_eq <- lc$che
+  lt     <- lc$lt
+  rev    <- .col(curr, "revenue")
+  cogs_v <- .col(curr, "cogs")
+  sga    <- .col(curr, "sga")
+  rnd    <- .col(curr, "rnd")
+  dep    <- .col(curr, "depreciation")
+  cfo    <- .col(curr, "operating_cashflow")
+  intexp <- .col(curr, "interest_expense")
+  tax    <- .col(curr, "income_tax_expense")
+  pretax <- .col(curr, "pretax_income")
+  rec    <- .col(curr, "accounts_receivable")
+  inv    <- .col(curr, "inventory")
+  ppeg   <- .col(curr, "ppe_gross")
+  ppen   <- .col(curr, "ppe_net")
+  dv     <- .col(curr, "dividends_paid")
+  bb     <- .col(curr, "buybacks")
+
+  me <- market_cap
+
+  # -- Chan, Lakonishok, Sougiannis (2001 JF): R&D to market. Missing
+  #    R&D stays NA (OpenAP drops missing xrd): only R&D reporters carry
+  #    a value, unlike rd_cap's zero-fill.
+  out$rd_me <- .safe_divide(rnd, me)
+
+  # -- Penman, Richardson, Tuna (2007 JAR): enterprise book-to-market
+  #    and its leverage component. net_cash = che_eq - total debt
+  #    (OpenAP's dc/dvpa/tstkp adjustments are sparse Compustat items
+  #    outside XBRL scope; treated as 0 -- W4.2).
+  ncash <- lc$ncash
+  if (!is.na(ceq) && !is.na(me) && !is.na(ncash)) {
+    out$ebm <- .safe_divide(ceq + ncash, me + ncash)
+    bp <- .safe_divide(ceq, me)
+    if (!is.na(bp) && !is.na(out$ebm)) out$bpebm <- bp - out$ebm
+  }
+
+  # -- Lakonishok, Shleifer, Vishny (1994 JF): (NI + D&A) / ME.
+  #    Depreciation zero-if-na (OpenAP fills dp), NI required.
+  out$cf_me <- .safe_divide(lc$cf_num, me)
+
+  # -- Desai, Rajgopal, Venkatachalam (2004 TAR): CFO / ME (OpenAP's
+  #    oancf branch; the pre-1988 accrual fallback is moot in XBRL era).
+  out$cfp <- .safe_divide(cfo, me)
+
+  # -- Penman et al. (2007): net debt to price. FINL = LTD + STD + PS
+  #    (>= 1 component reported, Wave 1 convention). Financial NA via
+  #    the mask (OpenAP drops SIC 6000-6999); the B/M-quintile filter is
+  #    a backtest restriction, not applied.
+  out$net_debt_price <- .safe_divide(lc$ndp_num, me)
+
+  # -- Hahn & Lee (2009 JF), Almeida-Campello weights: asset
+  #    tangibility. GROSS PPE required; REC/INV zero-if-na (OpenAP fill
+  #    list). Manufacturing-only in OpenAP; we compute for all
+  #    non-financials (W4.5).
+  if (!is.na(che_eq) && !is.na(ppeg)) {
+    tang_num <- che_eq + 0.715 * .zero_if_na(rec) +
+      0.547 * .zero_if_na(inv) + 0.535 * ppeg
+    out$tang <- .safe_divide(tang_num, at)
+  }
+
+  # -- Lev & Nissim (2004 TAR): taxable income to book income, total
+  #    tax expense grossed up by the statutory rate (the current
+  #    federal/foreign split is not fetched -- W4.6 deviation). OpenAP
+  #    guard: 1 when taxes are positive but book income is not.
+  pe_date <- if ("period_end" %in% names(curr)) {
+    curr$period_end[1]
+  } else as.Date(NA)
+  tr <- .statutory_rate(pe_date, fy_start)
+  if (!is.na(tax) && !is.na(ni) && !is.na(tr)) {
+    if (tax > 0 && ni <= 0) {
+      out$tax_to_book <- 1
+    } else {
+      out$tax_to_book <- .safe_divide(tax / tr, ni, min_abs_denom = 1)
+    }
+  }
+
+  # -- Plain effective tax rate level (ours; the AB98 interacted ETR is
+  #    an OpenAP placebo and price-entangled -- W4.6).
+  out$effective_tax_rate <- .safe_divide(tax, pretax)
+
+  # -- Fama & French (1992 JF): assets to market.
+  out$am <- .safe_divide(at, me)
+
+  # -- Fama & French (1992): book leverage = AT / BE, BE > 0 (negative
+  #    book equity is a distress flag, not leverage -- W4.7).
+  if (!is.na(ceq) && ceq > 0) {
+    out$book_leverage <- .safe_divide(at, ceq)
+  }
+
+  # -- Bhandari (1988 JF): market leverage = total LIABILITIES / ME
+  #    (OpenAP uses lt, not total debt -- preflight correction 2).
+  out$leverage_mkt <- .safe_divide(lt, me)
+
+  # -- Chandrashekar & Rao (2009 WP): cash productivity. OpenAP omits
+  #    the paper's + DLTT term (preflight correction 3). min_abs_denom
+  #    = 1: near-zero cash -> NA rather than an absurd ratio.
+  if (!is.na(me) && !is.na(at)) {
+    out$cash_prod <- .safe_divide(me - at, che_eq, min_abs_denom = 1)
+  }
+
+  # -- Fama & French (2006 JFE): operating profitability to book
+  #    equity. All four numerator inputs required (OpenAP, stricter
+  #    than FF); BE > 0 (W4.9).
+  if (!is.na(rev) && !is.na(cogs_v) && !is.na(sga) && !is.na(intexp) &&
+      !is.na(ceq) && ceq > 0) {
+    out$oper_prof <- .safe_divide(rev - cogs_v - sga - intexp, ceq)
+  }
+
+  # -- Palazzo (2012 JFE): cash to assets. Quarterly cheq/atq in
+  #    OpenAP; filing-frequency here (W4.10 deviation).
+  out$cash_assets <- .safe_divide(che_eq, at)
+
+  # -- Novy-Marx (2011 RoF): operating leverage. SGA zero-if-na
+  #    (explicit in OpenAP), COGS required. Financial NA via the mask.
+  if (!is.na(cogs_v)) {
+    out$op_leverage <- .safe_divide(cogs_v + .zero_if_na(sga), at)
+  }
+
+  # -- Boudoukh et al. (2007 JF): gross payout yield. Complement of
+  #    net_payout_yield without the issuance leg; components zero-if-na,
+  #    at least one reported. Zero-payout firms keep 0 (OpenAP drops
+  #    them -- backtest filter, W4.12).
+  abs_dv <- if (is.na(dv)) NA_real_ else abs(dv)
+  abs_bb <- if (is.na(bb)) NA_real_ else abs(bb)
+  if (!all(is.na(c(abs_dv, abs_bb)))) {
+    out$payout_yield <- .safe_divide(.zero_if_na(abs_dv) +
+                                       .zero_if_na(abs_bb), me)
+  }
+
+  # -- Placebo levels (OpenAP Table 4; database completeness -- W4.13).
+  out$salecash  <- .safe_divide(rev, che_eq, min_abs_denom = 1)
+  out$depr_rate <- .safe_divide(dep, ppen)
+
+  out
+}
+
+
+# =============================================================================
+# SECTION 6f: WAVE 4 -- INVESTMENT FAMILY
+# =============================================================================
+# 10 indicators from the OpenAP expansion (docs/research/09, Wave 4).
+# Lagged and industry-adjusted constructions; lag rows come from
+# .lag_fy_row (label-free, gap-guarded). Canonical formulas in
+# RESEARCH_INDICATORS.md W4.14-W4.22.
+#
+# ch_inv_ia is emitted as the FIRM-LEVEL ingredient (AB98 capex growth);
+# the sector demean happens in industry_adjust_cross_section at the
+# cross-section stage (.SECTOR_DEMEAN_INDICATORS).
+
+# Abarbanell & Bushee (1998) growth: base = mean of the two prior
+# years, falling back to simple 1-year growth when the 2-year version
+# is unavailable (OpenAP rule). No positivity guard on the base
+# (division by ~0 -> NA via .safe_divide).
+.ab98_growth <- function(x0, x1, x2) {
+  if (is.na(x0)) return(NA_real_)
+  if (!is.na(x1) && !is.na(x2)) {
+    base <- (x1 + x2) / 2
+    g <- .safe_divide(x0 - base, base)
+    if (!is.na(g)) return(g)
+  }
+  .safe_divide(x0 - x1, x1)
+}
+
+.compute_investment <- function(curr, prior, lag2, lag3, lag4) {
+
+  out <- list(
+    pchdepr = NA_real_, grcapx = NA_real_, grcapx3y = NA_real_,
+    pct_tot_acc = NA_real_, ch_asset_turnover = NA_real_,
+    gr_sale_to_gr_inv = NA_real_, surprise_rd = NA_real_,
+    investment = NA_real_, rd_cap = NA_real_, ch_inv_ia = NA_real_
+  )
+
+  capx_t <- .col(curr,  "capex")
+  capx_1 <- .col(prior, "capex")
+  capx_2 <- .col(lag2,  "capex")
+  capx_3 <- .col(lag3,  "capex")
+  rev_t  <- .col(curr,  "revenue")
+  rev_1  <- .col(prior, "revenue")
+  rev_2  <- .col(lag2,  "revenue")
+  inv_t  <- .col(curr,  "inventory")
+  inv_1  <- .col(prior, "inventory")
+  inv_2  <- .col(lag2,  "inventory")
+  rnd_t  <- .col(curr,  "rnd")
+  rnd_1  <- .col(prior, "rnd")
+  at_t   <- .col(curr,  "total_assets")
+  at_1   <- .col(prior, "total_assets")
+  ni     <- .col(curr,  "net_income")
+
+  # -- Placebo: percent change in depreciation rate (dp / net PPE).
+  dr_t <- .safe_divide(.col(curr,  "depreciation"), .col(curr,  "ppe_net"))
+  dr_p <- .safe_divide(.col(prior, "depreciation"), .col(prior, "ppe_net"))
+  if (!is.na(dr_t) && !is.na(dr_p)) {
+    out$pchdepr <- .safe_growth(dr_t, dr_p)
+  }
+
+  # -- Anderson & Garcia-Feijoo (2006 JF): capex growth. grcapx3y is
+  #    current capex over the prior-3-year average (preflight
+  #    correction 1), NOT capx_t / capx_{t-3} - 1. Positive
+  #    denominators required (a negative capex base is a data artifact,
+  #    not disinvestment).
+  if (!is.na(capx_t) && !is.na(capx_2) && capx_2 > 0) {
+    out$grcapx <- (capx_t - capx_2) / capx_2
+  }
+  if (!is.na(capx_t) && !is.na(capx_1) && !is.na(capx_2) &&
+      !is.na(capx_3) && (capx_1 + capx_2 + capx_3) > 0) {
+    out$grcapx3y <- 3 * capx_t / (capx_1 + capx_2 + capx_3)
+  }
+
+  if (!is.null(prior)) {
+
+    b_t <- .bs_blocks(curr)
+    b_p <- .bs_blocks(prior)
+
+    # -- Hafzalla, Lundholm, Van Winkle (2011 TAR): percent total
+    #    accruals. Numerator = unscaled Wave 1 Richardson decomposition
+    #    via the shared helper (the OpenAP CF-statement version needs
+    #    fincf/ivncf, not fetched -- W4.16). |NI| floor of 1 dollar as
+    #    in pct_accruals.
+    ta_num <- .ta_numerator(b_t, b_p)
+    if (!is.na(ta_num) && !is.na(ni)) {
+      out$pct_tot_acc <- .safe_divide(ta_num, abs(ni), min_abs_denom = 1)
+    }
+
+    # -- Soliman (2008 TAR): change in NOA turnover, simple difference
+    #    of levels. NOA per the Tier 1 Hirshleifer construction (OpenAP's
+    #    granular aco/lco/lo items are not fetched -- W4.17). Negative
+    #    turnover -> NA before differencing (OpenAP guard).
+    noa_2 <- if (!is.null(lag2)) .bs_blocks(lag2)$noa else NA_real_
+    ato_t <- if (!is.na(b_t$noa) && !is.na(b_p$noa)) {
+      .safe_divide(rev_t, (b_t$noa + b_p$noa) / 2)
+    } else NA_real_
+    ato_p <- if (!is.na(b_p$noa) && !is.na(noa_2)) {
+      .safe_divide(rev_1, (b_p$noa + noa_2) / 2)
+    } else NA_real_
+    if (!is.na(ato_t) && ato_t < 0) ato_t <- NA_real_
+    if (!is.na(ato_p) && ato_p < 0) ato_p <- NA_real_
+    if (!is.na(ato_t) && !is.na(ato_p)) {
+      out$ch_asset_turnover <- ato_t - ato_p
+    }
+
+    # -- Abarbanell & Bushee (1998 TAR): sales growth minus inventory
+    #    growth, both on the 2-year-average base with 1-year fallback.
+    gs <- .ab98_growth(rev_t, rev_1, rev_2)
+    gi <- .ab98_growth(inv_t, inv_1, inv_2)
+    if (!is.na(gs) && !is.na(gi)) {
+      out$gr_sale_to_gr_inv <- gs - gi
+    }
+
+    # -- Eberhart, Maxwell, Siddique (2004 JF): unexpected R&D
+    #    increase. Thresholds strictly > 5% on raw R&D growth and R&D
+    #    intensity growth. Deviations from OpenAP's Stata missing
+    #    semantics (W4.19): revenue and assets are REQUIRED (missing
+    #    would vacuously pass their conditions in Stata), and a zero
+    #    R&D base is NA (growth from nothing is not measurable), not a
+    #    vacuous pass.
+    if (!is.na(rnd_t) && !is.na(rnd_1)) {
+      if (rnd_1 <= 0 || is.na(rev_t) || is.na(at_t) || is.na(at_1) ||
+          at_t <= 0 || at_1 <= 0) {
+        out$surprise_rd <- NA_real_
+      } else {
+        hit <- (rnd_t / rev_t > 0) &&
+               (rnd_t / at_t  > 0) &&
+               (rnd_t / rnd_1 > 1.05) &&
+               ((rnd_t / at_t) / (rnd_1 / at_1) > 1.05)
+        out$surprise_rd <- as.numeric(hit)
+      }
+    }
+
+  }
+
+  # -- Titman, Wei, Xie (2004 JFQA): capex intensity vs own history.
+  #    Benchmark mean INCLUDES the current year (OpenAP asrol), >= 2 of
+  #    3 years required, NA when revenue < $10M (preflight item 11).
+  #    Values are raw dollars, Compustat's floor of 10 ($MM) is 1e7.
+  #    Deliberately OUTSIDE the prior gate: a missing t-1 row with a
+  #    valid t-2 row still satisfies the 2-of-3 rule (OpenAP's asrol
+  #    min(24) computes in that state too).
+  if (!is.na(rev_t) && rev_t >= 1e7) {
+    ci0 <- .safe_divide(capx_t, rev_t)
+    ci1 <- .safe_divide(capx_1, rev_1)
+    ci2 <- .safe_divide(capx_2, rev_2)
+    cis <- c(ci0, ci1, ci2)
+    if (!is.na(ci0) && sum(!is.na(cis)) >= 2) {
+      out$investment <- .safe_divide(ci0, mean(cis, na.rm = TRUE))
+    }
+  }
+
+  # -- Li (2011 RFS): capitalized R&D with 20% straight-line
+  #    amortization, over current assets. R&D zero-if-na WITHIN an
+  #    existing year (non-R&D firms get 0, unlike rd_me), but all five
+  #    fiscal-year rows must exist (OpenAP: a missing lagged
+  #    observation makes the signal missing). Small-cap-only predictor
+  #    in OpenAP -- database quantity here (W4.21).
+  lag_rows <- list(curr, prior, lag2, lag3, lag4)
+  if (!any(vapply(lag_rows, is.null, logical(1)))) {
+    w <- c(1, 0.8, 0.6, 0.4, 0.2)
+    rd_stock <- sum(w * vapply(lag_rows, function(r) {
+      .zero_if_na(.col(r, "rnd"))
+    }, numeric(1)))
+    out$rd_cap <- .safe_divide(rd_stock, at_t)
+  }
+
+  # -- Abarbanell & Bushee (1998): firm-level capex growth on the same
+  #    AB98 base; finalized to ch_inv_ia = pchcapx - sector mean by
+  #    industry_adjust_cross_section (the OpenAP capx <- delta-PPE
+  #    imputation is not adopted; capex coverage is high in XBRL).
+  out$ch_inv_ia <- .ab98_growth(capx_t, capx_1, capx_2)
+
+  out
+}
+
+
+# =============================================================================
 # SECTION 7: CROSS-SECTIONAL Z-SCORING
 # =============================================================================
 
@@ -1700,6 +2147,39 @@ zscore_cross_section <- function(indicator_dt, clip = c(-5, 5)) {
   }
 
   dt[, sector := NULL]
+  dt
+}
+
+
+#' Finalize sector-demeaned indicators on an assembled cross-section
+#'
+#' compute_ticker_indicators emits the firm-level ingredient for the
+#' indicators in .SECTOR_DEMEAN_INDICATORS (ch_inv_ia: AB98 capex
+#' growth); this subtracts the equal-weighted within-sector mean, per
+#' snapshot. OpenAP demeans within 2-digit CRSP SIC over the full CRSP
+#' universe; ours is the 11-sector map over ~500 large caps -- the
+#' large-cap-relative caveat is documented (docs/research/09, risk 3).
+#' Called by compute_cross_section and the timeseries cross-section
+#' reader BEFORE z-scoring, so raw and z-scored outputs both carry the
+#' industry-adjusted value. Per-ticker layers (daily parquet) store the
+#' un-demeaned ingredient by design.
+#'
+#' @param dt data.table with a sector column and indicator columns.
+#'   Modified in place; also returned.
+industry_adjust_cross_section <- function(dt) {
+  if (is.null(dt) || nrow(dt) == 0 || !"sector" %in% names(dt)) return(dt)
+  n_in <- nrow(dt)
+  for (cn in intersect(.SECTOR_DEMEAN_INDICATORS, names(dt))) {
+    dt[, (cn) := {
+      v <- .SD[[1]]
+      m <- mean(v, na.rm = TRUE)
+      if (is.finite(m)) v - m else v
+    }, by = sector, .SDcols = cn]
+  }
+  .assert_output(dt, "industry_adjust_cross_section", list(
+    "is data.table"       = is.data.table,
+    "row count preserved" = function(x) nrow(x) == n_in
+  ))
   dt
 }
 
@@ -1820,6 +2300,20 @@ compute_ticker_indicators <- function(fund_dt, price_on_filed, sector,
     fin  <- .compute_financing(fund_dt, target_fy, curr, prior, lag5,
                                val$market_cap, splits)
     sur  <- .compute_surprise(fund_dt, target_fy, splits)
+    # lag3/lag4 feed only grcapx3y and rd_cap, both of which also need
+    # the prior row -- skip the fund_dt rescans when prior is absent.
+    lag2 <- .lag_fy_row(fund_dt, target_fy, lag_years = 2L)
+    lag3 <- if (is.null(prior)) NULL else {
+      .lag_fy_row(fund_dt, target_fy, lag_years = 3L)
+    }
+    lag4 <- if (is.null(prior)) NULL else {
+      .lag_fy_row(fund_dt, target_fy, lag_years = 4L)
+    }
+    lvl  <- .compute_levels(curr, val$market_cap,
+                            fy_start = if (!is.null(prior)) {
+                              prior$period_end[1] + 1L
+                            } else NULL)
+    invt <- .compute_investment(curr, prior, lag2, lag3, lag4)
 
     # Wave 1 follow-up: when a standalone-quarter revenue panel exists,
     # its period_end-matched QoQ replaces the label-based selection above
@@ -1937,7 +2431,39 @@ compute_ticker_indicators <- function(fund_dt, price_on_filed, sector,
       revenue_surprise     = sur$revenue_surprise,
       earnings_surprise    = sur$earnings_surprise,
       earnings_consistency = sur$earnings_consistency,
-      roaq                 = sur$roaq
+      roaq                 = sur$roaq,
+      # Wave 4: levels family (19)
+      rd_me              = lvl$rd_me,
+      ebm                = lvl$ebm,
+      bpebm              = lvl$bpebm,
+      cf_me              = lvl$cf_me,
+      cfp                = lvl$cfp,
+      net_debt_price     = lvl$net_debt_price,
+      tang               = lvl$tang,
+      tax_to_book        = lvl$tax_to_book,
+      effective_tax_rate = lvl$effective_tax_rate,
+      am                 = lvl$am,
+      book_leverage      = lvl$book_leverage,
+      leverage_mkt       = lvl$leverage_mkt,
+      cash_prod          = lvl$cash_prod,
+      oper_prof          = lvl$oper_prof,
+      cash_assets        = lvl$cash_assets,
+      op_leverage        = lvl$op_leverage,
+      payout_yield       = lvl$payout_yield,
+      salecash           = lvl$salecash,
+      depr_rate          = lvl$depr_rate,
+      # Wave 4: investment family (10; ch_inv_ia holds the firm-level
+      # ingredient until industry_adjust_cross_section finalizes it)
+      pchdepr            = invt$pchdepr,
+      grcapx             = invt$grcapx,
+      grcapx3y           = invt$grcapx3y,
+      pct_tot_acc        = invt$pct_tot_acc,
+      ch_asset_turnover  = invt$ch_asset_turnover,
+      gr_sale_to_gr_inv  = invt$gr_sale_to_gr_inv,
+      surprise_rd        = invt$surprise_rd,
+      investment         = invt$investment,
+      rd_cap             = invt$rd_cap,
+      ch_inv_ia          = invt$ch_inv_ia
     )
 
     # Financial sector: NA-out meaningless indicators
@@ -1984,6 +2510,10 @@ compute_cross_section <- function(indicator_list, tickers, sectors,
 
   # Reorder columns: ticker first, then indicators
   setcolorder(raw_dt, c("ticker", "sector", .INDICATOR_NAMES))
+
+  # Finalize sector-demeaned indicators (ch_inv_ia) before z-scoring so
+  # both raw and z-scored outputs carry the industry-adjusted value.
+  industry_adjust_cross_section(raw_dt)
 
   # Z-score
   zscore_input <- copy(raw_dt)

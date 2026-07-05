@@ -49,17 +49,32 @@ suppressPackageStartupMessages({
   "ev_ebitda", "ev_revenue", "earnings_yield",
   "dividend_yield", "buyback_yield",
   "market_cap", "enterprise_value",
-  "net_payout_yield"
+  "net_payout_yield",
+  # Wave 4 ME-scaled levels
+  "rd_me", "ebm", "bpebm", "cf_me", "cfp", "net_debt_price",
+  "am", "leverage_mkt", "cash_prod", "payout_yield"
 )
 
 # Accounting stubs: raw items stored in the fundamentals layer that enable
 # recomputation of price-sensitive indicators without re-reading XBRL data.
 # Prefixed with "stub_" to avoid column name collisions with indicators.
+# Wave 4 stubs are pre-resolved numerators/components (identity fallbacks
+# and zero-if-na policies applied at extraction, mirroring .compute_levels):
+#   stub_rnd      R&D expense (NA = non-reporter, rd_me stays NA)
+#   stub_assets   total assets
+#   stub_liabilities  total liabilities (Wave 1 identity fallback applied)
+#   stub_cf_num   NI + depreciation-zero-if-na (LSV cash flow numerator)
+#   stub_cfo      operating cash flow
+#   stub_che      cash + st_investments (Compustat CHE equivalent)
+#   stub_net_cash che - total_debt (Penman EBM net cash)
+#   stub_ndp_num  FINL - che (net_debt_price numerator; NA for financials)
 .STUB_NAMES <- c(
   "stub_shares", "stub_eps", "stub_equity",
   "stub_revenue", "stub_fcf", "stub_ebitda",
   "stub_total_debt", "stub_net_debt", "stub_cash",
-  "stub_dividends", "stub_buybacks", "stub_equity_issuance"
+  "stub_dividends", "stub_buybacks", "stub_equity_issuance",
+  "stub_rnd", "stub_assets", "stub_liabilities", "stub_cf_num",
+  "stub_cfo", "stub_che", "stub_net_cash", "stub_ndp_num"
 )
 
 # Fundamental-only indicators: change only when a new filing appears
@@ -79,6 +94,15 @@ suppressPackageStartupMessages({
 }
 
 
+# Stub column at fund_idx, or NA vector when the fund layer predates the
+# stub (same degrade-to-NA convention as the Wave 2 iss fallback).
+.stub_or_na <- function(fund_dt, stub, fund_idx) {
+  if (stub %in% names(fund_dt)) {
+    as.numeric(fund_dt[[stub]][fund_idx])
+  } else NA_real_
+}
+
+
 #' Extract accounting stubs from pivoted wide-format data for a fiscal year
 #'
 #' @param wide_dt data.table. Output of pivot_fundamentals + .derive_quantities.
@@ -91,19 +115,32 @@ suppressPackageStartupMessages({
   if (length(curr_idx) == 0) return(NULL)
   curr <- fy_rows[curr_idx[1]]
 
+  # Wave 4 components come from .level_components (indicator_compute.R
+  # Section 6e) -- the SAME resolver the compute path uses, so the
+  # filing-date and daily-recompute values cannot drift.
+  lc <- .level_components(curr)
+
   list(
     stub_shares     = .col(curr, "shares_outstanding"),
     stub_eps        = .col(curr, "eps_diluted"),
-    stub_equity     = .col(curr, "stockholders_equity"),
+    stub_equity     = lc$ceq,
     stub_revenue    = .col(curr, "revenue"),
     stub_fcf        = .col(curr, "fcf"),
     stub_ebitda     = .col(curr, "ebitda"),
-    stub_total_debt = .col(curr, "total_debt"),
+    stub_total_debt = lc$td,
     stub_net_debt   = .col(curr, "net_debt"),
     stub_cash       = .col(curr, "cash"),
     stub_dividends  = .col(curr, "dividends_paid"),
     stub_buybacks   = .col(curr, "buybacks"),
-    stub_equity_issuance = .col(curr, "equity_issuance")
+    stub_equity_issuance = .col(curr, "equity_issuance"),
+    stub_rnd        = .col(curr, "rnd"),
+    stub_assets     = lc$at,
+    stub_liabilities = lc$lt,
+    stub_cf_num     = lc$cf_num,
+    stub_cfo        = .col(curr, "operating_cashflow"),
+    stub_che        = lc$che,
+    stub_net_cash   = lc$ncash,
+    stub_ndp_num    = lc$ndp_num
   )
 }
 
@@ -111,8 +148,10 @@ suppressPackageStartupMessages({
 #' Vectorized computation of price-sensitive indicators
 #'
 #' Given vectors of accounting stubs and prices (one element per trading day),
-#' computes all 12 price-sensitive indicators. Replicates the logic from
-#' .compute_valuation and .compute_shareholder in indicator_compute.R.
+#' computes all 23 price-sensitive indicators. Replicates the logic from
+#' .compute_valuation, .compute_shareholder and .compute_levels in
+#' indicator_compute.R. Wave 4 stub params default to NA so pre-Wave-4
+#' fund layers degrade to NA columns instead of erroring.
 #'
 #' @param p Numeric vector. Closing prices.
 #' @param shares Numeric vector. Shares outstanding.
@@ -126,11 +165,25 @@ suppressPackageStartupMessages({
 #' @param div Numeric vector. Dividends paid (negative = outflow).
 #' @param buy Numeric vector. Buybacks (negative = outflow).
 #' @param eps_g Numeric vector. EPS growth YoY (for PEG).
-#' @return data.table with 12 price-sensitive indicator columns.
+#' @param iss Numeric vector. Equity issuance (Wave 2 stub).
+#' @param rnd Numeric vector. R&D expense (stub_rnd).
+#' @param at_v Numeric vector. Total assets (stub_assets).
+#' @param lt_v Numeric vector. Total liabilities (stub_liabilities).
+#' @param cf_num Numeric vector. NI + depreciation (stub_cf_num).
+#' @param cfo Numeric vector. Operating cash flow (stub_cfo).
+#' @param che Numeric vector. Cash + ST investments (stub_che).
+#' @param ncash Numeric vector. che - total debt (stub_net_cash).
+#' @param ndp_num Numeric vector. FINL - che (stub_ndp_num).
+#' @return data.table with 23 price-sensitive indicator columns.
 .compute_price_sensitive_vec <- function(p, shares, eps, equity, rev,
                                          fcf_v, ebitda, td, nd,
                                          div, buy, eps_g,
-                                         iss = NA_real_) {
+                                         iss = NA_real_,
+                                         rnd = NA_real_, at_v = NA_real_,
+                                         lt_v = NA_real_, cf_num = NA_real_,
+                                         cfo = NA_real_, che = NA_real_,
+                                         ncash = NA_real_,
+                                         ndp_num = NA_real_) {
 
   # Market cap & enterprise value
   mc <- ifelse(!is.na(p) & !is.na(shares), p * shares, NA_real_)
@@ -182,14 +235,52 @@ suppressPackageStartupMessages({
   bb_yield <- ifelse(!is.na(abs_buy) & !is.na(mc) & abs(mc) >= 1e-9,
                      abs_buy / mc, NA_real_)
 
+  # Gross payout components, shared by net_payout_yield (Wave 2) and
+  # payout_yield (Wave 4) -- one zero-fill site for the sign policy.
+  any_gross <- !is.na(abs_div) | !is.na(abs_buy)
+  gpy_num <- ifelse(is.na(abs_div), 0, abs_div) +
+    ifelse(is.na(abs_buy), 0, abs_buy)
+
   # Net payout yield = (|dividends| + |buybacks| - equity issuance) /
   # market_cap (Boudoukh et al. 2007). Components zero-if-na; NA when
   # none of the three is reported.
-  any_payout <- !is.na(abs_div) | !is.na(abs_buy) | !is.na(iss)
-  npy_num <- ifelse(is.na(abs_div), 0, abs_div) +
-    ifelse(is.na(abs_buy), 0, abs_buy) - ifelse(is.na(iss), 0, iss)
+  any_payout <- any_gross | !is.na(iss)
+  npy_num <- gpy_num - ifelse(is.na(iss), 0, iss)
   npy <- ifelse(any_payout & !is.na(mc) & abs(mc) >= 1e-9,
                 npy_num / mc, NA_real_)
+
+  # -- Wave 4 ME-scaled levels (indicator_compute.R Section 6e) --
+  mc_ok <- !is.na(mc) & abs(mc) >= 1e-9
+
+  # R&D to market (missing R&D stays NA)
+  rd_me <- ifelse(mc_ok & !is.na(rnd), rnd / mc, NA_real_)
+
+  # Penman enterprise book-to-market + leverage component
+  ebm <- ifelse(mc_ok & !is.na(equity) & !is.na(ncash) &
+                  abs(mc + ncash) >= 1e-9,
+                (equity + ncash) / (mc + ncash), NA_real_)
+  bp <- ifelse(mc_ok & !is.na(equity), equity / mc, NA_real_)
+  bpebm <- ifelse(!is.na(bp) & !is.na(ebm), bp - ebm, NA_real_)
+
+  # LSV cash flow to price; Desai CFO to price
+  cf_me <- ifelse(mc_ok & !is.na(cf_num), cf_num / mc, NA_real_)
+  cfp   <- ifelse(mc_ok & !is.na(cfo), cfo / mc, NA_real_)
+
+  # Penman net debt to price (stub NA'd for financials at extraction)
+  net_debt_price <- ifelse(mc_ok & !is.na(ndp_num), ndp_num / mc, NA_real_)
+
+  # FF assets to market; Bhandari market leverage
+  am_v <- ifelse(mc_ok & !is.na(at_v), at_v / mc, NA_real_)
+  lev_mkt <- ifelse(mc_ok & !is.na(lt_v), lt_v / mc, NA_real_)
+
+  # Cash productivity (near-zero cash -> NA, same floor as Section 6e)
+  cash_prod <- ifelse(!is.na(mc) & !is.na(at_v) & !is.na(che) &
+                        abs(che) >= 1,
+                      (mc - at_v) / che, NA_real_)
+
+  # Gross payout yield (components zero-if-na, >= 1 reported; any_gross
+  # and gpy_num are computed once above, next to net payout yield)
+  payout_yield <- ifelse(any_gross & mc_ok, gpy_num / mc, NA_real_)
 
   data.table(
     pe_trailing      = pe,
@@ -204,7 +295,17 @@ suppressPackageStartupMessages({
     buyback_yield    = bb_yield,
     market_cap       = mc,
     enterprise_value = ev,
-    net_payout_yield = npy
+    net_payout_yield = npy,
+    rd_me            = rd_me,
+    ebm              = ebm,
+    bpebm            = bpebm,
+    cf_me            = cf_me,
+    cfp              = cfp,
+    net_debt_price   = net_debt_price,
+    am               = am_v,
+    leverage_mkt     = lev_mkt,
+    cash_prod        = cash_prod,
+    payout_yield     = payout_yield
   )
 }
 
@@ -306,6 +407,13 @@ build_ticker_fundamentals <- function(ticker, cik, sector,
     # Extract accounting stubs from the as-of pivoted data
     stubs <- .extract_stubs(wide, fy)
     if (is.null(stubs)) next
+
+    # net_debt_price is financial-NA (OpenAP SIC 6000-6999 exclusion);
+    # the compute-path mask cannot reach the daily recompute, so NA the
+    # stub at the source for financial tickers.
+    if (!is.na(sector) && sector == "Financial") {
+      stubs$stub_ndp_num <- NA_real_
+    }
 
     n_ok <- n_ok + 1L
     results[[n_ok]] <- c(
@@ -470,9 +578,16 @@ update_ticker_daily <- function(ticker,
     div     = as.numeric(fund_dt$stub_dividends[fund_idx]),
     buy     = as.numeric(fund_dt$stub_buybacks[fund_idx]),
     eps_g   = result_dt$eps_growth_yoy,  # from fundamental indicators
-    iss     = if ("stub_equity_issuance" %in% names(fund_dt)) {
-      as.numeric(fund_dt$stub_equity_issuance[fund_idx])
-    } else NA_real_   # pre-Wave-2 fund layers lack the stub
+    # pre-Wave-2 / pre-Wave-4 fund layers lack these stubs -> NA columns
+    iss     = .stub_or_na(fund_dt, "stub_equity_issuance", fund_idx),
+    rnd     = .stub_or_na(fund_dt, "stub_rnd", fund_idx),
+    at_v    = .stub_or_na(fund_dt, "stub_assets", fund_idx),
+    lt_v    = .stub_or_na(fund_dt, "stub_liabilities", fund_idx),
+    cf_num  = .stub_or_na(fund_dt, "stub_cf_num", fund_idx),
+    cfo     = .stub_or_na(fund_dt, "stub_cfo", fund_idx),
+    che     = .stub_or_na(fund_dt, "stub_che", fund_idx),
+    ncash   = .stub_or_na(fund_dt, "stub_net_cash", fund_idx),
+    ndp_num = .stub_or_na(fund_dt, "stub_ndp_num", fund_idx)
   )
 
   # Bind price-sensitive columns into result
@@ -777,6 +892,33 @@ load_daily_cross_section <- function(target_date,
                 by = "ticker", all.x = TRUE)
     cs[is.na(sector), sector := "Unknown"]
     cs[is.na(industry), industry := "Unknown"]
+
+    # Finalize sector-demeaned indicators (ch_inv_ia): the per-ticker
+    # daily layers store the firm-level ingredient; the cross-section
+    # is where the sector mean exists. Runs before z-scoring so both
+    # raw and z-scored outputs carry the industry-adjusted value.
+    industry_adjust_cross_section(cs)
+
+    # Financial-sector mask on the raw cross-section. Fundamental
+    # indicators are already NA'd per ticker at compute time, but the
+    # price-sensitive net_debt_price is recomputed daily from stubs
+    # frozen at fund-layer build -- masking here with the CURRENT
+    # sector also covers tickers built before their sector resolved.
+    fin_rows <- which(cs$sector %in% "Financial")
+    if (length(fin_rows)) {
+      for (cn in intersect(.FINANCIAL_NA_INDICATORS, names(cs))) {
+        set(cs, i = fin_rows, j = cn, value = NA_real_)
+      }
+    }
+  } else {
+    # Without the sector lookup the demean cannot run; a value under
+    # the ch_inv_ia name must be the industry-adjusted quantity, so
+    # degrade to NA rather than serving the raw ingredient.
+    warning("load_daily_cross_section: sector lookup missing; ",
+            "sector-demeaned indicators set to NA", call. = FALSE)
+    for (cn in intersect(.SECTOR_DEMEAN_INDICATORS, names(cs))) {
+      set(cs, j = cn, value = NA_real_)
+    }
   }
 
   # Order columns: metadata, then indicators in canonical order

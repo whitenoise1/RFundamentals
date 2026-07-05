@@ -75,8 +75,8 @@ test("5 log-transform indicators (size/level)",
 test("all log-transform indicators are standardizable",
      all(.LOG_TRANSFORM_INDICATORS %in% .STANDARDIZABLE_INDICATORS))
 
-test("5 financial-NA indicators",
-     length(.FEAT_FINANCIAL_NA) == 5)
+test("13 financial-NA indicators (8 pre-Wave-4 + 5 Wave 4)",
+     length(.FEAT_FINANCIAL_NA) == 13)
 
 test("all financial-NA indicators are standardizable",
      all(.FEAT_FINANCIAL_NA %in% .STANDARDIZABLE_INDICATORS))

@@ -1695,8 +1695,8 @@ test("zscore: pre-winsorization capped at [p2.5, p97.5] of input", {
 # ============================================================================
 message("\n=== Public API ===")
 
-test("get_indicator_names returns 87 names",
-     length(get_indicator_names()) == 87)
+test("get_indicator_names returns 116 names",
+     length(get_indicator_names()) == 116)
 
 test("get_indicator_names has no duplicates",
      !anyDuplicated(get_indicator_names()))
@@ -1750,8 +1750,8 @@ result <- compute_ticker_indicators(synth_long, 150, "Technology")
 test("compute_ticker: returns named numeric vector",
      is.numeric(result) && !is.null(names(result)))
 
-test("compute_ticker: correct length (87)",
-     length(result) == 87)
+test("compute_ticker: correct length (116)",
+     length(result) == 116)
 
 test("compute_ticker: pe_trailing = 150/3.8",
      abs(result[["pe_trailing"]] - 150/3.8) < 0.01)
@@ -1997,6 +1997,247 @@ if (length(fund_files) >= 5) {
 } else {
   message("  SKIP  Not enough parquet files in cache/fundamentals/")
 }
+
+
+# ============================================================================
+# UNIT TESTS: Wave 4 -- levels and investment families
+# ============================================================================
+message("\n=== Wave 4: levels + investment ===")
+
+test("families: levels has 19", length(indicator_names("levels")) == 19)
+test("families: investment has 10",
+     length(indicator_names("investment")) == 10)
+test("families: union covers all names",
+     setequal(unlist(.INDICATOR_FAMILIES), .INDICATOR_NAMES))
+test("financial NA list includes Wave 4 additions",
+     all(c("tang", "op_leverage", "ch_asset_turnover",
+           "gr_sale_to_gr_inv", "net_debt_price")
+         %in% .FINANCIAL_NA_INDICATORS))
+
+# -- .statutory_rate --
+test("statutory_rate: pre-TCJA 0.35",
+     .statutory_rate(as.Date("2017-12-31")) == 0.35)
+test("statutory_rate: post-TCJA 0.21",
+     .statutory_rate(as.Date("2019-12-31")) == 0.21)
+test("statutory_rate: June-2018 straddle blends (IRS 28.06%)", {
+  r <- .statutory_rate(as.Date("2018-06-30"))
+  abs(r - (0.35 * 184 + 0.21 * 181) / 365) < 1e-9
+})
+test("statutory_rate: honors true fy_start for transition periods",
+     .statutory_rate(as.Date("2018-06-30"),
+                     fy_start = as.Date("2018-01-01")) == 0.21)
+test("statutory_rate: rejects out-of-band fy_start", {
+  a <- .statutory_rate(as.Date("2018-06-30"),
+                       fy_start = as.Date("2016-01-01"))
+  b <- .statutory_rate(as.Date("2018-06-30"))
+  a == b
+})
+test("statutory_rate: NA period_end -> NA",
+     is.na(.statutory_rate(as.Date(NA))))
+
+# -- .ab98_growth --
+test("ab98_growth: two-year-average base",
+     abs(.ab98_growth(120, 100, 100) - 0.2) < 1e-12)
+test("ab98_growth: one-year fallback when lag2 missing",
+     abs(.ab98_growth(120, 100, NA) - 0.2) < 1e-12)
+test("ab98_growth: NA current -> NA", is.na(.ab98_growth(NA, 100, 100)))
+test("ab98_growth: zero base falls back to 1y",
+     abs(.ab98_growth(120, 100, -100) - 0.2) < 1e-12)
+
+# -- Fixture: six contiguous fiscal years, hand-computed expectations --
+.w4_year <- function(y) {
+  k  <- y - 2019
+  pe <- as.Date(sprintf("%d-12-31", y))
+  vals <- c(
+    total_assets = 1000 + 100 * k, stockholders_equity = 600,
+    net_income = 100, revenue = 2000 + 100 * k, cogs = 1200,
+    sga = 300, rnd = 50 + 5 * k, depreciation = 80, ppe_net = 800,
+    ppe_gross = 1200, operating_cashflow = 250, interest_expense = 30,
+    income_tax_expense = 25, pretax_income = 125, cash = 100,
+    st_investments = 50, long_term_debt = 400, short_term_debt = 50,
+    total_liabilities = (1000 + 100 * k) - 600,
+    inventory = 150 + 10 * k, accounts_receivable = 250,
+    current_assets = 500 + 20 * k, current_liabilities = 300,
+    capex = 100 + 10 * k, dividends_paid = -40, buybacks = -60,
+    shares_outstanding = 10, eps_diluted = 10
+  )
+  data.table(concept = names(vals), value = as.numeric(vals),
+             fiscal_year = y, period_type = "FY",
+             period_end = pe, filed = pe + 60)
+}
+w4_fund <- rbindlist(lapply(2019:2024, .w4_year))
+w4 <- compute_ticker_indicators(w4_fund, 100, "Technology",
+                                target_fy = 2024)
+
+.w4_eq <- function(nm, want, tol = 1e-9) {
+  !is.na(w4[[nm]]) && abs(w4[[nm]] - want) < tol
+}
+
+# levels (ME = 100 * 10 = 1000; che = 150; td = 450; lt = 900)
+test("w4: rd_me", .w4_eq("rd_me", 0.075))
+test("w4: ebm = (600-300)/(1000-300)", .w4_eq("ebm", 300 / 700))
+test("w4: bpebm = BP - EBM", .w4_eq("bpebm", 0.6 - 300 / 700))
+test("w4: cf_me = (NI+DP)/ME", .w4_eq("cf_me", 0.18))
+test("w4: cfp = CFO/ME", .w4_eq("cfp", 0.25))
+test("w4: net_debt_price = (450-150)/1000", .w4_eq("net_debt_price", 0.3))
+test("w4: tang uses GROSS ppe",
+     .w4_eq("tang", (150 + 0.715 * 250 + 0.547 * 200 + 0.535 * 1200) / 1500))
+test("w4: tax_to_book at 21%", .w4_eq("tax_to_book", (25 / 0.21) / 100))
+test("w4: effective_tax_rate", .w4_eq("effective_tax_rate", 0.2))
+test("w4: am", .w4_eq("am", 1.5))
+test("w4: book_leverage", .w4_eq("book_leverage", 2.5))
+test("w4: leverage_mkt = total LIABILITIES / ME",
+     .w4_eq("leverage_mkt", 0.9))
+test("w4: cash_prod = (ME-AT)/che", .w4_eq("cash_prod", -500 / 150))
+test("w4: oper_prof", .w4_eq("oper_prof", 970 / 600))
+test("w4: cash_assets", .w4_eq("cash_assets", 0.1))
+test("w4: op_leverage", .w4_eq("op_leverage", 1.0))
+test("w4: payout_yield", .w4_eq("payout_yield", 0.1))
+test("w4: salecash", .w4_eq("salecash", 2500 / 150))
+test("w4: depr_rate uses NET ppe", .w4_eq("depr_rate", 0.1))
+
+# investment family
+test("w4: pchdepr flat rate = 0", .w4_eq("pchdepr", 0))
+test("w4: grcapx = (capx_t - capx_{t-2})/capx_{t-2}",
+     .w4_eq("grcapx", 20 / 130))
+test("w4: grcapx3y = 3*capx_t / sum(3 lags)",
+     .w4_eq("grcapx3y", 450 / 390))
+test("w4: pct_tot_acc (Richardson numerator over |NI|)",
+     .w4_eq("pct_tot_acc", 0))
+test("w4: ch_asset_turnover simple ATO difference",
+     .w4_eq("ch_asset_turnover", 2500 / 950 - 2400 / 950))
+test("w4: gr_sale_to_gr_inv AB98 2y base",
+     .w4_eq("gr_sale_to_gr_inv", 150 / 2350 - 15 / 185))
+test("w4: surprise_rd 0 when intensity growth at exactly 1.0",
+     .w4_eq("surprise_rd", 0))
+test("w4: investment NA below $10M revenue floor",
+     is.na(w4[["investment"]]))
+test("w4: rd_cap 20% amortization ladder",
+     .w4_eq("rd_cap", 205 / 1500))
+test("w4: ch_inv_ia carries firm-level AB98 capex growth",
+     .w4_eq("ch_inv_ia", 15 / 135))
+
+# guards and edges
+w4_fin <- compute_ticker_indicators(w4_fund, 100, "Financial",
+                                    target_fy = 2024)
+test("w4: financial mask NAs the five Wave 4 names",
+     all(is.na(w4_fin[c("tang", "op_leverage", "ch_asset_turnover",
+                        "gr_sale_to_gr_inv", "net_debt_price")])))
+
+w4_srd <- copy(w4_fund)
+w4_srd[concept == "rnd" & fiscal_year == 2024, value := 85]
+test("w4: surprise_rd fires above both 5% thresholds", {
+  r <- compute_ticker_indicators(w4_srd, 100, "Technology",
+                                 target_fy = 2024)
+  r[["surprise_rd"]] == 1
+})
+
+w4_srd0 <- copy(w4_fund)
+w4_srd0[concept == "rnd" & fiscal_year == 2023, value := 0]
+test("w4: surprise_rd NA on zero R&D base", {
+  r <- compute_ticker_indicators(w4_srd0, 100, "Technology",
+                                 target_fy = 2024)
+  is.na(r[["surprise_rd"]])
+})
+
+w4_scaled <- copy(w4_fund)
+w4_scaled[concept %in% c("revenue", "capex"), value := value * 1e7]
+test("w4: investment ratio to current-inclusive 3y mean", {
+  r <- compute_ticker_indicators(w4_scaled, 100, "Technology",
+                                 target_fy = 2024)
+  ci <- c(150 / 2500, 140 / 2400, 130 / 2300)
+  abs(r[["investment"]] - ci[1] / mean(ci)) < 1e-9
+})
+
+test("w4: investment computes from curr + lag2 when t-1 year missing", {
+  mk_gap <- function(y, rev, capx) data.table(
+    concept = c("total_assets", "revenue", "capex"),
+    value = c(1000, rev, capx), fiscal_year = y, period_type = "FY",
+    period_end = as.Date(sprintf("%d-12-31", y)),
+    filed = as.Date(sprintf("%d-03-01", y + 1)))
+  gap <- rbindlist(list(mk_gap(2020, 2e10, 1.5e9),
+                        mk_gap(2022, 2.5e10, 2e9)))
+  r <- compute_ticker_indicators(gap, 100, "Technology", target_fy = 2022)
+  ci0 <- 2e9 / 2.5e10; ci2 <- 1.5e9 / 2e10
+  abs(r[["investment"]] - ci0 / mean(c(ci0, ci2))) < 1e-9
+})
+
+test("w4: rd_cap NA with under five fiscal years", {
+  short <- rbindlist(lapply(2021:2024, .w4_year))
+  r <- compute_ticker_indicators(short, 100, "Technology",
+                                 target_fy = 2024)
+  is.na(r[["rd_cap"]])
+})
+
+test("w4: rd_cap zero-fills missing R&D within existing years", {
+  nornd <- w4_fund[concept != "rnd"]
+  r <- compute_ticker_indicators(nornd, 100, "Technology",
+                                 target_fy = 2024)
+  r[["rd_cap"]] == 0 && is.na(r[["rd_me"]])
+})
+
+test("w4: grcapx NA on nonpositive base", {
+  neg <- copy(w4_fund)
+  neg[concept == "capex" & fiscal_year == 2022, value := 0]
+  r <- compute_ticker_indicators(neg, 100, "Technology",
+                                 target_fy = 2024)
+  is.na(r[["grcapx"]])
+})
+
+test("w4: book_leverage and oper_prof NA on negative book equity", {
+  negbe <- copy(w4_fund)
+  negbe[concept == "stockholders_equity", value := -50]
+  r <- compute_ticker_indicators(negbe, 100, "Technology",
+                                 target_fy = 2024)
+  is.na(r[["book_leverage"]]) && is.na(r[["oper_prof"]])
+})
+
+test("w4: oper_prof NA when SGA missing (all inputs required)", {
+  nosga <- w4_fund[concept != "sga"]
+  r <- compute_ticker_indicators(nosga, 100, "Technology",
+                                 target_fy = 2024)
+  is.na(r[["oper_prof"]]) && !is.na(r[["op_leverage"]])
+})
+
+test("w4: tax_to_book = 1 when taxes positive and NI nonpositive", {
+  loss <- copy(w4_fund)
+  loss[concept == "net_income" & fiscal_year == 2024, value := -10]
+  r <- compute_ticker_indicators(loss, 100, "Technology",
+                                 target_fy = 2024)
+  r[["tax_to_book"]] == 1
+})
+
+test("w4: cash_prod NA on near-zero cash", {
+  nocash <- copy(w4_fund)
+  nocash[concept == "cash", value := 0.1]
+  nocash <- nocash[concept != "st_investments"]
+  r <- compute_ticker_indicators(nocash, 100, "Technology",
+                                 target_fy = 2024)
+  is.na(r[["cash_prod"]]) && is.na(r[["salecash"]])
+})
+
+# -- industry_adjust_cross_section --
+test("industry_adjust: demeans ch_inv_ia within sector", {
+  il <- list(setNames(rep(0.10, 116), get_indicator_names()),
+             setNames(rep(0.30, 116), get_indicator_names()),
+             setNames(rep(0.50, 116), get_indicator_names()))
+  cs <- compute_cross_section(il, c("A", "B", "C"),
+                              c("Tech", "Tech", "Financial"))
+  all(abs(cs$raw$ch_inv_ia - c(-0.1, 0.1, 0)) < 1e-12) &&
+    abs(cs$raw$rd_me[1] - 0.10) < 1e-12
+})
+
+test("industry_adjust: no sector column -> unchanged", {
+  dt <- data.table(ch_inv_ia = c(1, 2))
+  out <- industry_adjust_cross_section(copy(dt))
+  identical(out$ch_inv_ia, dt$ch_inv_ia)
+})
+
+test("industry_adjust: all-NA sector group stays NA", {
+  dt <- data.table(sector = c("X", "X"), ch_inv_ia = c(NA_real_, NA_real_))
+  out <- industry_adjust_cross_section(dt)
+  all(is.na(out$ch_inv_ia))
+})
 
 
 # ============================================================================
