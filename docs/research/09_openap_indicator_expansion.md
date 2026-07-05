@@ -604,9 +604,19 @@ zscore_mean_near_zero failures. Anchors: AAPL o_score -2.81 / z_score
 7.79 / ms_score 5; AAL/DAL/UAL o_score -1.2..-0.9 with z_score ~1;
 banks and utilities masked; Internet Retail herf 0.95 vs
 Semiconductors 0.13. MS binaries z-score to all-NA like the f_*
-components (binary MAD = 0; the raw file carries them). Full
-regeneration (66 snapshots + timeseries via tools/regen_wave5.R)
-launched 2026-07-05, in progress.
+components (binary MAD = 0; the raw file carries them).
+
+Regeneration COMPLETED 2026-07-05 (tools/regen_wave5.R): 66/66
+snapshots at 130 indicators, zero failures; 639 fund layers forced
+(651 builds ok incl. duplicate-roster tickers) with the Wave 5 stubs
+and ing_* ingredient columns; 595 daily layers rebuilt from scratch
+(8 min) + eps_ttm augment. Daily-path verification (2026-03-31 cross-
+section, 594 tickers): ms_score 72.4% / herf 87.2% / ww_index 82.8% /
+z_score 68.0% coverage, Mohanram components strictly 0/1, ingredient
+columns consumed and dropped, Utilities herf and bank distress masks
+holding, AAPL o_score -3.08 consistent with the snapshot path, and
+z_score varies daily with price (153 distinct values within AAPL's
+latest FY). Waves 0-5 merged to main via PR #2 (4f503ef).
 
 | Acronym | t | Original study | Notes |
 |---|---|---|---|
