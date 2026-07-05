@@ -81,6 +81,80 @@ test("winsorize: clips extremes", {
   w[1] > -100 && w[7] < 200 && w[3] == 2 && w[4] == 3
 })
 
+test("winsorize: default probs = c(0.025, 0.975)", {
+  # Default percentiles align with the cross-sectional winsorization used
+  # by zscore_cross_section / .robust_zscore.
+  x <- c(-1000, rnorm(98), 1000)
+  w <- .winsorize(x)
+  # Extremes clipped inward; interior preserved.
+  w[1] > -100 && w[100] < 100
+})
+
+# .robust_zscore
+test("robust_zscore: NA-free normal input yields SD ~ 1, median ~ 0", {
+  set.seed(1)
+  x <- rnorm(500)
+  z <- .robust_zscore(x, clip = NULL)  # drop clip to inspect raw scale
+  abs(median(z)) < 0.1 && abs(sd(z) - 1) < 0.2
+})
+
+test("robust_zscore: outlier does not contaminate location/scale", {
+  # A single extreme value would inflate SD under mean/SD standardization.
+  # Under pre-winsorization + MAD, the outlier is clipped to p97.5 first
+  # and can't blow up the scale.
+  x <- c(rnorm(99), 1e6)
+  z <- .robust_zscore(x, clip = NULL)
+  # The extreme observation must be bounded (clipped to the p97.5 of x).
+  # Scale should remain ~1 despite the outlier.
+  !is.na(z[100]) && abs(z[100]) < 10 && abs(sd(z[-100]) - 1) < 0.3
+})
+
+test("robust_zscore: NAs preserved in output", {
+  x <- c(1, 2, NA_real_, 4, 5, 6)
+  z <- .robust_zscore(x)
+  is.na(z[3]) && !is.na(z[1])
+})
+
+test("robust_zscore: fewer than min_n non-NA values -> all NA", {
+  x <- c(1, 2, NA, NA, NA)
+  z <- .robust_zscore(x, min_n = 3)
+  all(is.na(z))
+})
+
+test("robust_zscore: degenerate spread (all equal) -> all NA", {
+  x <- rep(5, 10)
+  z <- .robust_zscore(x)
+  all(is.na(z))
+})
+
+test("robust_zscore: clip bounds respected when non-NULL", {
+  x <- c(rnorm(98), -100, 100)
+  z <- .robust_zscore(x, clip = c(-3, 3))
+  all(is.na(z) | (z >= -3 & z <= 3))
+})
+
+test("robust_zscore: clip = NULL leaves tails unbounded (up to winsor)", {
+  # Without clip, z values are capped only by the winsorization p2.5/p97.5.
+  # For n=100 rnorm, that's roughly ~|2| on the z scale -- well within [-3,3]
+  # -- so clip NULL vs clip c(-3,3) produce identical output for normal data.
+  set.seed(2)
+  x <- rnorm(100)
+  z_clip <- .robust_zscore(x, clip = c(-3, 3))
+  z_none <- .robust_zscore(x, clip = NULL)
+  all(abs(z_clip - z_none) < 1e-10, na.rm = TRUE)
+})
+
+test("robust_zscore: custom calib_sample used for location/scale", {
+  # When calib_sample is supplied, current x_w is standardized against that
+  # sample -- this is the expanding-window case.
+  current <- c(10, 12, 14, 16, 18)
+  history <- rnorm(1000, mean = 100, sd = 20)
+  z <- .robust_zscore(current, calib_sample = history, clip = NULL)
+  # Current values are far below history's median (100); z must be strongly
+  # negative. Under per-snapshot (no history), z would be near 0.
+  all(z < 0) && median(z) < -3
+})
+
 # .col
 test("col: existing column", {
   dt <- data.table(revenue = 1000)
@@ -155,6 +229,39 @@ test("pivot: NULL input returns NULL",
 test("pivot: empty input returns NULL",
      is.null(pivot_fundamentals(data.table())))
 
+# A 10-K reports prior-year comparatives under the SAME fiscal_year label
+# and filed date as the current period. The pivot must select the current
+# period (max period_end) per concept -- not parse order -- or wide rows
+# mix periods across concepts (ORCL fy2025 carried fy2023 equity/revenue).
+comparative_long <- rbindlist(list(
+  # comparatives listed FIRST to expose parse-order sensitivity
+  .make_long(c("revenue", "stockholders_equity"), c(800, 1000),
+             pe = as.Date("2022-12-31")),
+  .make_long(c("revenue", "stockholders_equity"), c(900, 4000),
+             pe = as.Date("2023-12-31")),
+  .make_long(c("revenue", "stockholders_equity"), c(1000, 9000),
+             pe = as.Date("2024-12-31"))
+))
+
+comp_wide <- pivot_fundamentals(comparative_long)
+
+test("pivot: comparative rows collapse to one row per label",
+     nrow(comp_wide) == 1)
+
+test("pivot: current period wins over same-label comparatives",
+     comp_wide$revenue == 1000 && comp_wide$stockholders_equity == 9000)
+
+test("pivot: metadata period_end matches the chosen period",
+     comp_wide$period_end == as.Date("2024-12-31"))
+
+# Amendment for the same period (later filed) still beats the original
+amended_long <- rbindlist(list(
+  .make_long("revenue", 1000, filed = as.Date("2025-02-15")),
+  .make_long("revenue", 1010, filed = as.Date("2025-05-01"))
+))
+test("pivot: amendment (later filed) wins for the same period",
+     pivot_fundamentals(amended_long)$revenue == 1010)
+
 
 # ============================================================================
 # UNIT TESTS: .derive_quantities
@@ -172,8 +279,88 @@ test("derive: gross_profit = revenue - cogs",
 test("derive: ebitda computed",
      "ebitda" %in% names(derived))
 
-test("derive: ebitda = operating_income + 0 (no depreciation)",
-     derived[fiscal_year == 2024, ebitda] == 200)
+# C-3: missing depreciation propagates NA rather than silently reporting EBIT
+# mislabelled as EBITDA. The .make_long fixture has operating_income but no
+# depreciation, so ebitda must be NA.
+test("derive: ebitda is NA when depreciation tag is absent (C-3)",
+     is.na(derived[fiscal_year == 2024, ebitda]))
+
+# ---- C-3 NA-vs-zero split: explicit coverage ----
+
+test("C-3 derive: ebitda = opinc + depr when both present", {
+  d <- .derive_quantities(data.table(operating_income = 100,
+                                     depreciation = 30))
+  d$ebitda == 130
+})
+
+test("C-3 derive: fcf = opcf - capex when both present", {
+  d <- .derive_quantities(data.table(operating_cashflow = 500, capex = 120))
+  d$fcf == 380
+})
+
+test("C-3 derive: fcf is NA when capex absent (was: equal to OpCF)", {
+  d <- .derive_quantities(data.table(operating_cashflow = 500))
+  is.na(d$fcf)
+})
+
+test("C-3 derive: fcf is NA when capex column present but value NA", {
+  d <- .derive_quantities(data.table(operating_cashflow = 500,
+                                     capex = NA_real_))
+  is.na(d$fcf)
+})
+
+test("C-3 derive: total_debt is NA when both LTD and STD absent", {
+  d <- .derive_quantities(data.table(revenue = 1000))  # no debt cols
+  is.na(d$total_debt)
+})
+
+test("C-3 derive: total_debt treats missing STD as 0 when LTD present", {
+  d <- .derive_quantities(data.table(long_term_debt = 5000))
+  d$total_debt == 5000
+})
+
+test("C-3 derive: total_debt treats missing LTD as 0 when STD present", {
+  d <- .derive_quantities(data.table(short_term_debt = 800))
+  d$total_debt == 800
+})
+
+test("C-3 derive: total_debt is NA when both LTD and STD are NA values", {
+  d <- .derive_quantities(data.table(long_term_debt = NA_real_,
+                                     short_term_debt = NA_real_))
+  is.na(d$total_debt)
+})
+
+test("C-3 derive: total_debt = LTD + STD when both present", {
+  d <- .derive_quantities(data.table(long_term_debt = 5000,
+                                     short_term_debt = 800))
+  d$total_debt == 5800
+})
+
+test("C-3 derive: net_debt is NA when cash absent", {
+  d <- .derive_quantities(data.table(long_term_debt = 5000,
+                                     short_term_debt = 800))
+  is.na(d$net_debt)
+})
+
+test("C-3 derive: net_debt is NA when total_debt NA (both debt inputs absent)", {
+  d <- .derive_quantities(data.table(cash = 1000))
+  is.na(d$net_debt)
+})
+
+test("C-3 derive: net_debt = total_debt - cash when all present", {
+  d <- .derive_quantities(data.table(long_term_debt = 5000,
+                                     short_term_debt = 800,
+                                     cash = 2000))
+  d$net_debt == 3800
+})
+
+test("C-3 derive: vectorised across multi-row input (mixed presence)", {
+  d <- .derive_quantities(data.table(
+    operating_cashflow = c(500, 500, 500),
+    capex = c(120, NA_real_, 200)
+  ))
+  d$fcf[1] == 380 && is.na(d$fcf[2]) && d$fcf[3] == 300
+})
 
 
 # ============================================================================
@@ -248,13 +435,24 @@ test("valuation: zero EPS -> pe is NA", {
   is.na(v$pe_trailing)
 })
 
-test("valuation: EV computed when cash column missing", {
+test("valuation: EV is NA when cash column missing (C-3)", {
+  # Under C-3 net_debt = total_debt - cash propagates NA when cash is
+  # unreported; EV follows. Previously this silently used total_debt
+  # as a proxy, implicitly treating cash as 0.
   no_cash <- copy(curr_row)
   no_cash[, cash := NULL]
   no_cash <- .derive_quantities(no_cash)
   v <- .compute_valuation(no_cash, price, 1000)
-  # EV = mkt_cap + net_debt = 150000 + total_debt (6000) = 156000
-  !is.na(v$enterprise_value) && v$enterprise_value == 156000
+  is.na(v$enterprise_value)
+})
+
+test("valuation: EV NA when both debt tags absent (C-3)", {
+  # Without LTD and STD, total_debt is NA; net_debt and EV follow.
+  no_debt <- copy(curr_row)
+  no_debt[, `:=`(long_term_debt = NULL, short_term_debt = NULL)]
+  no_debt <- .derive_quantities(no_debt)
+  v <- .compute_valuation(no_debt, price, 1000)
+  is.na(v$enterprise_value)
 })
 
 test("valuation: EV = mkt_cap + total_debt - cash", {
@@ -275,11 +473,74 @@ test("profitability: operating_margin = OI/Rev",
 test("profitability: roe = NI/Equity",
      abs(prof$roe - 2000/20000) < 0.001)
 
-test("profitability: negative equity -> roe is NA", {
+test("profitability: negative equity -> roe is negative (sign-preserving)", {
+  # Principle: negative denominators carry distress signal and must propagate
+  # into the cross-section. Winsorization + robust standardization downstream
+  # tame the tails without censoring sign.
   neg_eq <- copy(curr_row)
   neg_eq[, stockholders_equity := -1000]
   p <- .compute_profitability(neg_eq)
-  is.na(p$roe)
+  !is.na(p$roe) && p$roe == 2000 / -1000
+})
+
+# ---- Sign-preservation across the valuation / leverage / shareholder set ----
+
+test("sign-preserve: negative equity yields negative pb", {
+  r <- copy(curr_row); r[, stockholders_equity := -5000]
+  v <- .compute_valuation(r, price, 1000)
+  !is.na(v$pb) && v$pb == 150000 / -5000
+})
+
+test("sign-preserve: negative FCF yields negative pfcf", {
+  # fcf is derived; inject via operating_cashflow < capex
+  r <- copy(curr_row); r[, `:=`(operating_cashflow = 100, capex = 500)]
+  r <- .derive_quantities(r)
+  v <- .compute_valuation(r, price, 1000)
+  !is.na(v$pfcf) && v$pfcf < 0
+})
+
+test("sign-preserve: negative EBITDA yields negative ev_ebitda", {
+  r <- copy(curr_row); r[, `:=`(operating_income = -500, depreciation = 100)]
+  r <- .derive_quantities(r)
+  v <- .compute_valuation(r, price, 1000)
+  !is.na(v$ev_ebitda) && v$ev_ebitda < 0
+})
+
+test("sign-preserve: negative equity yields negative debt_equity", {
+  r <- copy(curr_row); r[, stockholders_equity := -2000]
+  lev <- .compute_leverage(r)
+  !is.na(lev$debt_equity) && lev$debt_equity == 6000 / -2000
+})
+
+test("sign-preserve: negative EBITDA yields negative net_debt_ebitda", {
+  r <- copy(curr_row); r[, `:=`(operating_income = -200, depreciation = 100)]
+  r <- .derive_quantities(r)
+  lev <- .compute_leverage(r)
+  !is.na(lev$net_debt_ebitda) && lev$net_debt_ebitda < 0
+})
+
+test("sign-preserve: negative NI yields negative payout_ratio", {
+  # div = -600 (cash outflow), so abs_div = 600, ni = -100 -> ratio = -6
+  r <- copy(curr_row); r[, net_income := -100]
+  shr <- .compute_shareholder(r, 150000)
+  !is.na(shr$payout_ratio) && shr$payout_ratio == 600 / -100
+})
+
+test("sign-preserve: negative IC yields negative roic", {
+  # Force IC < 0: equity=100, total_debt=100, cash=500 -> IC = -300
+  r <- copy(curr_row)
+  r[, `:=`(stockholders_equity = 100, long_term_debt = 100,
+           short_term_debt = 0, cash = 500)]
+  r <- .derive_quantities(r)
+  p <- .compute_profitability(r)
+  !is.na(p$roic) && p$roic < 0
+})
+
+test("C-3 profitability: roic NA when cash absent (no silent zeroing)", {
+  r <- copy(curr_row); r[, cash := NA_real_]
+  r <- .derive_quantities(r)
+  p <- .compute_profitability(r)
+  is.na(p$roic)
 })
 
 # Growth
@@ -490,6 +751,258 @@ test("filter_deprecated_tags: does not mutate input", {
   nrows_before <- nrow(dt)
   .filter_deprecated_tags(dt)
   nrow(dt) == nrows_before
+})
+
+
+# ============================================================================
+# UNIT TESTS: Wave 1 -- Balance-Sheet Change Family
+# ============================================================================
+# Hand-computed from the shared fixture (curr_row / prior_row):
+#   curr:  COA=11000 COL=7000  WC=4000 NCOA=35000 NCOL=17000 NCO=18000
+#          FNA=0 FINL=6000 FIN=-6000 NOA=22000 CEQ=20000
+#   prior: COA=10000 COL=6500  WC=3500 NCOA=34000 NCOL=17000 NCO=17000
+#          FNA=0 FINL=6500 FIN=-6500 NOA=20500 CEQ=18000
+#   avgAT=49000, lagAT=48000
+message("\n=== Wave 1: Balance-Sheet Change Family ===")
+
+bsc <- .compute_bs_change(curr_row, prior_row)
+
+test("bsc: del_coa = 1000/49000",
+     abs(bsc$del_coa - 1000/49000) < 1e-9)
+
+test("bsc: del_col = 500/49000",
+     abs(bsc$del_col - 500/49000) < 1e-9)
+
+test("bsc: del_finl = -500/49000 (LTD down 500)",
+     abs(bsc$del_finl - (-500/49000)) < 1e-9)
+
+test("bsc: del_lti = 0 (no LT investments reported, zero-if-na)",
+     bsc$del_lti == 0)
+
+test("bsc: del_equ = 2000/49000",
+     abs(bsc$del_equ - 2000/49000) < 1e-9)
+
+test("bsc: del_netfin = 500/49000 (FIN -6500 -> -6000)",
+     abs(bsc$del_netfin - 500/49000) < 1e-9)
+
+test("bsc: total_accruals = (dWC + dNCO + dFIN)/avgAT = 2000/49000",
+     abs(bsc$total_accruals - 2000/49000) < 1e-9)
+
+test("bsc: Richardson identity TACC = (dNOA + dFIN)/avgAT", {
+  # NOA = WC + NCO by construction, so dWC + dNCO = dNOA = 1500
+  abs(bsc$total_accruals - (1500 - (-500))/49000) < 1e-9
+})
+
+test("bsc: dnoa = 1500/48000 (lagged AT scaling)",
+     abs(bsc$dnoa - 1500/48000) < 1e-9)
+
+test("bsc: ch_nncoa = 1000/48000",
+     abs(bsc$ch_nncoa - 1000/48000) < 1e-9)
+
+test("bsc: ch_nwc = 500/48000",
+     abs(bsc$ch_nwc - 500/48000) < 1e-9)
+
+test("bsc: inventory_change = 200/49000",
+     abs(bsc$inventory_change - 200/49000) < 1e-9)
+
+test("bsc: inventory_growth = 200/2800",
+     abs(bsc$inventory_growth - 200/2800) < 1e-9)
+
+test("bsc: ppe_inv_change NA when ppe_gross missing",
+     is.na(bsc$ppe_inv_change))
+
+test("bsc: equity_growth = 2000/18000",
+     abs(bsc$equity_growth - 2000/18000) < 1e-9)
+
+test("bsc: gr_ltnoa = (18000-17000)/49000 (LTNOA = NOA - WC)",
+     abs(bsc$gr_ltnoa - 1000/49000) < 1e-9)
+
+test("bsc: all NA when prior is NULL", {
+  r <- .compute_bs_change(curr_row, NULL)
+  all(is.na(unlist(r)))
+})
+
+test("bsc: ppe_inv_change with PPEG present, INV zero-if-na", {
+  c2 <- copy(curr_row);  c2[, ppe_gross := 26000]
+  p2 <- copy(prior_row); p2[, ppe_gross := 24000]
+  r <- .compute_bs_change(c2, p2)
+  # (26000+3000 - 24000-2800)/48000 = 2200/48000
+  abs(r$ppe_inv_change - 2200/48000) < 1e-9
+})
+
+test("bsc: equity_growth NA when prior book equity negative", {
+  p2 <- copy(prior_row); p2[, stockholders_equity := -100]
+  r <- .compute_bs_change(curr_row, p2)
+  is.na(r$equity_growth)
+})
+
+test("bsc: LT identity fallback (Liabilities tag absent)", {
+  # LT = AT - CEQ: curr 50000-20000=30000, prior 48000-18000=30000 --
+  # identical to the tagged values, so dnoa must be unchanged
+  c2 <- copy(curr_row);  c2[, total_liabilities := NA_real_]
+  p2 <- copy(prior_row); p2[, total_liabilities := NA_real_]
+  r <- .compute_bs_change(c2, p2)
+  abs(r$dnoa - 1500/48000) < 1e-9
+})
+
+test("bsc: FINL NA when all debt/preferred components missing", {
+  c2 <- copy(curr_row)
+  c2[, `:=`(long_term_debt = NA_real_, short_term_debt = NA_real_)]
+  r <- .compute_bs_change(c2, prior_row)
+  is.na(r$del_finl)
+})
+
+# -- .prior_fy_row(): label-free prior selection (relabeling regression) --
+message("\n=== .prior_fy_row (label-free prior) ===")
+
+# Latest-view relabeling scenario: the fy2024 10-K re-reported the FY2023
+# balance sheet, so the period 2023-12-31 rows carry the fy=2024 label and
+# the fy=2023 label group holds only the stale period 2022-12-31.
+relabel_long <- data.table(
+  concept     = rep(c("total_assets", "stockholders_equity"), 3),
+  value       = c(1200, 500,   1000, 400,   800, 300),
+  fiscal_year = c(2024L, 2024L, 2024L, 2024L, 2023L, 2023L),
+  period_type = "FY",
+  period_end  = as.Date(c("2024-12-31", "2024-12-31",
+                          "2023-12-31", "2023-12-31",
+                          "2022-12-31", "2022-12-31")),
+  filed       = as.Date(c("2025-02-15", "2025-02-15",
+                          "2025-02-15", "2025-02-15",
+                          "2024-02-15", "2024-02-15"))
+)
+
+test("prior_fy_row: picks the true prior PERIOD, not the label group", {
+  p <- .prior_fy_row(relabel_long, 2024L)
+  !is.null(p) && p$total_assets == 1000 && p$stockholders_equity == 400
+})
+
+test("prior_fy_row: gap guard rejects a 2-year hole", {
+  gap_long <- relabel_long[period_end != as.Date("2023-12-31")]
+  is.null(.prior_fy_row(gap_long, 2024L))
+})
+
+test("prior_fy_row: NULL when target year absent",
+     is.null(.prior_fy_row(relabel_long, 2030L)))
+
+test("compute_ticker_indicators: asset_growth uses period-true prior", {
+  ind <- compute_ticker_indicators(relabel_long, price_on_filed = NA_real_,
+                                   sector = "Technology", target_fy = 2024L)
+  abs(ind[["asset_growth"]] - 0.2) < 1e-9   # 1200/1000 - 1, not 1200/800 - 1
+})
+
+
+# ============================================================================
+# UNIT TESTS: Wave 2 -- External Financing Family
+# ============================================================================
+message("\n=== Wave 2: External Financing Family ===")
+
+# Synthetic 7-year long history; one filing per year (filed = pe + 60d).
+.fin_long <- local({
+  yrs <- 2018:2024
+  mk <- function(concept, values) data.table(
+    concept = concept, value = values,
+    fiscal_year = yrs, period_type = "FY",
+    period_end = as.Date(sprintf("%d-12-31", yrs)),
+    filed = as.Date(sprintf("%d-03-01", yrs + 1))
+  )
+  rbindlist(list(
+    mk("total_assets",       rep(1000, 7)),
+    mk("shares_outstanding", c(130, 120, 118, 116, 112, 100, 110)),
+    mk("long_term_debt",     c(90, 100, 120, 150, 170, 190, 200)),
+    mk("short_term_debt",    c(20, 25, 22, 24, 26, 20, 30)),
+    mk("debt_issuance",      c(10, 20, 30, 40, 50, 60, 100)),
+    mk("debt_repayment",     c(5, 10, 15, 20, 25, 30, 40)),
+    mk("equity_issuance",    c(5, 5, 5, 5, 5, 5, 20)),
+    mk("buybacks",           c(-10, -20, -20, -30, -40, -40, -50)),
+    mk("dividends_paid",     c(10, 12, 14, 16, 20, 25, 30)),
+    mk("revenue",            rep(500, 7)),
+    mk("net_income",         rep(50, 7))
+  ))
+})
+
+fin_ind <- compute_ticker_indicators(.fin_long, price_on_filed = 10,
+                                     sector = "Technology",
+                                     target_fy = 2024L)
+
+test("fin: net_debt_finance = (100 - 40 + (30-20))/1000",
+     abs(fin_ind[["net_debt_finance"]] - 0.07) < 1e-9)
+
+test("fin: net_equity_finance = (20 - 50 - 30)/1000",
+     abs(fin_ind[["net_equity_finance"]] - (-0.06)) < 1e-9)
+
+test("fin: xfin = ndf + nef",
+     abs(fin_ind[["xfin"]] - 0.01) < 1e-9)
+
+test("fin: composite_debt_issuance = log(TD_2024/TD_2019) = log(230/125)",
+     abs(fin_ind[["composite_debt_issuance"]] - log(230/125)) < 1e-9)
+
+test("fin: share_iss_1y = 110/100 - 1 (no splits)",
+     abs(fin_ind[["share_iss_1y"]] - 0.10) < 1e-9)
+
+test("fin: share_iss_5y = 110/120 - 1",
+     abs(fin_ind[["share_iss_5y"]] - (110/120 - 1)) < 1e-9)
+
+test("fin: net_payout_yield = (30 + 50 - 20)/(10 * 110)",
+     abs(fin_ind[["net_payout_yield"]] - 60/1100) < 1e-9)
+
+# Split adjustment: 2:1 split (ratio 0.5) between the 2023 and 2024
+# filings. The 2024 count is on the post-split basis; the surviving 2023
+# row was filed pre-split.
+test("fin: share_iss_1y split-adjusts by filed-date basis", {
+  long2 <- copy(.fin_long)
+  long2[concept == "shares_outstanding" & fiscal_year == 2024, value := 220]
+  splits <- data.table(ex_date = as.Date("2024-06-15"), ratio = 0.5)
+  ind <- compute_ticker_indicators(long2, 10, "Technology",
+                                   target_fy = 2024L, splits = splits)
+  abs(ind[["share_iss_1y"]] - 0.10) < 1e-9   # 220*0.5/100 - 1
+})
+
+test("fin: no adjustment when both counts share one filing basis", {
+  # Move the 2023 shares row into the 2024 filing (post-split restated)
+  long2 <- copy(.fin_long)
+  long2[concept == "shares_outstanding" & fiscal_year == 2024, value := 220]
+  long2[concept == "shares_outstanding" & fiscal_year == 2023,
+        `:=`(value = 200, filed = as.Date("2025-03-01"))]
+  splits <- data.table(ex_date = as.Date("2024-06-15"), ratio = 0.5)
+  ind <- compute_ticker_indicators(long2, 10, "Technology",
+                                   target_fy = 2024L, splits = splits)
+  abs(ind[["share_iss_1y"]] - 0.10) < 1e-9   # 220/200 - 1, window empty
+})
+
+test("fin: net_debt_finance NA when debt side entirely unreported", {
+  long2 <- .fin_long[!concept %in% c("debt_issuance", "debt_repayment",
+                                      "short_term_debt")]
+  ind <- compute_ticker_indicators(long2, 10, "Technology", target_fy = 2024L)
+  is.na(ind[["net_debt_finance"]])
+})
+
+test("fin: 5y indicators NA when history too short", {
+  long2 <- .fin_long[fiscal_year >= 2022]
+  ind <- compute_ticker_indicators(long2, 10, "Technology", target_fy = 2024L)
+  is.na(ind[["composite_debt_issuance"]]) && is.na(ind[["share_iss_5y"]]) &&
+    !is.na(ind[["share_iss_1y"]])
+})
+
+test("fin: net_payout_yield NA without price",
+     is.na(compute_ticker_indicators(.fin_long, NA_real_, "Technology",
+                                     target_fy = 2024L)[["net_payout_yield"]]))
+
+test("fin: DEI cover count beats constant issued count (BA case)", {
+  # Balance-sheet line carries the constant ISSUED count; the DEI cover
+  # instant (a few weeks after FYE) carries true outstanding.
+  long2 <- copy(.fin_long)
+  long2[, tag := "CommonStockSharesOutstanding"]
+  long2[concept == "shares_outstanding", value := 1000]     # constant issued
+  dei <- data.table(
+    concept = "shares_outstanding", value = c(610, 750),
+    fiscal_year = c(2023L, 2024L), period_type = "FY",
+    period_end = as.Date(c("2024-01-25", "2025-01-27")),
+    filed = as.Date(c("2024-02-01", "2025-02-03")),
+    tag = "EntityCommonStockSharesOutstanding"
+  )
+  ind <- compute_ticker_indicators(rbind(long2, dei), 10, "Technology",
+                                   target_fy = 2024L)
+  abs(ind[["share_iss_1y"]] - (750/610 - 1)) < 1e-9
 })
 
 
@@ -737,8 +1250,9 @@ test("dedup: single row with mismatched duration still retained", {
 })
 
 test("dedup: instant tag (NA period_start) unaffected by tie-break", {
-  # Balance-sheet tags have NA period_start. Ordering falls through to
-  # the existing accession chain; later accession (amendment) wins.
+  # Balance-sheet tags have NA period_start. dedup_fundamentals now keeps
+  # one row per accession (vintage-preserving); the cross-accession collapse
+  # (later accession = amendment wins) happens in pit_dedup.
   dt <- data.table(
     ticker = "T", cik = "0", concept = "total_assets", tag = "Assets",
     value = c(100, 101),
@@ -749,7 +1263,8 @@ test("dedup: instant tag (NA period_start) unaffected by tie-break", {
     fiscal_year = c(2024L, 2024L), fiscal_qtr = c("Q2", "Q2"), unit = "USD"
   )
   out <- dedup_fundamentals(dt)
-  nrow(out) == 1 && out$value == 101
+  resolved <- pit_dedup(out)
+  nrow(out) == 2 && nrow(resolved) == 1 && resolved$value == 101
 })
 
 test("dedup: .duration_match_rank returns 0 for NA inputs", {
@@ -769,6 +1284,286 @@ test("dedup: .duration_match_rank accepts 16-week Q1 (111-120 days)", {
                                   rep("Q1", 4)),
             c(0L, 0L, 0L, 1L))
 })
+
+
+# ============================================================================
+# UNIT TESTS: Wave 3 -- quarter panel + seasonal-surprise family
+# ============================================================================
+message("\n=== Wave 3: Quarter Panel + Surprise Family ===")
+
+# Duration-row builder: long-format rows with period_start (the quarter
+# panel classifies by reported duration, never by labels).
+.make_qrow <- function(concept, value, ps, pe, filed,
+                       fy = 2024L, pt = "Q1", form = "10-Q",
+                       tag = NA_character_) {
+  data.table(concept = concept, value = value,
+             period_start = as.Date(ps), period_end = as.Date(pe),
+             fiscal_year = fy, period_type = pt,
+             filed = as.Date(filed), form = form, tag = tag)
+}
+
+# Instant-row builder (period_start NA, excluded from duration series)
+.make_irow <- function(concept, value, pe, filed, fy = 2024L, pt = "FY",
+                       tag = NA_character_) {
+  data.table(concept = concept, value = value,
+             period_start = as.Date(NA), period_end = as.Date(pe),
+             fiscal_year = fy, period_type = pt,
+             filed = as.Date(filed), form = "10-K", tag = tag)
+}
+
+# -- .classify_duration --
+test("classify_duration: bands and NA gaps",
+     identical(.classify_duration(c(90L, 112L, 181L, 272L, 363L, 140L,
+                                    NA_integer_)),
+               c("3mo", "3mo", "2Q", "3Q", "FY", NA, NA)))
+
+# -- .flow_quarter_series: YTD-only filer --
+# Cumulative revenue 100 / 220 / 360 / 520 -> standalone 100/120/140/160
+ytd_filer <- rbindlist(list(
+  .make_qrow("revenue", 100, "2024-01-01", "2024-03-31", "2024-05-01"),
+  .make_qrow("revenue", 220, "2024-01-01", "2024-06-30", "2024-08-01", pt = "Q2"),
+  .make_qrow("revenue", 360, "2024-01-01", "2024-09-30", "2024-11-01", pt = "Q3"),
+  .make_qrow("revenue", 520, "2024-01-01", "2024-12-31", "2025-02-15",
+             pt = "FY", form = "10-K")
+))
+
+ytd_ser <- .flow_quarter_series(ytd_filer, "revenue")
+
+test("quarter panel: YTD-only filer yields 4 standalone quarters",
+     nrow(ytd_ser) == 4)
+
+test("quarter panel: YTD differencing recovers standalone values",
+     identical(ytd_ser$value, c(100, 120, 140, 160)))
+
+test("quarter panel: Q4 = FY - Q3ytd",
+     ytd_ser[qend == as.Date("2024-12-31"), value] == 160)
+
+# -- direct 3-month rows win over derived values --
+mixed_filer <- rbindlist(list(
+  ytd_filer,
+  # direct Q2 standalone reported at a slightly different value (rounding
+  # in the filing); the direct row must win
+  .make_qrow("revenue", 121, "2024-04-01", "2024-06-30", "2024-08-01", pt = "Q2")
+))
+test("quarter panel: direct 3mo row preferred over YTD difference",
+     .flow_quarter_series(mixed_filer, "revenue")[
+       qend == as.Date("2024-06-30"), value] == 121)
+
+# -- missing Q3 YTD -> no Q4 --
+no_q3 <- ytd_filer[!(period_end == as.Date("2024-09-30"))]
+test("quarter panel: missing Q3ytd -> Q4 absent, not wrong",
+     !(as.Date("2024-12-31") %in% .flow_quarter_series(no_q3, "revenue")$qend))
+
+# -- 16-week Q1 (Kroger/AAP calendar) --
+kr_filer <- rbindlist(list(
+  .make_qrow("revenue", 160, "2024-02-01", "2024-05-23", "2024-06-20"),  # 112d
+  .make_qrow("revenue", 280, "2024-02-01", "2024-08-15", "2024-09-12",
+             pt = "Q2")                                                  # 196d
+))
+kr_ser <- .flow_quarter_series(kr_filer, "revenue")
+test("quarter panel: 16-week Q1 classifies and differences (Q2 = 120)",
+     nrow(kr_ser) == 2 && kr_ser$value[2] == 120)
+
+# -- fiscal-year-transition stub is not force-classified --
+stub <- .make_qrow("revenue", 300, "2024-01-01", "2024-05-31", "2024-07-15",
+                   pt = "FY", form = "10-K")  # 151d stub "FY"
+test("quarter panel: transition-stub duration lands in a band gap",
+     is.null(.flow_quarter_series(stub, "revenue")))
+
+# -- split-spanning EPS chain --
+# 4:1 split between the two filings: pre-split EPS 4.00 must be
+# normalized to 1.00 (current basis) before seasonal differencing.
+eps_split <- rbindlist(list(
+  .make_qrow("eps_diluted", 4.00, "2023-01-01", "2023-03-31", "2023-05-01",
+             fy = 2023L),
+  .make_qrow("eps_diluted", 1.05, "2024-01-01", "2024-03-31", "2024-05-01")
+))
+split_tbl <- data.table(ex_date = as.Date("2023-08-31"), ratio = 0.25)
+eps_ser <- .flow_quarter_series(eps_split, "eps_diluted",
+                                splits = split_tbl, split_adjust = TRUE)
+test("quarter panel: split-spanning EPS normalized to current basis",
+     abs(eps_ser$value[1] - 1.00) < 1e-9 && abs(eps_ser$value[2] - 1.05) < 1e-9)
+
+# -- .q_shares_at: DEI cover instant preferred, split-adjusted --
+share_rows <- rbindlist(list(
+  .make_irow("shares_outstanding", 1012, "2024-12-31", "2025-02-15",
+             tag = "CommonStockSharesOutstanding"),
+  .make_irow("shares_outstanding", 610, "2025-01-20", "2025-02-15",
+             tag = "EntityCommonStockSharesOutstanding")
+))
+test("q_shares_at: DEI cover instant wins over balance-sheet line",
+     .q_shares_at(share_rows, as.Date("2024-12-31")) == 610)
+
+test("q_shares_at: split after filed maps count to current basis",
+     .q_shares_at(share_rows, as.Date("2024-12-31"),
+                  splits = data.table(ex_date = as.Date("2025-06-30"),
+                                      ratio = 0.25)) == 2440)
+
+# -- .seasonal_surprise --
+# 14 quarters, seasonal diffs d5..d14 = (0,1,...,8,10): hand-computed
+# su_14 = 5.5, sd(su_6..su_13) = 0.5 * sd(1:8) -> SUE = 4.4907
+qe14 <- seq(as.Date("2021-03-31"), by = "quarter", length.out = 14)
+d <- c(0, 1, 2, 3, 4, 5, 6, 7, 8, 10)
+x14 <- rep(100, 14)
+for (i in 5:14) x14[i] <- x14[i - 4] + d[i - 4]
+test("seasonal_surprise: hand-computed SUE",
+     abs(.seasonal_surprise(qe14, x14, 1e-10) - 4.490732) < 1e-4)
+
+test("seasonal_surprise: ultra-stable diffs hit the sd floor -> NA",
+     is.na(.seasonal_surprise(qe14, seq(100, 230, by = 10), 1e-10)))
+
+test("seasonal_surprise: fewer than 2 prior surprises -> NA",
+     is.na(.seasonal_surprise(qe14[1:6], x14[1:6], 1e-10)))
+
+test("seasonal_surprise: short series -> NA",
+     is.na(.seasonal_surprise(qe14[1:3], x14[1:3], 1e-10)))
+
+# -- full-ticker fixture: 17 calendar quarters of direct 3mo rows --
+# (17 = the 13 SUE needs plus history for streak edge cases)
+.q_fixture <- function(ni_vals, tax_vals = NULL, at_vals = NULL) {
+  n <- length(ni_vals)
+  qs <- seq(as.Date("2021-01-01"), by = "quarter", length.out = n)
+  qe <- seq(as.Date("2021-03-31"), by = "quarter", length.out = n)
+  rows <- list()
+  for (i in seq_len(n)) {
+    fy <- as.integer(format(qe[i], "%Y"))
+    rows[[length(rows) + 1]] <- .make_qrow("net_income", ni_vals[i],
+                                           qs[i], qe[i], qe[i] + 40, fy = fy)
+    if (!is.null(tax_vals)) {
+      rows[[length(rows) + 1]] <- .make_qrow("income_tax_expense",
+                                             tax_vals[i], qs[i], qe[i],
+                                             qe[i] + 40, fy = fy)
+    }
+    if (!is.null(at_vals)) {
+      rows[[length(rows) + 1]] <- .make_irow("total_assets", at_vals[i],
+                                             qe[i], qe[i] + 40, fy = fy)
+    }
+  }
+  rbindlist(rows)
+}
+
+# -- ch_tax --
+tax_fund <- .q_fixture(ni_vals = rep(50, 8),
+                       tax_vals = c(20, 20, 20, 20, 20, 20, 20, 30),
+                       at_vals = rep(1000, 8))
+sur_tax <- .compute_surprise(tax_fund, target_fy = 2022L)
+test("ch_tax: seasonal tax change over lag-quarter assets",
+     abs(sur_tax$ch_tax - (30 - 20) / 1000) < 1e-9)
+
+# -- roaq --
+test("roaq: quarterly NI over prior-quarter assets",
+     abs(sur_tax$roaq - 50 / 1000) < 1e-9)
+
+# -- num_earn_increase streaks --
+# base 100 for quarters 1-4; +1 seasonal growth through quarter 12; then
+# quarter 13 breaks (NI_13 < NI_9), 14-16 grow again -> streak of 3
+ni_streak3 <- rep(100, 16)
+for (i in 5:16) ni_streak3[i] <- ni_streak3[i - 4] + 1
+ni_streak3[13] <- ni_streak3[9] - 1
+ni_streak3[14:16] <- ni_streak3[10:12] + 1
+sur_s3 <- .compute_surprise(.q_fixture(ni_streak3), target_fy = 2024L)
+test("num_earn_increase: broken quarter 3 lags back -> streak 3",
+     sur_s3$num_earn_increase == 3)
+
+# exactly 8: break at lag 8, growth since
+ni_streak8 <- rep(100, 16)
+for (i in 5:16) ni_streak8[i] <- ni_streak8[i - 4] + 1
+ni_streak8[8] <- ni_streak8[4] - 1   # chearn_8 <= 0
+for (i in 9:16) ni_streak8[i] <- ni_streak8[i - 4] + 1
+sur_s8 <- .compute_surprise(.q_fixture(ni_streak8), target_fy = 2024L)
+test("num_earn_increase: reported break at lag 8 -> streak 8",
+     sur_s8$num_earn_increase == 8)
+
+# unbroken growth through all 16 quarters: the OpenAP-exact >= 9 quirk
+ni_streak9 <- rep(100, 16)
+for (i in 5:16) ni_streak9[i] <- ni_streak9[i - 4] + 1
+sur_s9 <- .compute_surprise(.q_fixture(ni_streak9), target_fy = 2024L)
+test("num_earn_increase: 9+ streak scores 0 (OpenAP-exact)",
+     sur_s9$num_earn_increase == 0)
+
+# current quarter down -> 0
+ni_down <- ni_streak9
+ni_down[16] <- ni_down[12] - 5
+sur_dn <- .compute_surprise(.q_fixture(ni_down), target_fy = 2024L)
+test("num_earn_increase: current seasonal decline -> 0",
+     sur_dn$num_earn_increase == 0)
+
+# missing quarter continues a streak (OpenAP NA-as-positive convention)
+gap_fund <- .q_fixture(ni_streak3)
+gap_fund <- gap_fund[!(concept == "net_income" &
+                         period_end == as.Date("2024-09-30"))]  # drop lag 1
+sur_gap <- .compute_surprise(gap_fund, target_fy = 2024L)
+test("num_earn_increase: missing lag quarter treated as continuing",
+     sur_gap$num_earn_increase == 3)
+
+# -- earnings_surprise via full fixture: split must not distort SUE --
+eps16 <- rep(1, 16)
+for (i in 5:16) eps16[i] <- eps16[i - 4] * 1.10
+qs16 <- seq(as.Date("2021-01-01"), by = "quarter", length.out = 16)
+qe16 <- seq(as.Date("2021-03-31"), by = "quarter", length.out = 16)
+eps_rows <- rbindlist(lapply(1:16, function(i) {
+  .make_qrow("eps_diluted", eps16[i], qs16[i], qe16[i], qe16[i] + 40,
+             fy = as.integer(format(qe16[i], "%Y")))
+}))
+# 4:1 split mid-2023: as-filed EPS before the split are 4x current basis
+splt <- as.Date("2023-08-31")
+eps_asfiled <- copy(eps_rows)
+eps_asfiled[filed < splt, value := value * 4]
+sur_eps_clean <- .compute_surprise(eps_rows, target_fy = 2024L)
+sur_eps_split <- .compute_surprise(
+  eps_asfiled, target_fy = 2024L,
+  splits = data.table(ex_date = splt, ratio = 0.25))
+test("earnings_surprise: split-adjusted SUE equals no-split SUE",
+     abs(sur_eps_clean$earnings_surprise -
+           sur_eps_split$earnings_surprise) < 1e-6)
+
+test("earnings_surprise: unadjusted split would have distorted SUE",
+     is.na(.compute_surprise(eps_asfiled, target_fy = 2024L)$earnings_surprise) ||
+       abs(.compute_surprise(eps_asfiled, target_fy = 2024L)$earnings_surprise -
+             sur_eps_clean$earnings_surprise) > 0.5)
+
+# -- earnings_consistency --
+# steady 10% grower: every egrowth = 0.1 / (0.5 * (1 + 1/1.1)) = 0.104762
+ec_years <- 2018:2024
+ec_eps <- 1.1^(0:6)
+ec_rows <- rbindlist(lapply(seq_along(ec_years), function(i) {
+  y <- ec_years[i]
+  rbindlist(list(
+    .make_qrow("eps_diluted", ec_eps[i],
+               sprintf("%d-01-01", y), sprintf("%d-12-31", y),
+               sprintf("%d-02-15", y + 1), fy = as.integer(y), pt = "FY",
+               form = "10-K"),
+    .make_irow("total_assets", 1000, sprintf("%d-12-31", y),
+               sprintf("%d-02-15", y + 1), fy = as.integer(y))
+  ))
+}))
+test("earnings_consistency: steady grower mean growth",
+     abs(.compute_earnings_consistency(ec_rows, 2024L) - 0.1047619) < 1e-5)
+
+# sign flip: negative growth after positive -> NA
+ec_flip <- copy(ec_rows)
+ec_flip[concept == "eps_diluted" & fiscal_year == 2024L, value := 1.1^5 * 0.9]
+test("earnings_consistency: sign flip vs prior year -> NA",
+     is.na(.compute_earnings_consistency(ec_flip, 2024L)))
+
+# extreme ratio (> 6x) -> NA
+ec_jump <- copy(ec_rows)
+ec_jump[concept == "eps_diluted" & fiscal_year == 2024L, value := 1.1^5 * 7]
+test("earnings_consistency: EPS ratio above 6 -> NA",
+     is.na(.compute_earnings_consistency(ec_jump, 2024L)))
+
+# -- panel-based revenue_growth_qoq inside .compute_surprise --
+rev_panel_fund <- ytd_filer
+sur_rev <- .compute_surprise(rev_panel_fund, target_fy = 2024L)
+test("rev_qoq: panel flag set when a revenue panel exists",
+     isTRUE(sur_rev$has_rev_panel))
+
+test("rev_qoq: latest standalone quarter vs the one before",
+     abs(sur_rev$rev_qoq - (160 - 140) / 140) < 1e-9)
+
+test("rev_qoq: no period_start data -> no panel, legacy fallback",
+     !isTRUE(.compute_surprise(
+       .make_long("revenue", 1000), target_fy = 2024L)$has_rev_panel))
 
 
 # ============================================================================
@@ -798,22 +1593,27 @@ test("zscore: output is data.table",
 test("zscore: sector column removed",
      !("sector" %in% names(zscored)))
 
-test("zscore: pe_trailing mean near 0", {
-  m <- mean(zscored$pe_trailing, na.rm = TRUE)
+test("zscore: pe_trailing median near 0", {
+  # Median/MAD standardization centers on median, not mean. Mean still near
+  # 0 for normal data but less tightly than under mean/SD standardization.
+  m <- median(zscored$pe_trailing, na.rm = TRUE)
   abs(m) < 0.1
 })
 
-test("zscore: pe_trailing sd near 1", {
+test("zscore: pe_trailing sd near 1 (loose tolerance for small n)", {
+  # Under median/MAD the identity sd(z) == 1 is only asymptotic on normal
+  # data; at n=15 (after financial-row exclusion) sample noise can push
+  # sd(z) to ~1.5. The 500-ticker production cross-section is much tighter.
   s <- sd(zscored$pe_trailing, na.rm = TRUE)
-  abs(s - 1) < 0.2
+  !is.na(s) && s > 0.5 && s < 2.0
 })
 
 test("zscore: financial rows remain NA for gpa",
      all(is.na(zscored$gpa[16:20])))
 
-test("zscore: z-scores bounded to [-3, 3]", {
+test("zscore: z-scores bounded to default clip [-5, 5]", {
   all_vals <- unlist(zscored[, .SD, .SDcols = names(zscored)])
-  all(is.na(all_vals) | (all_vals >= -3 & all_vals <= 3))
+  all(is.na(all_vals) | (all_vals >= -5 & all_vals <= 5))
 })
 
 test("zscore: handles NA sector without error", {
@@ -826,14 +1626,77 @@ test("zscore: handles NA sector without error", {
   is.data.table(z) && nrow(z) == 3
 })
 
+# ---- New robust/winsorization behaviour ----
+
+test("zscore robust: outlier raw value does not blow up other z-scores", {
+  # Under mean/SD, a single raw outlier can inflate SD so that the rest of
+  # the cross-section gets compressed toward 0. Under pre-winsorize + MAD,
+  # the outlier is clipped first and scale stays informative.
+  set.seed(11)
+  dt_out <- data.table(
+    pe_trailing = c(rnorm(49, 20, 5), 1e6),
+    sector = rep("Technology", 50)
+  )
+  z <- zscore_cross_section(dt_out)
+  # Non-outlier tickers should still have a meaningful spread (|z| > 0.5
+  # for at least some of them). Under naive mean/SD this would collapse.
+  sum(abs(z$pe_trailing) > 0.5, na.rm = TRUE) >= 5
+})
+
+test("zscore robust: negative denominator signal preserved", {
+  # pb with negative equity is now computed (negative ratio). That negative
+  # value must make it through to the z-score as a distinctly-negative z.
+  dt <- data.table(
+    pb = c(rep(c(1.5, 2, 2.5, 3), 4), -5),  # last one: distress case
+    sector = rep("Technology", 17)
+  )
+  z <- zscore_cross_section(dt)
+  !is.na(z$pb[17]) && z$pb[17] < -1
+})
+
+test("zscore: clip = NULL removes the [-3, 3] bound", {
+  # With n=100 normal data the clip is inactive anyway; test the contract
+  # rather than the value. Use an indicator designed to produce a z beyond
+  # 3 even under MAD: mostly-constant data with one outlier that survives
+  # winsorization (n=3 -> no clipping happens since the bounds are the data).
+  dt <- data.table(
+    pe_trailing = c(0, 0.1, 100),
+    sector = rep("Technology", 3)
+  )
+  z_clip   <- zscore_cross_section(dt, clip = c(-3, 3))
+  z_unclip <- zscore_cross_section(dt, clip = NULL)
+  # The outlier should be at the clip bound under clip, larger under NULL
+  # (or they may coincide if winsorization pulled the outlier inside 3 MADs;
+  # either way z_unclip must be >= z_clip for the high end).
+  !is.na(z_unclip$pe_trailing[3]) &&
+    z_unclip$pe_trailing[3] >= z_clip$pe_trailing[3] - 1e-10
+})
+
+test("zscore: pre-winsorization capped at [p2.5, p97.5] of input", {
+  # With 100 points where two are extreme, the extremes get clipped to the
+  # empirical p2.5/p97.5. Under median/MAD without clip, the max |z| is
+  # bounded by the winsorization width / MAD. For rnorm(100) that's
+  # well below 3 -- so clip should be inactive.
+  set.seed(3)
+  dt <- data.table(
+    pe_trailing = c(rnorm(98), -50, 50),
+    sector = rep("Technology", 100)
+  )
+  z <- zscore_cross_section(dt, clip = NULL)
+  # The two raw extremes get winsorized to p2.5/p97.5 (~|2|), so z is
+  # bounded well inside [-3, 3] even with clip = NULL.
+  !is.na(max(abs(z$pe_trailing), na.rm = TRUE)) &&
+    max(abs(z$pe_trailing), na.rm = TRUE) < 3
+})
+
 
 # ============================================================================
 # UNIT TESTS: Public API
 # ============================================================================
 message("\n=== Public API ===")
 
-test("get_indicator_names returns 57 names",
-     length(get_indicator_names()) == 57)
+test("get_indicator_names returns 130 names",
+     length(get_indicator_names()) == 130)
 
 test("get_indicator_names has no duplicates",
      !anyDuplicated(get_indicator_names()))
@@ -887,8 +1750,10 @@ result <- compute_ticker_indicators(synth_long, 150, "Technology")
 test("compute_ticker: returns named numeric vector",
      is.numeric(result) && !is.null(names(result)))
 
-test("compute_ticker: correct length (57)",
-     length(result) == 57)
+test("compute_ticker: correct length (130 + 10 ingredients)",
+     length(result) == 140 &&
+       identical(names(result),
+                 c(get_indicator_names(), .CS_INGREDIENT_COLS)))
 
 test("compute_ticker: pe_trailing = 150/3.8",
      abs(result[["pe_trailing"]] - 150/3.8) < 0.01)
@@ -1111,9 +1976,9 @@ if (length(fund_files) >= 5) {
         all(.INDICATOR_NAMES %in% names(cs$raw))
       })
 
-      test("cross_section_real: z-scores bounded [-3, 3]", {
+      test("cross_section_real: z-scores bounded to default clip [-5, 5]", {
         vals <- unlist(cs$zscored[, .SD, .SDcols = .INDICATOR_NAMES])
-        all(is.na(vals) | (vals >= -3 & vals <= 3))
+        all(is.na(vals) | (vals >= -5 & vals <= 5))
       })
 
       # At least some indicators should be non-NA for most tickers
@@ -1134,6 +1999,509 @@ if (length(fund_files) >= 5) {
 } else {
   message("  SKIP  Not enough parquet files in cache/fundamentals/")
 }
+
+
+# ============================================================================
+# UNIT TESTS: Wave 4 -- levels and investment families
+# ============================================================================
+message("\n=== Wave 4: levels + investment ===")
+
+test("families: levels has 19", length(indicator_names("levels")) == 19)
+test("families: investment has 10",
+     length(indicator_names("investment")) == 10)
+test("families: union covers all names",
+     setequal(unlist(.INDICATOR_FAMILIES), .INDICATOR_NAMES))
+test("financial NA list includes Wave 4 additions",
+     all(c("tang", "op_leverage", "ch_asset_turnover",
+           "gr_sale_to_gr_inv", "net_debt_price")
+         %in% .FINANCIAL_NA_INDICATORS))
+
+# -- .statutory_rate --
+test("statutory_rate: pre-TCJA 0.35",
+     .statutory_rate(as.Date("2017-12-31")) == 0.35)
+test("statutory_rate: post-TCJA 0.21",
+     .statutory_rate(as.Date("2019-12-31")) == 0.21)
+test("statutory_rate: June-2018 straddle blends (IRS 28.06%)", {
+  r <- .statutory_rate(as.Date("2018-06-30"))
+  abs(r - (0.35 * 184 + 0.21 * 181) / 365) < 1e-9
+})
+test("statutory_rate: honors true fy_start for transition periods",
+     .statutory_rate(as.Date("2018-06-30"),
+                     fy_start = as.Date("2018-01-01")) == 0.21)
+test("statutory_rate: rejects out-of-band fy_start", {
+  a <- .statutory_rate(as.Date("2018-06-30"),
+                       fy_start = as.Date("2016-01-01"))
+  b <- .statutory_rate(as.Date("2018-06-30"))
+  a == b
+})
+test("statutory_rate: NA period_end -> NA",
+     is.na(.statutory_rate(as.Date(NA))))
+
+# -- .ab98_growth --
+test("ab98_growth: two-year-average base",
+     abs(.ab98_growth(120, 100, 100) - 0.2) < 1e-12)
+test("ab98_growth: one-year fallback when lag2 missing",
+     abs(.ab98_growth(120, 100, NA) - 0.2) < 1e-12)
+test("ab98_growth: NA current -> NA", is.na(.ab98_growth(NA, 100, 100)))
+test("ab98_growth: zero base falls back to 1y",
+     abs(.ab98_growth(120, 100, -100) - 0.2) < 1e-12)
+
+# -- Fixture: six contiguous fiscal years, hand-computed expectations --
+.w4_year <- function(y) {
+  k  <- y - 2019
+  pe <- as.Date(sprintf("%d-12-31", y))
+  vals <- c(
+    total_assets = 1000 + 100 * k, stockholders_equity = 600,
+    net_income = 100, revenue = 2000 + 100 * k, cogs = 1200,
+    sga = 300, rnd = 50 + 5 * k, depreciation = 80, ppe_net = 800,
+    ppe_gross = 1200, operating_cashflow = 250, interest_expense = 30,
+    income_tax_expense = 25, pretax_income = 125, cash = 100,
+    st_investments = 50, long_term_debt = 400, short_term_debt = 50,
+    total_liabilities = (1000 + 100 * k) - 600,
+    inventory = 150 + 10 * k, accounts_receivable = 250,
+    current_assets = 500 + 20 * k, current_liabilities = 300,
+    capex = 100 + 10 * k, dividends_paid = -40, buybacks = -60,
+    shares_outstanding = 10, eps_diluted = 10
+  )
+  data.table(concept = names(vals), value = as.numeric(vals),
+             fiscal_year = y, period_type = "FY",
+             period_end = pe, filed = pe + 60)
+}
+w4_fund <- rbindlist(lapply(2019:2024, .w4_year))
+w4 <- compute_ticker_indicators(w4_fund, 100, "Technology",
+                                target_fy = 2024)
+
+.w4_eq <- function(nm, want, tol = 1e-9) {
+  !is.na(w4[[nm]]) && abs(w4[[nm]] - want) < tol
+}
+
+# levels (ME = 100 * 10 = 1000; che = 150; td = 450; lt = 900)
+test("w4: rd_me", .w4_eq("rd_me", 0.075))
+test("w4: ebm = (600-300)/(1000-300)", .w4_eq("ebm", 300 / 700))
+test("w4: bpebm = BP - EBM", .w4_eq("bpebm", 0.6 - 300 / 700))
+test("w4: cf_me = (NI+DP)/ME", .w4_eq("cf_me", 0.18))
+test("w4: cfp = CFO/ME", .w4_eq("cfp", 0.25))
+test("w4: net_debt_price = (450-150)/1000", .w4_eq("net_debt_price", 0.3))
+test("w4: tang uses GROSS ppe",
+     .w4_eq("tang", (150 + 0.715 * 250 + 0.547 * 200 + 0.535 * 1200) / 1500))
+test("w4: tax_to_book at 21%", .w4_eq("tax_to_book", (25 / 0.21) / 100))
+test("w4: effective_tax_rate", .w4_eq("effective_tax_rate", 0.2))
+test("w4: am", .w4_eq("am", 1.5))
+test("w4: book_leverage", .w4_eq("book_leverage", 2.5))
+test("w4: leverage_mkt = total LIABILITIES / ME",
+     .w4_eq("leverage_mkt", 0.9))
+test("w4: cash_prod = (ME-AT)/che", .w4_eq("cash_prod", -500 / 150))
+test("w4: oper_prof", .w4_eq("oper_prof", 970 / 600))
+test("w4: cash_assets", .w4_eq("cash_assets", 0.1))
+test("w4: op_leverage", .w4_eq("op_leverage", 1.0))
+test("w4: payout_yield", .w4_eq("payout_yield", 0.1))
+test("w4: salecash", .w4_eq("salecash", 2500 / 150))
+test("w4: depr_rate uses NET ppe", .w4_eq("depr_rate", 0.1))
+
+# investment family
+test("w4: pchdepr flat rate = 0", .w4_eq("pchdepr", 0))
+test("w4: grcapx = (capx_t - capx_{t-2})/capx_{t-2}",
+     .w4_eq("grcapx", 20 / 130))
+test("w4: grcapx3y = 3*capx_t / sum(3 lags)",
+     .w4_eq("grcapx3y", 450 / 390))
+test("w4: pct_tot_acc (Richardson numerator over |NI|)",
+     .w4_eq("pct_tot_acc", 0))
+test("w4: ch_asset_turnover simple ATO difference",
+     .w4_eq("ch_asset_turnover", 2500 / 950 - 2400 / 950))
+test("w4: gr_sale_to_gr_inv AB98 2y base",
+     .w4_eq("gr_sale_to_gr_inv", 150 / 2350 - 15 / 185))
+test("w4: surprise_rd 0 when intensity growth at exactly 1.0",
+     .w4_eq("surprise_rd", 0))
+test("w4: investment NA below $10M revenue floor",
+     is.na(w4[["investment"]]))
+test("w4: rd_cap 20% amortization ladder",
+     .w4_eq("rd_cap", 205 / 1500))
+test("w4: ch_inv_ia carries firm-level AB98 capex growth",
+     .w4_eq("ch_inv_ia", 15 / 135))
+
+# guards and edges
+w4_fin <- compute_ticker_indicators(w4_fund, 100, "Financial",
+                                    target_fy = 2024)
+test("w4: financial mask NAs the five Wave 4 names",
+     all(is.na(w4_fin[c("tang", "op_leverage", "ch_asset_turnover",
+                        "gr_sale_to_gr_inv", "net_debt_price")])))
+
+w4_srd <- copy(w4_fund)
+w4_srd[concept == "rnd" & fiscal_year == 2024, value := 85]
+test("w4: surprise_rd fires above both 5% thresholds", {
+  r <- compute_ticker_indicators(w4_srd, 100, "Technology",
+                                 target_fy = 2024)
+  r[["surprise_rd"]] == 1
+})
+
+w4_srd0 <- copy(w4_fund)
+w4_srd0[concept == "rnd" & fiscal_year == 2023, value := 0]
+test("w4: surprise_rd NA on zero R&D base", {
+  r <- compute_ticker_indicators(w4_srd0, 100, "Technology",
+                                 target_fy = 2024)
+  is.na(r[["surprise_rd"]])
+})
+
+w4_scaled <- copy(w4_fund)
+w4_scaled[concept %in% c("revenue", "capex"), value := value * 1e7]
+test("w4: investment ratio to current-inclusive 3y mean", {
+  r <- compute_ticker_indicators(w4_scaled, 100, "Technology",
+                                 target_fy = 2024)
+  ci <- c(150 / 2500, 140 / 2400, 130 / 2300)
+  abs(r[["investment"]] - ci[1] / mean(ci)) < 1e-9
+})
+
+test("w4: investment computes from curr + lag2 when t-1 year missing", {
+  mk_gap <- function(y, rev, capx) data.table(
+    concept = c("total_assets", "revenue", "capex"),
+    value = c(1000, rev, capx), fiscal_year = y, period_type = "FY",
+    period_end = as.Date(sprintf("%d-12-31", y)),
+    filed = as.Date(sprintf("%d-03-01", y + 1)))
+  gap <- rbindlist(list(mk_gap(2020, 2e10, 1.5e9),
+                        mk_gap(2022, 2.5e10, 2e9)))
+  r <- compute_ticker_indicators(gap, 100, "Technology", target_fy = 2022)
+  ci0 <- 2e9 / 2.5e10; ci2 <- 1.5e9 / 2e10
+  abs(r[["investment"]] - ci0 / mean(c(ci0, ci2))) < 1e-9
+})
+
+test("w4: rd_cap NA with under five fiscal years", {
+  short <- rbindlist(lapply(2021:2024, .w4_year))
+  r <- compute_ticker_indicators(short, 100, "Technology",
+                                 target_fy = 2024)
+  is.na(r[["rd_cap"]])
+})
+
+test("w4: rd_cap zero-fills missing R&D within existing years", {
+  nornd <- w4_fund[concept != "rnd"]
+  r <- compute_ticker_indicators(nornd, 100, "Technology",
+                                 target_fy = 2024)
+  r[["rd_cap"]] == 0 && is.na(r[["rd_me"]])
+})
+
+test("w4: grcapx NA on nonpositive base", {
+  neg <- copy(w4_fund)
+  neg[concept == "capex" & fiscal_year == 2022, value := 0]
+  r <- compute_ticker_indicators(neg, 100, "Technology",
+                                 target_fy = 2024)
+  is.na(r[["grcapx"]])
+})
+
+test("w4: book_leverage and oper_prof NA on negative book equity", {
+  negbe <- copy(w4_fund)
+  negbe[concept == "stockholders_equity", value := -50]
+  r <- compute_ticker_indicators(negbe, 100, "Technology",
+                                 target_fy = 2024)
+  is.na(r[["book_leverage"]]) && is.na(r[["oper_prof"]])
+})
+
+test("w4: oper_prof NA when SGA missing (all inputs required)", {
+  nosga <- w4_fund[concept != "sga"]
+  r <- compute_ticker_indicators(nosga, 100, "Technology",
+                                 target_fy = 2024)
+  is.na(r[["oper_prof"]]) && !is.na(r[["op_leverage"]])
+})
+
+test("w4: tax_to_book = 1 when taxes positive and NI nonpositive", {
+  loss <- copy(w4_fund)
+  loss[concept == "net_income" & fiscal_year == 2024, value := -10]
+  r <- compute_ticker_indicators(loss, 100, "Technology",
+                                 target_fy = 2024)
+  r[["tax_to_book"]] == 1
+})
+
+test("w4: cash_prod NA on near-zero cash", {
+  nocash <- copy(w4_fund)
+  nocash[concept == "cash", value := 0.1]
+  nocash <- nocash[concept != "st_investments"]
+  r <- compute_ticker_indicators(nocash, 100, "Technology",
+                                 target_fy = 2024)
+  is.na(r[["cash_prod"]]) && is.na(r[["salecash"]])
+})
+
+# ============================================================================
+# UNIT TESTS: Wave 5 composite scores
+# ============================================================================
+message("\n=== Wave 5: Composite Scores ===")
+
+.w5_concepts <- c("revenue", "net_income", "total_assets",
+                  "total_liabilities", "current_assets",
+                  "current_liabilities", "retained_earnings",
+                  "income_tax_expense", "interest_expense",
+                  "operating_cashflow", "ppe_net", "long_term_debt",
+                  "short_term_debt", "cash", "st_investments",
+                  "stockholders_equity", "dividends_paid", "depreciation",
+                  "rnd", "capex", "advertising", "shares_outstanding")
+.w5_curr  <- c(900, 80, 1000, 600, 400, 200, 150, 20, 10,
+               100, 300, 250, 50, 40, 10, 380, -20, 30, 25, 45, 5, 100)
+.w5_prior <- c(800, 60, 900, 550, 380, 190, 120, 18, 9,
+               90, 280, 240, 40, 35, 8, 350, -18, 28, 20, 40, 4, 100)
+w5_fund <- rbindlist(list(
+  .make_long(.w5_concepts, .w5_curr),
+  .make_long(.w5_concepts, .w5_prior, fy = 2023L,
+             pe = as.Date("2023-12-31"), filed = as.Date("2024-02-15"))
+))
+w5 <- compute_ticker_indicators(w5_fund, 10, "Technology", target_fy = 2024)
+
+# Hand-computed: -1.32 - 0.407*log(1000/1e6) + 6.03*0.6 - 1.43*0.2
+# + 0.076*0.5 - 1.72*0 - 2.37*0.08 - 1.83*(100/600) + 0.285*0
+# - 0.521*(20/140) = 4.292427
+test("w5: o_score hand-computed",
+     abs(w5[["o_score"]] - 4.292427) < 1e-4)
+
+# 1.2*0.2 + 1.4*0.15 + 3.3*(110/1000) + 0.9 + 0.6*(1000/600) = 2.713
+test("w5: z_score hand-computed",
+     abs(w5[["z_score"]] - 2.713) < 1e-4)
+
+# -1.002*110/300 + 0.283*0.62 + 3.139*300/680 - 39.368*20/300
+# - 1.315*50/300 + 0.283*1000/1000 = -1.367787
+test("w5: kz_index hand-computed",
+     abs(w5[["kz_index"]] - (-1.367787)) < 1e-4)
+
+# -0.091*110/4000 - 0.062 + 0.021*0.25 - 0.044*log(1000/1e6)
+# - 0.035*0.125/4 = 0.2435949 (per-ticker: travels as ing_ww_partial)
+test("w5: ww firm terms hand-computed",
+     abs(w5[["ing_ww_partial"]] - 0.2435949) < 1e-4 &&
+       is.na(w5[["ww_index"]]))
+
+test("w5: ms ingredients (levels over avgAT / lagged AT)",
+     abs(w5[["ing_ms_roa"]] - 80 / 950) < 1e-9 &&
+       abs(w5[["ing_ms_cfroa"]] - 100 / 950) < 1e-9 &&
+       abs(w5[["ing_ms_rd"]] - 25 / 900) < 1e-9 &&
+       abs(w5[["ing_ms_capex"]] - 45 / 900) < 1e-9 &&
+       abs(w5[["ing_ms_adv"]] - 5 / 900) < 1e-9 &&
+       is.na(w5[["ms_roa"]]) && is.na(w5[["ms_score"]]))
+
+test("w5: ms_accrual is the final per-ticker binary (CFO > NI)",
+     w5[["ms_accrual"]] == 1)
+
+test("w5: revenue lags travel as ingredients",
+     w5[["ing_rev_lag1"]] == 800 && is.na(w5[["ing_rev_lag2"]]))
+
+test("w5: herf is cross-section-only (per-ticker NA)",
+     is.na(w5[["herf"]]))
+
+# OENEG dummy: lt = 1100 > at flips the dummy and reprices lt terms
+test("w5: o_score OENEG dummy (lt > at)", {
+  f <- copy(w5_fund)
+  f[concept == "total_liabilities" & fiscal_year == 2024, value := 1100]
+  r <- compute_ticker_indicators(f, 10, "Technology", target_fy = 2024)
+  abs(r[["o_score"]] - 5.726064) < 1e-4
+})
+
+# INTWO dummy: replicated sum-negative form (ni + ni_p < 0)
+test("w5: o_score INTWO dummy (sum of two years negative)", {
+  f <- copy(w5_fund)
+  f[concept == "net_income" & fiscal_year == 2024, value := -100]
+  f[concept == "net_income" & fiscal_year == 2023, value := -40]
+  r <- compute_ticker_indicators(f, 10, "Technology", target_fy = 2024)
+  abs(r[["o_score"]] - 5.301742) < 1e-4
+})
+
+test("w5: o_score NA when CHIN denominator is zero (NI = 0 both years)", {
+  f <- copy(w5_fund)
+  f[concept == "net_income", value := 0]
+  r <- compute_ticker_indicators(f, 10, "Technology", target_fy = 2024)
+  is.na(r[["o_score"]])
+})
+
+test("w5: z_score NA without retained earnings, o_score unaffected", {
+  f <- w5_fund[concept != "retained_earnings"]
+  r <- compute_ticker_indicators(f, 10, "Technology", target_fy = 2024)
+  is.na(r[["z_score"]]) && !is.na(r[["o_score"]])
+})
+
+test("w5: kz_index NA without net PP&E", {
+  f <- w5_fund[concept != "ppe_net"]
+  r <- compute_ticker_indicators(f, 10, "Technology", target_fy = 2024)
+  is.na(r[["kz_index"]])
+})
+
+test("w5: non-payer flips DIVPOS and drops the KZ dividend term", {
+  f <- w5_fund[concept != "dividends_paid"]
+  r <- compute_ticker_indicators(f, 10, "Technology", target_fy = 2024)
+  abs(r[["ing_ww_partial"]] - (0.2435949 + 0.062)) < 1e-4 &&
+    abs(r[["kz_index"]] - (-1.367787 + 39.368 * 20 / 300)) < 1e-4
+})
+
+test("w5: sector masks (Financial / Utilities / Real Estate)", {
+  r_fin  <- compute_ticker_indicators(w5_fund, 10, "Financial",
+                                      target_fy = 2024)
+  r_util <- compute_ticker_indicators(w5_fund, 10, "Utilities",
+                                      target_fy = 2024)
+  r_re   <- compute_ticker_indicators(w5_fund, 10, "Real Estate",
+                                      target_fy = 2024)
+  is.na(r_fin[["o_score"]]) && is.na(r_fin[["z_score"]]) &&
+    is.na(r_util[["o_score"]]) && is.na(r_util[["z_score"]]) &&
+    is.na(r_re[["o_score"]]) && is.na(r_re[["z_score"]]) &&
+    !is.na(r_fin[["kz_index"]]) && !is.na(r_util[["kz_index"]]) &&
+    !is.na(r_fin[["ms_accrual"]])
+})
+
+# -- MS volatility components on the quarter panel --
+# 17 quarterly NI rows ending 2020-12-31 .. 2024-12-31; the oldest ends
+# exactly 1461 d before fy_pe and must fall OUTSIDE the trailing-16
+# window (its extreme value would explode the sd).
+.w5_qends <- as.Date(paste0(rep(2021:2024, each = 4),
+                            c("-03-31", "-06-30", "-09-30", "-12-31")))
+.w5_q_all <- c(as.Date("2020-12-31"), .w5_qends)
+.w5_qstarts <- .w5_q_all - 89L
+.w5_ni_vals <- c(1e6, seq(10, 25, length.out = 16))
+w5_qfund <- rbindlist(c(
+  lapply(seq_along(.w5_q_all), function(i) {
+    .make_qrow("net_income", .w5_ni_vals[i], .w5_qstarts[i], .w5_q_all[i],
+               .w5_q_all[i] + 40)
+  }),
+  lapply(seq_along(.w5_q_all), function(i) {
+    .make_qrow("revenue", 100 + 5 * i, .w5_qstarts[i], .w5_q_all[i],
+               .w5_q_all[i] + 40)
+  }),
+  lapply(seq_along(.w5_q_all), function(i) {
+    .make_irow("total_assets", 1000, .w5_q_all[i], .w5_q_all[i] + 40)
+  })
+))
+.w5_curr_row <- data.table(total_assets = 1000, net_income = 20,
+                           operating_cashflow = 30,
+                           period_end = as.Date("2024-12-31"))
+.w5_prior_row <- data.table(total_assets = 900)
+
+test("w5: ms_roa_vol over trailing 16 quarters, 17th-back excluded", {
+  msi <- .compute_ms_ingredients(w5_qfund, .w5_curr_row, .w5_prior_row)
+  expected <- sd(seq(10, 25, length.out = 16) / 1000)
+  abs(msi$ms_roa_vol - expected) < 1e-9
+})
+
+test("w5: ms_rev_vol computed from seasonal revenue ratios", {
+  msi <- .compute_ms_ingredients(w5_qfund, .w5_curr_row, .w5_prior_row)
+  !is.na(msi$ms_rev_vol) && msi$ms_rev_vol >= 0
+})
+
+test("w5: ms_roa_vol NA below 6 in-window observations", {
+  few <- w5_qfund[!(concept == "net_income" &
+                      period_end < as.Date("2023-12-01"))]
+  msi <- .compute_ms_ingredients(few, .w5_curr_row, .w5_prior_row)
+  is.na(msi$ms_roa_vol)
+})
+
+# -- Cross-section finalize pass (industry_adjust_cross_section) --
+.mk_w5_cs <- function() {
+  data.table(
+    sector   = c("Tech", "Tech", "Tech", "Tech", "Unknown"),
+    industry = c("Software", "Software", "Chips", "Chips", "Unknown"),
+    ms_roa = NA_real_, ms_cfroa = NA_real_, ms_rd = NA_real_,
+    ms_capex = NA_real_, ms_adv = NA_real_, ms_roa_vol = NA_real_,
+    ms_rev_vol = NA_real_,
+    ms_accrual = c(1, 0, 1, 1, 1), ms_score = NA_real_,
+    herf = NA_real_, ww_index = NA_real_,
+    revenue_raw = c(100, 300, 200, 200, 50),
+    ing_ms_roa = c(1, 2, 3, 4, 5), ing_ms_cfroa = c(4, 3, 2, 1, 5),
+    ing_ms_rd = c(1, 1, 2, 2, 1), ing_ms_capex = c(1, 2, 3, NA, 1),
+    ing_ms_adv = c(0, 0, 0, 1, 0),
+    ing_ms_roa_vol = c(1, 2, 3, 4, 5), ing_ms_rev_vol = c(4, 3, 2, 1, 5),
+    ing_ww_partial = c(0.1, 0.2, 0.3, 0.4, 0.5),
+    ing_rev_lag1 = c(80, 240, 150, NA, 40),
+    ing_rev_lag2 = c(60, 200, NA, NA, 30)
+  )
+}
+
+test("w5 finalize: median binarization, strict inequalities and ties", {
+  out <- industry_adjust_cross_section(.mk_w5_cs())
+  identical(out$ms_roa[1:4], c(0, 0, 1, 1)) &&        # > med 2.5
+    identical(out$ms_roa_vol[1:4], c(1, 1, 0, 0)) &&  # < med 2.5
+    identical(out$ms_adv[1:4], c(0, 0, 0, 1))         # med 0, tie -> 0
+})
+
+test("w5 finalize: NA ingredient gives NA component, others computed", {
+  out <- industry_adjust_cross_section(.mk_w5_cs())
+  is.na(out$ms_capex[4]) && identical(out$ms_capex[1:3], c(0, 0, 1))
+})
+
+test("w5 finalize: Unknown sector group gives NA components", {
+  out <- industry_adjust_cross_section(.mk_w5_cs())
+  all(is.na(unlist(out[5, .MS_COMPONENTS[.MS_COMPONENTS != "ms_accrual"],
+                       with = FALSE])))
+})
+
+test("w5 finalize: ms_score sums 8 components, NA if any NA", {
+  out <- industry_adjust_cross_section(.mk_w5_cs())
+  out$ms_score[1] == 3 && is.na(out$ms_score[4])
+})
+
+test("w5 finalize: herf 3-year average with lag coverage rule", {
+  out <- industry_adjust_cross_section(.mk_w5_cs())
+  soft <- mean(c(0.625, 0.625, (60/260)^2 + (200/260)^2))
+  abs(out$herf[1] - soft) < 1e-9 && abs(out$herf[2] - soft) < 1e-9 &&
+    abs(out$herf[3] - 0.5) < 1e-9 &&   # lag years fail the >= 2 rule
+    is.na(out$herf[5])                  # Unknown industry
+})
+
+test("w5 finalize: ww industry growth needs >= 2 contributing firms", {
+  out <- industry_adjust_cross_section(.mk_w5_cs())
+  g <- (100 + 300) / (80 + 240) - 1
+  abs(out$ww_index[1] - (0.1 + 0.102 * g / 4)) < 1e-9 &&
+    abs(out$ww_index[2] - (0.2 + 0.102 * g / 4)) < 1e-9 &&
+    all(is.na(out$ww_index[3:5]))       # Chips: 1 contributor; Unknown
+})
+
+test("w5 finalize: ingredient columns dropped", {
+  out <- industry_adjust_cross_section(.mk_w5_cs())
+  !any(.CS_INGREDIENT_COLS %in% names(out))
+})
+
+test("w5 finalize: idempotent on finalized data", {
+  out1 <- industry_adjust_cross_section(.mk_w5_cs())
+  snap <- copy(out1)
+  out2 <- industry_adjust_cross_section(out1)
+  identical(as.list(snap[, .(ms_roa, ms_score, herf, ww_index)]),
+            as.list(out2[, .(ms_roa, ms_score, herf, ww_index)]))
+})
+
+test("w5 finalize: Utilities herf masked by sector sweep", {
+  dt <- .mk_w5_cs()
+  dt[3, sector := "Utilities"]
+  out <- industry_adjust_cross_section(dt)
+  is.na(out$herf[3]) && !is.na(out$herf[1])
+})
+
+test("w5: sector_na_mask reverse map", {
+  identical(.sector_na_mask("o_score",
+                            c("Financial", "Utilities", "Real Estate",
+                              "Technology")),
+            c(TRUE, TRUE, TRUE, FALSE)) &&
+    identical(.sector_na_mask("herf", c("Utilities", "Financial")),
+              c(TRUE, FALSE)) &&
+    !any(.sector_na_mask("roa", c("Financial", "Utilities")))
+})
+
+# -- industry_adjust_cross_section (Wave 4 demean, updated counts) --
+test("industry_adjust: demeans ch_inv_ia within sector", {
+  il <- list(setNames(rep(0.10, 130), get_indicator_names()),
+             setNames(rep(0.30, 130), get_indicator_names()),
+             setNames(rep(0.50, 130), get_indicator_names()))
+  cs <- compute_cross_section(il, c("A", "B", "C"),
+                              c("Tech", "Tech", "Financial"))
+  all(abs(cs$raw$ch_inv_ia - c(-0.1, 0.1, 0)) < 1e-12) &&
+    abs(cs$raw$rd_me[1] - 0.10) < 1e-12
+})
+
+test("industry_adjust: no sector column -> unchanged", {
+  dt <- data.table(ch_inv_ia = c(1, 2))
+  out <- industry_adjust_cross_section(copy(dt))
+  identical(out$ch_inv_ia, dt$ch_inv_ia)
+})
+
+test("industry_adjust: all-NA sector group stays NA", {
+  dt <- data.table(sector = c("X", "X"), ch_inv_ia = c(NA_real_, NA_real_))
+  out <- industry_adjust_cross_section(dt)
+  all(is.na(out$ch_inv_ia))
+})
+
+test("industry_adjust: Unknown sector group gives NA ch_inv_ia", {
+  dt <- data.table(sector = c("Unknown", "Unknown", "Tech", "Tech"),
+                   ch_inv_ia = c(0.1, 0.3, 0.2, 0.4))
+  out <- industry_adjust_cross_section(dt)
+  all(is.na(out$ch_inv_ia[1:2])) &&
+    all(abs(out$ch_inv_ia[3:4] - c(-0.1, 0.1)) < 1e-12)
+})
 
 
 # ============================================================================

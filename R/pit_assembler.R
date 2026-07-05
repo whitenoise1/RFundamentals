@@ -94,10 +94,21 @@ get_universe_at_date <- function(snapshot_date, master_dt) {
 # =============================================================================
 # 2. fetch_ticker_prices()
 # =============================================================================
+
+# Session-level memo of tickers whose Yahoo download failed after all
+# retries (mostly delisted symbols). A multi-date backfill calls
+# fetch_ticker_prices for the same dead tickers at every snapshot date;
+# without the memo each date re-pays retries + exponential backoff
+# (~10s per dead ticker). Session-scoped on purpose: a fresh R process
+# retries everything, so a transient outage cannot poison future runs.
+.PRICE_FETCH_FAILED <- new.env(parent = emptyenv())
+
 #' Download OHLCV price data for a single ticker with parquet cache
 #'
 #' Adapted from download_ohlcv() in ref/data_loader.R.
 #' Returns xts object. Caches to cache/prices/{ticker}_yahoo_{from}.parquet.
+#' Tickers that fail all retries are memoized for the session and return
+#' NULL immediately on subsequent calls.
 #'
 #' @param ticker Character. Ticker symbol.
 #' @param from Character. Start date (default "2009-01-01").
@@ -122,6 +133,10 @@ fetch_ticker_prices <- function(ticker, from = "2009-01-01",
     if (!is.null(cached) && nrow(cached) > 0) return(cached)
   }
 
+  # Known-dead this session: skip the download entirely
+  memo_key <- sprintf("%s_%s", ticker, from)
+  if (isTRUE(.PRICE_FETCH_FAILED[[memo_key]])) return(NULL)
+
   # Download from Yahoo
   px <- NULL
   for (attempt in seq_len(retries)) {
@@ -137,7 +152,10 @@ fetch_ticker_prices <- function(ticker, from = "2009-01-01",
     if (!is.null(px)) break
   }
 
-  if (is.null(px)) return(NULL)
+  if (is.null(px)) {
+    .PRICE_FETCH_FAILED[[memo_key]] <- TRUE
+    return(NULL)
+  }
 
   # Cache write
   df <- data.frame(date = as.character(index(px)), coredata(px),
@@ -331,7 +349,7 @@ get_latest_annual_filing <- function(fund_dt, as_of_date,
 #'   2. Filters to filings known as of snapshot date (point-in-time)
 #'   3. Identifies the most recent annual filing
 #'   4. Gets the closing price on the filing date
-#'   5. Computes all 57 indicators
+#'   5. Computes all indicators (get_indicator_names(), 116 as of Wave 4)
 #'   6. Stacks into cross-section and z-scores
 #'
 #' @param snapshot_date Date or character. The snapshot date.
@@ -341,6 +359,13 @@ get_latest_annual_filing <- function(fund_dt, as_of_date,
 #' @param price_cache_dir Character. Price cache directory.
 #' @param output_dir Character. Snapshot output directory.
 #' @param prefetch_prices Logical. Pre-download prices for full universe.
+#' @param zscore_mode Character. "cross_section" (default) standardizes each
+#'   indicator against the current snapshot's cross-section (per CLAUDE.md
+#'   point-in-time rule 4). "expanding_window" instead pools winsorized values
+#'   from all prior pit_*_raw snapshots plus the current one -- an opt-in
+#'   research variant, not the default output contract.
+#' @param zscore_clip Numeric length-2 or NULL. Post-standardization clip
+#'   bounds, honored in both modes. Default c(-5, 5); NULL disables.
 #' @param .master_dt data.table or NULL. Pre-loaded master (avoids re-reading).
 #' @param .sector_dt data.table or NULL. Pre-loaded sectors (avoids re-reading).
 #' @return List with $raw, $zscored (data.tables), $stats, or NULL on failure.
@@ -351,8 +376,12 @@ assemble_snapshot <- function(snapshot_date,
                               price_cache_dir = "cache/prices",
                               output_dir      = "cache/snapshots",
                               prefetch_prices = TRUE,
+                              zscore_mode     = c("cross_section", "expanding_window"),
+                              zscore_clip     = c(-5, 5),
                               .master_dt      = NULL,
                               .sector_dt      = NULL) {
+
+  zscore_mode <- match.arg(zscore_mode)
 
   snapshot_date <- as.Date(snapshot_date)
   message(sprintf("assemble_snapshot: %s", snapshot_date))
@@ -412,9 +441,9 @@ assemble_snapshot <- function(snapshot_date,
       message(sprintf("  computing %d/%d: %s", i, n_total, tk))
     }
 
-    # Load fundamentals
+    # Load raw vintages (one row per concept x period x filing)
     fund_dt <- tryCatch(
-      get_fundamentals(tk, cik, cache_dir = fund_dir),
+      get_fundamentals(tk, cik, cache_dir = fund_dir, vintages = TRUE),
       error = function(e) NULL
     )
     if (is.null(fund_dt) || nrow(fund_dt) == 0) {
@@ -422,8 +451,10 @@ assemble_snapshot <- function(snapshot_date,
       next
     }
 
-    # Point-in-time filter: only data filed on or before snapshot date
-    fund_dt <- fund_dt[!is.na(filed) & as.Date(filed) <= snapshot_date]
+    # Point-in-time resolution: drop rows filed after the snapshot date and
+    # collapse vintages to the row that was authoritative on that date
+    # (original filing until an amendment/re-report becomes public).
+    fund_dt <- pit_dedup(fund_dt, as_of = snapshot_date)
     if (nrow(fund_dt) == 0) {
       n_no_filing <- n_no_filing + 1L
       next
@@ -444,11 +475,21 @@ assemble_snapshot <- function(snapshot_date,
     price <- get_price_on_date(price_data, filing$filed_date)
     if (is.na(price)) n_no_price <- n_no_price + 1L
 
+    # Split events for share-issuance adjustment. load_ticker_splits lives
+    # in ttm_eps.R; guard so pit_assembler still works standalone (share
+    # issuance is then computed unadjusted). fetch = FALSE: no network in
+    # the snapshot loop; the splits cache is populated by the timeseries
+    # TTM augment.
+    splits <- if (exists("load_ticker_splits")) {
+      tryCatch(load_ticker_splits(tk, fetch = FALSE), error = function(e) NULL)
+    } else NULL
+
     # Compute indicators (pass point-in-time-filtered fundamentals)
     sector_label <- if (is.na(sec)) "Unknown" else sec
     indicators <- tryCatch(
       compute_ticker_indicators(fund_dt, price, sector_label,
-                                target_fy = filing$fiscal_year),
+                                target_fy = filing$fiscal_year,
+                                splits = splits),
       error = function(e) {
         warning(sprintf("  indicators failed for %s: %s", tk, e$message),
                 call. = FALSE)
@@ -480,20 +521,37 @@ assemble_snapshot <- function(snapshot_date,
   }
 
   # -- Build cross-section --
-  cs <- compute_cross_section(indicator_list, valid_tickers, valid_sectors)
+  # compute_cross_section produces the per-snapshot (cross-sectional) z-score,
+  # which is the default output. It is overwritten below only when the caller
+  # opts into zscore_mode = "expanding_window".
+  cs <- compute_cross_section(indicator_list, valid_tickers, valid_sectors,
+                              industries = valid_industries,
+                              clip = zscore_clip)
 
-  # Add metadata columns
+  # Add metadata columns to raw
   raw_dt <- copy(cs$raw)
   raw_dt[, date     := snapshot_date]
   raw_dt[, industry := valid_industries]
   raw_dt[, sector   := valid_sectors]
   setcolorder(raw_dt, c("date", "ticker", "industry", "sector"))
 
-  zscored_dt <- copy(cs$zscored)
-  zscored_dt[, date     := snapshot_date]
-  zscored_dt[, industry := valid_industries]
-  zscored_dt[, sector   := valid_sectors]
-  setcolorder(zscored_dt, c("date", "ticker", "industry", "sector"))
+  # -- Z-score path selection --
+  # Expanding-window pools winsorized values from all pit_*_raw snapshots
+  # with date < snapshot_date plus the current snapshot, and standardizes
+  # via median / MAD of the pool. Cross-section mode uses only the current
+  # snapshot.
+  if (zscore_mode == "expanding_window") {
+    zscored_dt <- zscore_expanding_window(raw_dt,
+                                          history_dt_list = NULL,
+                                          output_dir = output_dir,
+                                          clip = zscore_clip)
+  } else {
+    zscored_dt <- copy(cs$zscored)
+    zscored_dt[, date     := snapshot_date]
+    zscored_dt[, industry := valid_industries]
+    zscored_dt[, sector   := valid_sectors]
+    setcolorder(zscored_dt, c("date", "ticker", "industry", "sector"))
+  }
 
   # -- Validate --
   .assert_output(raw_dt, "assemble_snapshot$raw", list(
@@ -616,6 +674,134 @@ build_historical_snapshots <- function(
     n_built, n_skip, n_fail, length(dates)))
 
   invisible(results)
+}
+
+
+# =============================================================================
+# 8b. zscore_expanding_window()  --  Expanding-window robust z-scoring
+# =============================================================================
+# Pooled-history standardization. For each indicator:
+#   1. Winsorize every snapshot's cross-section at its own [p2.5, p97.5].
+#   2. Pool the winsorized values from all historical snapshots plus the
+#      current snapshot (expanding window up to snapshot_date).
+#   3. Standardize the current snapshot using median / MAD of the pool
+#      (via .robust_zscore, which applies the per-snapshot winsorization
+#      to x independently).
+#
+# Rationale (see docs/research/06_indicator_verification_report.md §12):
+#   - Per-snapshot winsorization bounds keep each cross-section's regime
+#     intact (a firm in the 2nd percentile this quarter gets pulled to p2.5
+#     of this quarter's distribution, not of a 10-year pool).
+#   - Expanding-window median / MAD stabilizes the location / scale as
+#     evidence accumulates, avoiding single-quarter sampling noise.
+#   - Burn-in: at T_1 the pool = current snapshot only; expanding-window
+#     equals per-snapshot z. This matches the user's agreed Q4 semantics
+#     (emit z anyway; "expanding" just means "use everything you have").
+
+# Concat pool of winsorized per-snapshot values for one indicator column.
+# history_dt_list: list of prior raw snapshots (strictly < current date).
+# raw_dt: current snapshot. Both are included in the pool. Rows whose
+# sector NA-masks the indicator (.SECTOR_NA_INDICATORS) are excluded.
+.build_pooled_calib <- function(ind_col, raw_dt, history_dt_list) {
+  snapshots <- c(history_dt_list, list(raw_dt))
+  pool <- numeric(0)
+  for (s in snapshots) {
+    if (is.null(s) || !(ind_col %in% names(s))) next
+    vals <- s[[ind_col]]
+    if ("sector" %in% names(s)) {
+      vals[.sector_na_mask(ind_col, s[["sector"]])] <- NA_real_
+    }
+    vals <- vals[!is.na(vals)]
+    if (length(vals) < 3L) next  # too small to winsorize meaningfully
+    q <- quantile(vals, c(0.025, 0.975), na.rm = TRUE)
+    pool <- c(pool, pmin(pmax(vals, q[1]), q[2]))
+  }
+  pool
+}
+
+# Read prior raw snapshots from disk (dates strictly < snapshot_date).
+# Returns a list of data.tables; empty list if directory is missing or
+# no prior files exist.
+.load_history_snapshots <- function(snapshot_date,
+                                    output_dir = .SNAPSHOT_DIR) {
+  if (!dir.exists(output_dir)) return(list())
+  files <- list.files(output_dir, pattern = "^pit_.*_raw\\.parquet$",
+                      full.names = TRUE)
+  if (length(files) == 0L) return(list())
+  dates <- as.Date(sub("^pit_(.*)_raw\\.parquet$", "\\1", basename(files)))
+  keep  <- !is.na(dates) & dates < as.Date(snapshot_date)
+  files <- files[keep]
+  if (length(files) == 0L) return(list())
+  lapply(files, function(f) {
+    tryCatch(as.data.table(arrow::read_parquet(f)), error = function(e) NULL)
+  })
+}
+
+#' Expanding-window robust z-scoring of a point-in-time snapshot
+#'
+#' @param raw_dt data.table. Current snapshot in raw form. Must carry
+#'   indicator columns; may include metadata (date, ticker, industry,
+#'   sector) which is passed through unchanged.
+#' @param history_dt_list List of data.tables. Prior raw snapshots
+#'   (strictly before raw_dt's date). If NULL, loaded from output_dir
+#'   using raw_dt$date[1] as the as-of date.
+#' @param output_dir Character. Directory of pit_*_raw.parquet files.
+#'   Ignored if history_dt_list is non-NULL.
+#' @param clip numeric(2) or NULL. Post-standardization clip bounds;
+#'   default c(-5, 5). See .robust_zscore in R/indicator_compute.R and
+#'   tools/diag_zscore_tails.R for the tail-diagnostic evidence behind
+#'   the choice of 5 over 3. NULL drops the clip entirely.
+#' @return data.table of the same shape as raw_dt with indicator columns
+#'   replaced by expanding-window z-scores. Metadata preserved.
+zscore_expanding_window <- function(raw_dt,
+                                    history_dt_list = NULL,
+                                    output_dir = .SNAPSHOT_DIR,
+                                    clip = c(-5, 5)) {
+
+  if (is.null(raw_dt) || nrow(raw_dt) == 0) return(raw_dt)
+
+  if (is.null(history_dt_list)) {
+    snap_date <- if ("date" %in% names(raw_dt)) raw_dt[["date"]][1] else NA
+    if (is.na(snap_date)) {
+      history_dt_list <- list()
+    } else {
+      history_dt_list <- .load_history_snapshots(snap_date, output_dir)
+    }
+  }
+
+  dt <- copy(raw_dt)
+  meta_cols <- intersect(c("date", "ticker", "industry", "sector"),
+                         names(dt))
+  sectors_vec <- if ("sector" %in% names(dt)) {
+    dt[["sector"]]
+  } else {
+    rep(NA_character_, nrow(dt))
+  }
+  ind_cols <- setdiff(names(dt), meta_cols)
+
+  for (col_name in ind_cols) {
+    vals <- dt[[col_name]]
+    masked <- .sector_na_mask(col_name, sectors_vec)
+
+    pool <- .build_pooled_calib(col_name, raw_dt, history_dt_list)
+
+    if (any(masked)) {
+      vals_in <- vals
+      vals_in[masked] <- NA_real_
+      z <- .robust_zscore(vals_in, calib_sample = pool, clip = clip)
+      z[masked] <- NA_real_
+    } else {
+      z <- .robust_zscore(vals, calib_sample = pool, clip = clip)
+    }
+    dt[, (col_name) := z]
+  }
+
+  .assert_output(dt, "zscore_expanding_window", list(
+    "is data.table"   = is.data.table,
+    "row count preserved" = function(x) nrow(x) == nrow(raw_dt)
+  ))
+
+  dt
 }
 
 

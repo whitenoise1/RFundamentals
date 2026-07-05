@@ -1,6 +1,6 @@
 # RFundamentals: Indicator Reference
 
-57 fundamental indicators computed from SEC EDGAR XBRL filings and Yahoo Finance
+130 fundamental indicators computed from SEC EDGAR XBRL filings and Yahoo Finance
 market data. Each indicator is listed with its formula, data sources, and
 interpretation.
 
@@ -545,6 +545,279 @@ Practitioner signals requiring additional XBRL tags or multi-period computation.
 
 ---
 
+## 11. Balance-Sheet Change Family (15 indicators, Wave 1)
+
+Annual year-over-year changes in balance-sheet aggregates, from the OpenAP
+expansion (docs/research/09; full references and reproduced t-stats in
+docs/RESEARCH_INDICATORS.md, section WAVE 1). Building blocks per
+Richardson et al. (2005): COA = CurrentAssets - Cash; COL =
+CurrentLiabilities - ShortTermDebt; WC = COA - COL; NCOA = Assets -
+CurrentAssets - LTInvestments; NCOL = Liabilities - CurrentLiabilities -
+LongTermDebt; NCO = NCOA - NCOL; FNA = STInvestments + LTInvestments;
+FINL = LongTermDebt + ShortTermDebt + PreferredStock; FIN = FNA - FINL;
+NOA = (Assets - Cash) - (Liabilities - TotalDebt). avgAT = average of
+current and prior total assets; lagAT = prior total assets.
+
+Missing-input policy: st_investments, lt_investments, preferred_stock,
+short_term_debt enter as 0 when unreported; FINL needs at least one
+debt/preferred component; when the Liabilities tag is absent, LT is
+derived as Assets - Equity - MinorityInterest (balance-sheet identity).
+The prior year is selected by period_end, never by fiscal_year label
+(re-reported comparatives carry the newer filing's label).
+
+| Indicator | Formula | Scaling | Source study (CZ t-stat) |
+|---|---|---|---|
+| `del_coa` | ΔCOA | avgAT | Richardson 2005 (6.01) |
+| `del_col` | ΔCOL | avgAT | Richardson 2005 (4.35) |
+| `del_finl` | ΔFINL | avgAT | Richardson 2005 (12.23) |
+| `del_lti` | ΔLTInvestments | avgAT | Richardson 2005 (2.55) |
+| `del_equ` | ΔEquity | avgAT | Richardson 2005 (3.18) |
+| `del_netfin` | ΔFIN | avgAT | Richardson 2005 (9.00) |
+| `total_accruals` | ΔWC + ΔNCO + ΔFIN | avgAT | Richardson 2005 (2.63) |
+| `dnoa` | ΔNOA | lagAT | Hirshleifer 2004 (9.25) |
+| `ch_nncoa` | ΔNCO | lagAT | Soliman 2008 (4.43) |
+| `ch_nwc` | ΔWC | lagAT | Soliman 2008 (2.83) |
+| `inventory_change` **[NA for financials]** | ΔInventory | avgAT | Thomas-Zhang 2002 (6.24) |
+| `inventory_growth` **[NA for financials]** | Inventory_t / Inventory_{t-1} - 1 | -- | Belo-Lin 2012 (7.19) |
+| `ppe_inv_change` **[NA for financials]** | Δ(PPEgross + Inventory) | lagAT | Lyandres 2008 (7.86) |
+| `equity_growth` | Equity_t / Equity_{t-1} - 1 (both > 0) | -- | Lockwood-Prombutr 2010 (4.26) |
+| `gr_ltnoa` | ΔLTNOA, LTNOA = NOA - WC | avgAT | Fairfield 2003 (3.73) |
+
+---
+
+## 12. External Financing Family (7 indicators, Wave 2)
+
+Annual financing-flow indicators from the OpenAP expansion (full
+references and construction notes in docs/RESEARCH_INDICATORS.md, WAVE 2).
+Proceeds*/Repayments* cash-flow tags are positive; buybacks/dividends
+enter as absolute values. avgAT = average total assets.
+
+| Indicator | Formula | Source study (CZ t-stat) |
+|---|---|---|
+| `net_debt_finance` | (debt issuance - repayment + ΔSTD) / avgAT | Bradshaw 2006 (7.70) |
+| `net_equity_finance` | (equity issuance - \|buybacks\| - \|dividends\|) / avgAT | Bradshaw 2006 (5.40) |
+| `xfin` | net_debt_finance + net_equity_finance | Bradshaw 2006 (4.84) |
+| `composite_debt_issuance` | log(total debt_t / total debt_{t-5}) | Lyandres 2008 (5.19) |
+| `share_iss_1y` | split-adjusted shares_t / shares_{t-1} - 1 | Pontiff-Woodgate 2008 (4.97) |
+| `share_iss_5y` | split-adjusted shares_t / shares_{t-5} - 1 | Daniel-Titman 2006 (4.32) |
+| `net_payout_yield` | (\|dividends\| + \|buybacks\| - equity issuance) / market cap | Boudoukh 2007 (2.57) |
+
+Split adjustment: a share count's basis is the split state at its filed
+date; the adjustment multiplies the current count by the product of split
+ratios between the two rows' filed dates (empty window when both survive
+from one filing). Tickers without cached split events (cache/splits) are
+computed unadjusted. `net_payout_yield` is price-sensitive and updates
+daily in the timeseries layer.
+
+---
+
+## 13. Quarterly Seasonal-Surprise Family (6 indicators, Wave 3)
+
+Quarterly indicators from the OpenAP expansion (full references and
+construction notes in docs/RESEARCH_INDICATORS.md, WAVE 3). Built on a
+label-free standalone-quarter panel: duration rows are grouped by
+period_start and classified by reported duration (3mo / 2Q / 3Q / FY with
+NA gaps); a directly reported 3-month row wins, otherwise the standalone
+value is recovered by differencing consecutive YTD rows (Q4 = FY - Q3ytd).
+Seasonal lags are matched by period_end distance (4-quarter gap must fall
+in [330, 400] days), never by fiscal labels. `q-4` = same quarter one
+year earlier.
+
+| Indicator | Formula | Source study (CZ t-stat) |
+|---|---|---|
+| `ch_tax` | (tax_q - tax_{q-4}) / total assets at q-4 | Thomas-Zhang 2011 (9.50) |
+| `num_earn_increase` | consecutive quarters with NI_q > NI_{q-4}, OpenAP-exact | Loh-Warachka 2012 (6.75) |
+| `revenue_surprise` | standardized seasonal surprise in revenue per share | Jegadeesh-Livnat 2006 (5.99) |
+| `earnings_surprise` | standardized seasonal surprise in diluted EPS (SUE) | Foster-Olsen-Shevlin 1984 (4.94) |
+| `earnings_consistency` | mean annual EPS growth over 5y, sign-consistent only | Alwathainani 2009 (2.51) |
+| `roaq` | NI_q / total assets at q-1 | Balakrishnan 2010 (5.90) |
+
+Surprise standardization (OpenAP-exact): surprise = seasonal diff minus
+the mean of the prior 8 seasonal diffs (available-case), divided by the
+sd of the prior 8 drift-adjusted surprises (at least 2 required; sd at or
+below the floor -> NA). Per-share series are normalized to the current
+split basis before differencing. All quarterly values reflect the latest
+standalone quarter filed as of the snapshot date. Computed for
+financials (taxes, NI, EPS are well-defined for banks); revenue-based
+values degrade to NA where bank revenue tags are sparse.
+`earnings_consistency` is NA by construction for firms whose growth sign
+flipped year-over-year or whose EPS ratio exceeds 6 in magnitude
+(Alwathainani's consistency filter, ~40-60% of the cross-section at any
+snapshot).
+
+`revenue_growth_qoq` (section 4) is also computed from this panel since
+Wave 3: latest standalone quarter vs the one before it, matched by
+period_end.
+
+---
+
+## 14. Levels Family (19 indicators, Wave 4)
+
+Current-year level ratios from the OpenAP expansion (full references,
+guards and OpenAP deviations in docs/RESEARCH_INDICATORS.md, W4.1-W4.13).
+ME = market cap on the filing date. che = cash + short-term investments
+(STI zero-if-na, cash required per the C-3 coverage rule). ND = FINL -
+che with FINL = LTD + STD + preferred (>= 1 component reported). LT =
+total liabilities (identity fallback AT - CEQ - NCI). Component
+resolution is shared with the timeseries stub layer via
+.level_components() so the two paths cannot drift.
+
+| Indicator | Formula | Source study (CZ t-stat) |
+|---|---|---|
+| `rd_me` | R&D / ME (NA when R&D unreported) | Chan 2001 (5.82) |
+| `ebm` | (BE + net cash) / (ME + net cash) | Penman 2007 (4.14) |
+| `bpebm` | BE/ME - ebm | Penman 2007 (2.83) |
+| `cf_me` | (NI + depreciation) / ME | LSV 1994 (4.04) |
+| `cfp` | CFO / ME | Desai 2004 (2.18) |
+| `net_debt_price` | ND / ME | Penman 2007 (3.88) |
+| `tang` | (che + .715 REC + .547 INV + .535 PPE gross) / AT | Hahn-Lee 2009 (3.67) |
+| `tax_to_book` | (tax / statutory rate) / NI; = 1 if tax > 0, NI <= 0 | Lev-Nissim 2004 (3.52) |
+| `effective_tax_rate` | tax / pretax income | (database level) |
+| `am` | AT / ME | Fama-French 1992 (3.50) |
+| `book_leverage` | AT / BE, BE > 0 | Fama-French 1992 (3.30) |
+| `leverage_mkt` | total liabilities / ME | Bhandari 1988 (2.64) |
+| `cash_prod` | (ME - AT) / che | Chandrashekar-Rao (3.40) |
+| `oper_prof` | (rev - COGS - SGA - interest) / BE, all required, BE > 0 | Fama-French 2006 (3.00) |
+| `cash_assets` | che / AT | Palazzo 2012 (2.97) |
+| `op_leverage` | (COGS + SGA) / AT, SGA zero-if-na | Novy-Marx 2011 (2.50) |
+| `payout_yield` | (\|dividends\| + \|buybacks\|) / ME | Boudoukh 2007 (2.27) |
+| `salecash` | revenue / che | Ou-Penman (placebo) |
+| `depr_rate` | depreciation / PPE net | (placebo) |
+
+Statutory rate for `tax_to_book`: 35% for fiscal years ending on or
+before 2017-12-31, TCJA section 15 day-weighted blend for years
+straddling 2018-01-01 (true fiscal-year start from the prior row when
+available), 21% after. Ten indicators (rd_me, ebm, bpebm, cf_me, cfp,
+net_debt_price, am, leverage_mkt, cash_prod, payout_yield) are
+price-sensitive and update daily in the timeseries layer from the
+Wave 4 stubs.
+
+---
+
+## 15. Investment Family (10 indicators, Wave 4)
+
+Lagged and industry-adjusted constructions (references and deviations in
+docs/RESEARCH_INDICATORS.md, W4.14-W4.22). Lag rows are label-free and
+gap-guarded (.lag_fy_row). g2(x) denotes the Abarbanell-Bushee growth:
+base = mean of the two prior years, 1-year fallback when unavailable.
+
+| Indicator | Formula | Source study (CZ t-stat) |
+|---|---|---|
+| `pchdepr` | %change in (depreciation / PPE net) | (placebo) |
+| `grcapx` | (capex_t - capex_{t-2}) / capex_{t-2}, base > 0 | Anderson-GF 2006 (4.96) |
+| `grcapx3y` | 3 capex_t / (capex_{t-1} + capex_{t-2} + capex_{t-3}) | Anderson-GF 2006 (4.77) |
+| `pct_tot_acc` | (dWC + dNCO + dFIN) / \|NI\| | Hafzalla 2011 (4.70) |
+| `ch_asset_turnover` | (rev/avgNOA)_t - (rev/avgNOA)_{t-1}, negative -> NA | Soliman 2008 (3.77) |
+| `gr_sale_to_gr_inv` | g2(sales) - g2(inventory) | Abarbanell-Bushee 1998 (3.30) |
+| `surprise_rd` | 1 if R&D growth > 5% and R&D/AT growth > 5% | Eberhart 2004 (3.00) |
+| `investment` | (capex/rev)_t / mean over t, t-1, t-2 (>= 2 years, rev >= $10M) | Titman 2004 (2.28) |
+| `rd_cap` | (R&D + .8 lag1 + .6 lag2 + .4 lag3 + .2 lag4) / AT, 5 years required | Li 2011 (2.32) |
+| `ch_inv_ia` | g2(capex) - sector mean of g2(capex) | Abarbanell-Bushee 1998 (5.50) |
+
+`ch_inv_ia` is finalized at the cross-section stage: the compute layer
+emits the firm-level g2(capex) ingredient and every cross-section
+assembly point (compute_cross_section, load_daily_cross_section, the
+feature layer's extraction) calls industry_adjust_cross_section to
+subtract the equal-weighted sector mean. When the sector lookup is
+unavailable the daily reader degrades the column to NA rather than
+serving the un-demeaned ingredient. Per-ticker daily parquets store the
+ingredient by design. `rd_cap` zero-fills missing R&D within existing
+years (non-R&D firms get 0) but requires all five fiscal-year rows.
+
+---
+
+## 16. Mohanram Family (9 indicators, Wave 5)
+
+Mohanram (2005 RAS) G-score components, stored individually like the
+Piotroski family (references and OpenAP deviations in
+docs/RESEARCH_INDICATORS.md, W5.1-W5.5). Each median component is a 0/1
+binary formed at the CROSS-SECTION stage against the within-finviz-sector
+median (>= 3 non-NA contributors; "Unknown" sector gives NA); the
+compute layer emits raw ingredients in hidden ing_ms_* columns and
+industry_adjust_cross_section binarizes them. Per-ticker timeseries
+layers therefore carry NA finals plus the ingredients; only ms_accrual
+(no median needed) is live per ticker. avgAT = (AT_t + AT_{t-1})/2.
+
+| Indicator | 1 when | Ingredient |
+|---|---|---|
+| `ms_roa` | NI/avgAT > sector median | FY level |
+| `ms_cfroa` | CFO/avgAT > sector median | FY level |
+| `ms_accrual` | CFO > NI (firm-level, no median) | final per ticker |
+| `ms_roa_vol` | sd(quarterly NI_q/AT_q) < sector median | 16q window, min 6 |
+| `ms_rev_vol` | sd(quarterly rev_q/rev_{q-4}) < sector median | 16q window, min 6 |
+| `ms_rd` | R&D/AT_{t-1} > sector median | zero-filled |
+| `ms_capex` | capex/AT_{t-1} > sector median | FY level |
+| `ms_adv` | advertising/AT_{t-1} > sector median | zero-filled |
+| `ms_score` | sum of the 8 components (0-8), NA if any NA | -- |
+
+CZ replication t-stat for the composite: 5.44. Deviations from OpenAP
+(documented in the research doc): full-universe sector medians instead
+of the lowest-B/M-quintile 2-digit-SIC medians (the largest deviation);
+FY filing-frequency levels instead of TTM sums for m1-m3/m6-m8; the raw
+0-8 sum is stored instead of the {1..6} clamp; the Stata
+missing=+infinity artifact is not replicated (missing inputs give NA
+components). Advertising coverage ~48%: the zero-fill keeps `ms_adv`
+computable, but sector medians of adv/AT sit at/near 0, so it largely
+degenerates to "discloses advertising at all". Like the Piotroski f_*
+binaries, the 8 components z-score to all-NA (binary MAD = 0) -- use
+the raw file; `ms_score` z-scores normally.
+
+---
+
+## 17. Distress Family (2 indicators, Wave 5)
+
+Bankruptcy-risk composites per Dichev (1998) (W5.6-W5.8). Higher =
+more distressed for `o_score`; higher = safer for `z_score`. Both are
+**NA for Financial, Utilities and Real Estate** (OpenAP excludes SIC
+4000-4999 and > 5999; finviz sectors cannot isolate transports).
+log(AT) uses AT in millions (Compustat units) so raw levels match the
+literature; the units and the omitted GNP deflator are constant within
+a snapshot, so cross-sectional ordering is exact.
+
+| Indicator | Formula | Source study (CZ t-stat) |
+|---|---|---|
+| `o_score` | -1.32 - 0.407 log(AT) + 6.03 LT/AT - 1.43 WC/AT + 0.076 LCT/ACT - 1.72 1{LT>AT} - 2.37 NI/AT - 1.83 CFO/LT + 0.285 1{NI_t + NI_{t-1} < 0} - 0.521 (NI_t - NI_{t-1})/(\|NI_t\| + \|NI_{t-1}\|) | Ohlson 1980 via Dichev (3.39) |
+| `z_score` | 1.2 WC/AT + 1.4 RE/AT + 3.3 (NI + interest + tax)/AT + 0.6 ME/LT + revenue/AT | Altman 1968 via Dichev (placebo, 1.20) |
+
+`o_score` notes: FFO = CFO (the post-1987 Compustat fallback -- our
+whole sample); the two-year-loss dummy is the replicated SUM-negative
+form; NA when NI_t = NI_{t-1} = 0 (CHIN denominator); OpenAP's
+top-decile binary discretization is not applied (continuous score
+stored). `z_score` notes: EBIT proxy = NI + interest (zero-if-na) +
+tax expense; leverage term uses total LIABILITIES; price-sensitive
+(recomputed daily from `stub_z_prefix` + 0.6 ME/LT; the stub is NA'd
+at fund-layer build for masked sectors). `o_score` is price-free and
+lives in the timeseries fund layer.
+
+---
+
+## 18. Structure Family (3 indicators, Wave 5)
+
+Industry concentration and financing-constraint indices (W5.10-W5.13).
+KZ and WW are OpenAP Placebos, stored as database quantities.
+
+| Indicator | Formula | Source study (CZ t-stat) |
+|---|---|---|
+| `herf` | within-industry HHI of revenue shares, mean over current + up to 2 lagged FYs | Hou-Robinson 2006 (2.30) |
+| `kz_index` | -1.002 (NI+DP)/PPE + 0.283 (AT + ME - BE)/AT + 3.139 debt/(debt+BE) - 39.368 \|div\|/PPE - 1.315 che/PPE | Lamont 2001 (placebo) |
+| `ww_index` | -0.091 (NI+DP)/(4 AT) - 0.062 1{div>0} + 0.021 LTD/AT - 0.044 log(AT) + 0.102 (industry rev growth)/4 - 0.035 (firm rev growth)/4 | Whited-Wu 2006 (placebo) |
+
+`herf` is cross-section-only: computed per finviz INDUSTRY (~120
+groups) at the assembler stage from `revenue_raw` + hidden lagged
+revenues (ing_rev_lag1/2); a year contributes only with
+>= max(2, half the current-year contributor count) firms, so
+singleton industries and sparsely-lagged years are NA. NA for
+Utilities (OpenAP's permanent SIC-49 exclusion). Concentration is
+relative to S&P 500 large-cap peers, not the full market. `kz_index`:
+txdb (deferred taxes) not fetched, omitted; price-sensitive
+(stub_kz_prefix + 0.283 ME/AT). `ww_index`: firm terms travel as
+ing_ww_partial; the industry sales-growth term (aggregate revenue of
+the >= 2 firms with both current and lag-1 revenue) is added at the
+cross-section stage; OpenAP's 1-month panel-lag artifact in the firm
+growth term is not replicated (proper FY-over-FY growth used).
+
+---
+
 ## XBRL Tag Alias Map
 
 Each canonical concept maps to multiple XBRL tags. First match wins during
@@ -581,10 +854,36 @@ resolution. This handles variation in how companies report the same item.
 | capex | PaymentsToAcquirePropertyPlantAndEquipment, PaymentsToAcquireProductiveAssets |
 | buybacks | PaymentsForRepurchaseOfCommonStock, PaymentsForRepurchaseOfEquity |
 | dividends_paid | PaymentsOfDividendsCommonStock, PaymentsOfDividends, Dividends |
+| public_float | EntityPublicFloat (dei namespace) |
+
+### Phase 0 expansion concepts (fetched, not yet consumed)
+
+Added for the OpenAP indicator expansion
+(docs/research/09_openap_indicator_expansion.md). These concepts are present
+in `cache/fundamentals/` parquet files; the indicators that consume them land
+in Waves 1-5.
+
+| Concept | XBRL tags (priority order) | Notes |
+|---------|---------------------------|-------|
+| income_tax_expense | IncomeTaxExpenseBenefit | |
+| pretax_income | IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest, IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments | Domestic-only tag deliberately excluded (understates multinationals). Fallback: tax + net income |
+| advertising | AdvertisingExpense, MarketingAndAdvertisingExpense | Sparse (~55% of tickers); NA-heavy expected |
+| ppe_net | PropertyPlantAndEquipmentNet, PropertyPlantAndEquipmentAndFinanceLeaseRightOfUseAssetAfterAccumulatedDepreciationAndAmortization | Second tag includes ROU assets post-ASC 842 |
+| ppe_gross | PropertyPlantAndEquipmentGross, PropertyPlantAndEquipmentAndFinanceLeaseRightOfUseAssetBeforeAccumulatedDepreciationAndAmortization | |
+| st_investments | ShortTermInvestments, MarketableSecuritiesCurrent, AvailableForSaleSecuritiesCurrent | Missing usually means none held; treat as 0 |
+| lt_investments | LongTermInvestments, MarketableSecuritiesNoncurrent, AvailableForSaleSecuritiesNoncurrent, EquityMethodInvestments | Aggregate ranked above components |
+| retained_earnings | RetainedEarningsAccumulatedDeficit | |
+| preferred_stock | PreferredStockValue, PreferredStockValueOutstanding | Missing means none outstanding; treat as 0 |
+| goodwill | Goodwill | Kept separate from intangibles to allow summing |
+| intangibles | IntangibleAssetsNetExcludingGoodwill, FiniteLivedIntangibleAssetsNet | Ex-goodwill only; IncludingGoodwill aggregate excluded |
+| minority_interest | MinorityInterest | Missing means no NCI; treat as 0 |
+| debt_issuance | ProceedsFromIssuanceOfLongTermDebt, ProceedsFromIssuanceOfSeniorLongTermDebt, ProceedsFromIssuanceOfLongTermDebtAndCapitalSecuritiesNet, ProceedsFromIssuanceOfDebt, ProceedsFromDebtNetOfIssuanceCosts, ProceedsFromDebtMaturingInMoreThanThreeMonths | Long-term focus; short-term via short_term_debt delta. YTD-cumulated in quarterly filings (like operating_cashflow) |
+| debt_repayment | RepaymentsOfLongTermDebt, RepaymentsOfSeniorDebt, RepaymentsOfLongTermDebtAndCapitalSecurities, RepaymentsOfDebtAndCapitalLeaseObligations, RepaymentsOfDebt, RepaymentsOfDebtMaturingInMoreThanThreeMonths | Same YTD caveat |
+| equity_issuance | ProceedsFromIssuanceOfCommonStock, ProceedsFromIssuanceOrSaleOfEquity, ProceedsFromIssuanceOfSharesUnderIncentiveAndShareBasedCompensationPlansIncludingStockOptions, ProceedsFromStockOptionsExercised | One line wins per period; treat as lower bound on total issuance. Same YTD caveat |
 
 ---
 
-## Financial Sector Exclusions
+## Sector Exclusions
 
 Banks and financial institutions lack standard COGS, inventory, and operating
 income structure. The following indicators are set to NA for tickers classified
@@ -595,21 +894,55 @@ under the "Financial" sector:
 - `cash_based_op` (Cash-Based Operating Profitability)
 - `capex_depreciation`
 - `inventory_sales_change`
+- `inventory_change`, `inventory_growth`, `ppe_inv_change` (Wave 1)
+- `tang`, `op_leverage`, `ch_asset_turnover`, `gr_sale_to_gr_inv`,
+  `net_debt_price` (Wave 4; net_debt_price follows OpenAP's SIC
+  6000-6999 exclusion and is additionally stub-masked in the daily
+  layer and re-masked with current sector in load_daily_cross_section)
+- `o_score`, `z_score` (Wave 5)
 
-During z-scoring, these indicators are computed excluding financial sector firms,
-so the cross-sectional distribution is not distorted by forced NAs.
+Since Wave 5 the mask is a sector -> indicators map
+(`.SECTOR_NA_INDICATORS` in indicator_compute.R) rather than
+Financial-only:
+
+- **Financial**: the full list above (15 indicators)
+- **Utilities**: `o_score`, `z_score`, `herf` (OpenAP excludes SIC
+  4000-4999 for the distress scores and SIC 49xx permanently for Herf)
+- **Real Estate**: `o_score`, `z_score` (part of OpenAP's SIC > 5999
+  exclusion)
+
+During z-scoring, masked indicators are computed excluding the masked
+sector's firms, so the cross-sectional distribution is not distorted by
+forced NAs. Price-sensitive masked indicators (`net_debt_price`,
+`z_score`) are additionally stub-masked at fund-layer build
+(`.MASKED_STUB_OF`) and re-masked with the current sector at every
+cross-section assembly point.
 
 ---
 
 ## Z-Scoring Method
 
-Cross-sectional z-scores are computed per indicator:
+Cross-sectional z-scores are computed per indicator using a robust pipeline
+(`.robust_zscore` in `indicator_compute.R`); this is the default output of
+`assemble_snapshot` (`zscore_mode = "cross_section"`):
 
-1. Compute mean and standard deviation across all non-NA values
-   (excluding financials for the five financial-NA indicators)
-2. Z = (value - mean) / SD
-3. Winsorize at [-3, 3]
-4. Original NAs remain NA
+1. Winsorize the raw values at the per-snapshot p2.5 / p97.5 percentiles
+   (excluding financials for the five financial-NA indicators), so fat tails
+   cannot contaminate the location/scale estimates.
+2. Standardize with the robust center and scale:
+   Z = (value - median) / (1.4826 * MAD). Under a Gaussian null this equals
+   (value - mean) / SD, but it is not distorted by skew or outliers. Note the
+   median -- not the mean -- of the resulting z-scores sits at ~0.
+3. Clip the z-scores at [-5, 5] by default (`clip` argument; pass `NULL` to
+   disable, or `c(-3, 3)` for the tighter legacy bound). See
+   `docs/research/06_indicator_verification_report.md` sec. 12a for the
+   clip-default rationale.
+4. Original NAs remain NA. Negative denominators are preserved (not NA-masked)
+   so distress signals propagate.
 
 Minimum 3 non-NA observations required; otherwise the entire indicator column
 is set to NA for that cross-section.
+
+An opt-in `zscore_mode = "expanding_window"` variant pools winsorized values
+across all prior snapshots plus the current one for the location/scale estimate;
+it is a research variant, not the default output contract.

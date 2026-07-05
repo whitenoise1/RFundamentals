@@ -3,7 +3,7 @@
 # ============================================================================
 #
 # Point-in-time fundamental database for S&P 500 constituents.
-# 57 indicators x ~500 tickers x daily frequency, from free public data.
+# 81 indicators x ~500 tickers x daily frequency, from free public data.
 #
 # This file is the complete reference: function signatures, arguments, and
 # copy-paste examples. Run any example line in an interactive R session.
@@ -60,7 +60,7 @@ source("R/timeseries_builder.R")
 
 # --- load_ticker_timeseries() -----------------------------------------------
 # Returns: data.table with one row per trading day.
-#   Columns: date, price, fiscal_year, filed_date, + 57 indicator columns.
+#   Columns: date, price, fiscal_year, filed_date, + 81 indicator columns.
 #   Price-sensitive indicators (P/E, P/B, market_cap, ...) update daily.
 #   Fundamental indicators (ROE, margins, ...) carry forward until next filing.
 #
@@ -76,7 +76,7 @@ source("R/timeseries_builder.R")
 # Returns: list with two elements:
 #   $raw      data.table [tickers x indicators]. One row per ticker.
 #             Columns: date, ticker, sector, industry, price, fiscal_year,
-#             filed_date, + 57 indicator columns.
+#             filed_date, + 81 indicator columns.
 #   $zscored  data.table [tickers x indicators]. Cross-sectional z-scores.
 #             Mean ~0, SD ~1, winsorized at [-3, 3].
 #   If zscore=FALSE, returns the raw data.table directly (not a list).
@@ -95,11 +95,24 @@ source("R/timeseries_builder.R")
 #   Columns: concept, value, period_end, filed, form, fiscal_year, period_type.
 #   This is the raw material before any indicator computation.
 #
+# The cache stores reporting VINTAGES (one row per concept x period x filing),
+# so re-reported periods keep their original filed dates. By default the
+# reader collapses vintages to the latest view (one row per period).
+#
 # Arguments:
 #   ticker     Character. Ticker symbol. Required.
 #   cik        Character or NULL. 10-digit CIK. Optional (auto-detected).
 #   cache_dir  Character. Fundamentals cache directory.
 #              Default "cache/fundamentals".
+#   as_of      Date or NULL. Point-in-time view: rows filed after this date
+#              are dropped before collapsing, so each period resolves to the
+#              value that was public on that date. NULL (default) = latest.
+#   vintages   Logical. TRUE returns the raw vintage table. Default FALSE.
+#
+# Examples:
+#   get_fundamentals("ORCL")                        # latest view
+#   get_fundamentals("ORCL", as_of = "2026-03-31")  # as known on that date
+#   get_fundamentals("ORCL", vintages = TRUE)       # every filing vintage
 
 
 # --- list_timeseries_tickers() ----------------------------------------------
@@ -111,12 +124,16 @@ source("R/timeseries_builder.R")
 
 
 # --- get_indicator_names() --------------------------------------------------
-# Returns: character vector of 57 indicator names in canonical order.
+# Returns: character vector of 81 indicator names in canonical order.
 #   Groups: valuation (8), profitability (6), growth (5), leverage (5),
-#   efficiency (3), cash flow quality (3), shareholder return (3), size (3),
-#   tier 1 research (15), tier 2 research (6).
+#   efficiency (3), cash flow quality (3), shareholder return (3), size (5),
+#   tier 1 research (15), tier 2 research (6),
+#   balance-sheet change / Wave 1 (15), external financing / Wave 2 (7).
 #
 # Arguments: none.
+#
+# Family subsets via indicator_names(), e.g.:
+#   indicator_names("balance_sheet_change")   # the 15 Wave 1 indicators
 
 
 # --- build_timeseries() -----------------------------------------------------

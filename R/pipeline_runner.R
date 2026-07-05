@@ -108,6 +108,18 @@ run_full_build <- function(start_date      = "2010-03-31",
     force_refresh   = force_refresh
   )
 
+  # -- Build multi-dimensional features (if feature_standardizer is loaded) --
+  if (exists("build_all_features", mode = "function")) {
+    message("\n  building multi-dimensional features...")
+    tryCatch(
+      build_all_features(from_date = start_date, to_date = end_date,
+                         sector_path = sector_path),
+      error = function(e) {
+        warning(sprintf("Feature build failed: %s", e$message), call. = FALSE)
+      }
+    )
+  }
+
   elapsed <- round(as.numeric(difftime(Sys.time(), t0, units = "mins")), 1)
   message(sprintf("\nrun_full_build: complete in %.1f minutes", elapsed))
 
@@ -153,6 +165,16 @@ run_daily_update <- function(date            = Sys.Date(),
     output_dir      = output_dir,
     prefetch_prices = TRUE
   )
+
+  # Update multi-dimensional features (if feature_standardizer is loaded)
+  if (exists("update_features", mode = "function")) {
+    tryCatch(
+      update_features(through_date = date, sector_path = sector_path),
+      error = function(e) {
+        warning(sprintf("Feature update failed: %s", e$message), call. = FALSE)
+      }
+    )
+  }
 
   elapsed <- round(as.numeric(difftime(Sys.time(), t0, units = "mins")), 1)
   message(sprintf("run_daily_update: done in %.1f minutes", elapsed))

@@ -28,3 +28,16 @@ run_snapshot.R
 
 # Claude Code local config
 .claude/
+
+# r_F fundamental regime feature module (private, unpublished)
+# Note: cache/rF/ and cache/prices/SPY_* are already covered by cache/ above.
+R/feature_compute_rF.R
+run_rF_features.R
+demo_rF.R
+tests/test_feature_compute_rF.R
+tests/test_feature_compute_rF_integration.R
+tools/diag_rF_smoke.R
+tools/gate_test_rF_shape.R
+tools/visualize_rF_outputs.R
+docs/PLAN_rF_MODULE.md
+docs/RF_MODULE_TECHNICAL_REFERENCE.md

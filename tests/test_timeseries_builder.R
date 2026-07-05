@@ -59,14 +59,14 @@ test("all price-sensitive are valid indicator names",
 test("all fundamental-only are valid indicator names",
      all(.FUNDAMENTAL_INDICATORS %in% all_indicators))
 
-test("12 price-sensitive indicators",
-     length(.PRICE_SENSITIVE_INDICATORS) == 12)
+test("25 price-sensitive indicators (13 + 10 Wave 4 + 2 Wave 5)",
+     length(.PRICE_SENSITIVE_INDICATORS) == 25)
 
-test("45 fundamental-only indicators",
-     length(.FUNDAMENTAL_INDICATORS) == 45)
+test("105 fundamental-only indicators (130 - 25 price-sensitive)",
+     length(.FUNDAMENTAL_INDICATORS) == 105)
 
-test("11 stubs (no unused stubs)",
-     length(.STUB_NAMES) == 11)
+test("22 stubs (12 + 8 Wave 4 + 2 Wave 5 prefixes)",
+     length(.STUB_NAMES) == 22)
 
 test("all stub names start with stub_",
      all(grepl("^stub_", .STUB_NAMES)))
@@ -132,8 +132,8 @@ test("dividend_yield = 15e9 / 150e9",
 test("buyback_yield = 80e9 / 150e9",
      abs(ps_result$buyback_yield - (80e9 / 150e9)) < 0.0001)
 
-test("returns data.table with 12 columns",
-     is.data.table(ps_result) && ncol(ps_result) == 12)
+test("returns data.table with 25 columns (13 + 10 Wave 4 + 2 Wave 5)",
+     is.data.table(ps_result) && ncol(ps_result) == 25)
 
 
 # -- 3. Vectorized: multiple elements --
@@ -160,7 +160,7 @@ test("vectorized: 3 rows returned",
 test("vectorized: NA price -> NA market_cap",
      is.na(ps_vec$market_cap[3]))
 
-test("vectorized: NA price -> NA for all 12 indicators",
+test("vectorized: NA price -> NA for all 13 indicators",
      all(is.na(as.numeric(ps_vec[3]))))
 
 test("vectorized: row 1 market_cap = 100 * 1e6",
@@ -583,7 +583,18 @@ if (!master_exists || !sector_exists) {
       nd      = stubs$stub_net_debt,
       div     = stubs$stub_dividends,
       buy     = stubs$stub_buybacks,
-      eps_g   = fund_only_result[["eps_growth_yoy"]]
+      eps_g   = fund_only_result[["eps_growth_yoy"]],
+      iss     = stubs$stub_equity_issuance,
+      rnd     = stubs$stub_rnd,
+      at_v    = stubs$stub_assets,
+      lt_v    = stubs$stub_liabilities,
+      cf_num  = stubs$stub_cf_num,
+      cfo     = stubs$stub_cfo,
+      che     = stubs$stub_che,
+      ncash   = stubs$stub_net_cash,
+      ndp_num = stubs$stub_ndp_num,
+      z_prefix  = stubs$stub_z_prefix,
+      kz_prefix = stubs$stub_kz_prefix
     )
 
     # All 12 price-sensitive indicators must match

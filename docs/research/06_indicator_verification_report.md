@@ -8,6 +8,17 @@ Last updated: 2026-04-20 (C-1 rollout complete: universe sweep + 2 new
 non-conformer classes resolved, 13 tickers rebuilt, alias map expanded)
 Scope: formula correctness (constitution) and code replication (implementation fidelity)
 
+> **Status note (2026-07-05).** Historical review of the original
+> 57-indicator set; the library has since grown to 130 indicators
+> across 18 families (OpenAP Waves 1-5, 09_openap_indicator_expansion.md)
+> and the wave indicators are not covered here. Still current: the ROIC
+> WARN (NI instead of NOPAT) remains open, and the section-12 robust
+> z-score pipeline (winsorize p2.5/97.5, median/MAD*1.4826, clip [-5,5])
+> is still in force. Superseded detail: financial-NA masking is now the
+> sector map .SECTOR_NA_INDICATORS (Financial / Utilities / Real
+> Estate), of which .FINANCIAL_NA_INDICATORS is the Financial entry.
+> Section 16's working-tree / session-handoff state is obsolete.
+
 ---
 
 ## Executive Summary
@@ -31,25 +42,31 @@ was checked on three axes:
 
 ### Post-fix status (2026-04-20)
 
-Of the 5 WARN items, **3 are now RESOLVED in code** (C-1, C-2, C-5). The
-remaining 2 WARNs (C-3 derived-quantity NA handling, ROIC numerator being
-NI instead of NOPAT) are unchanged from the original report and are
-carried forward as follow-ups.
+Of the 5 WARN items, **4 are now RESOLVED in code** (C-1, C-2, C-3, C-5).
+The only remaining WARN is ROIC's NI-instead-of-NOPAT numerator.
+
+Item #6 from §14 (pe_trailing sign guard) was re-framed at user direction:
+the asymmetry is resolved by removing positive-denominator guards across
+the indicator set (the sign-preservation principle) rather than NA-ing out
+negative P/E. Smart winsorization (cross-sectional p2.5/p97.5) and
+expanding-window median/MAD standardization tame the fat tails without
+censoring the distress signal.
 
 | Finding | Original | Current | Notes |
 |---------|----------|---------|-------|
 | C-1 fcf_stability YTD cumulation | WARN | **RESOLVED**        | 13 tickers rebuilt + universe sweep done + 2 new non-conformer classes (Kroger 16-week Q1, discontinued-ops CFO alias) fixed. See `07_cfo_cumulation_issue.md` §6 |
 | C-2 Piotroski NA handling        | WARN | **RESOLVED**        | Implemented + tested |
-| C-3 derive_quantities nafill(0)  | WARN | WARN (unchanged)    | Not yet addressed |
+| C-3 derive_quantities nafill(0)  | WARN | **RESOLVED**        | NA-vs-zero split implemented in `.derive_quantities` + EV fallback dropped + `ic` NA-propagates cash (2026-04-20) |
 | C-4 avg vs end-of-period denom   | NOTE | NOTE (unchanged)    | Intentional |
 | C-5 interest_coverage alias      | WARN | **RESOLVED**        | Alias dropped + cached-row filter |
 | ROIC = NI / IC (not NOPAT)       | WARN | WARN (unchanged)    | Not yet addressed |
+| §14 #6 pe_trailing sign guard    | NOTE | **RESOLVED** (reframed) | All positive-denominator guards removed across the indicator set. Negative multiples (P/B, P/FCF, EV/EBITDA, ROE, ROIC, debt/equity, net_debt/EBITDA, payout_ratio) now propagate as distress signals. Fat-tail protection moved to a cross-sectional p2.5/p97.5 winsorization + expanding-window median/MAD z-score |
 
 ### Cross-cutting findings (details in Section 12)
 
 - **C-1 (FULLY RESOLVED, 2026-04-20)** `fcf_stability` uses quarterly `operating_cashflow`. US 10-Q filings report CFO on a year-to-date (YTD) cumulative basis, not stand-alone-quarter basis. If `fundamental_fetcher.R` does not de-cumulate, the SD calculation is dominated by the YTD growth within each fiscal year, not true CFO volatility. **Fix:** compute-time YTD de-cumulator (`.decumulate_cfo` in `R/indicator_compute.R`) + fetcher dedup duration-match tie-break (`R/fundamental_fetcher.R`). Full diagnostic + fix documented in `docs/research/07_cfo_cumulation_issue.md`. Rollout: 13 tickers rebuilt (AMZN, NVDA, QCOM, SJM, LKQ, ANF, HRB, FMC, TFX, ITT, DRI, KR, AAP). Full-universe sweep (`tools/diag_cfo_universe.R`) surfaced two additional classes, both fixed: (a) Kroger 16/12/12/12 fiscal calendar -- Q1 3mo band extended from 60-110 to 60-120; (b) 4 tickers filing the `NetCashProvidedByUsedInOperatingActivitiesContinuingOperations` variant -- alias added. Post-fix: 459/638 CLEAN (71.9%), 0 ANOMALOUS_TICKER, 1 IFRS-only blackout (SII).
 - **C-2 (RESOLVED, 2026-04-20)** `.compute_piotroski` returns 0 (not NA) when prior-year inputs are missing. Newly added S&P 500 names with only one year of EDGAR data get a downward-biased `f_score`. Policy should be: NA-mask the component, and NA-mask `f_score` if any component is NA (or switch to a robust subscore with explicit denominator). **Fix:** `.bin()` helper returns `NA_integer_` when inputs missing; `f_score` is `NA_integer_` if any component is NA. Documented in `docs/INDICATORS.md`; unit-tested.
-- **C-3 (WARN)** `.derive_quantities` uses `nafill(.., 0)` for several inputs (depreciation, capex, long-term debt, short-term debt, cash). When the base concept is missing, the derived quantity silently becomes partially fabricated (e.g., CapEx = 0 -> FCF = OpCF; LTD = 0 and STD = 0 -> total_debt = 0 for firms that simply did not report any debt tag at that fiscal_year). This is structurally different from "the firm has no debt/capex".
+- **C-3 (RESOLVED, 2026-04-20)** `.derive_quantities` previously used `nafill(.., 0)` for several inputs (depreciation, capex, long-term debt, short-term debt, cash). When the base concept was missing, the derived quantity silently became partially fabricated (e.g., CapEx = 0 -> FCF = OpCF; LTD = 0 and STD = 0 -> total_debt = 0 for firms that simply did not report any debt tag at that fiscal_year). This was structurally different from "the firm has no debt/capex". **Fix:** per-quantity semantic in `.derive_quantities`: `ebitda` is NA when depreciation absent, `fcf` is NA when capex absent, `total_debt` is NA when both LTD and STD absent (one-present-one-NA retained as zero to match filing practice), `net_debt` is NA when `total_debt` or cash is NA. EV fallback in `.compute_valuation` (which substituted total_debt when net_debt was NA -- same antipattern) also dropped. Invested capital in `.compute_profitability` stops silently treating missing cash as zero. Unit-tested (12 new tests in `tests/test_indicator_compute.R`).
 - **C-4 (PASS-WITH-NOTE)** ROA, ROIC, asset_turnover, inventory_turnover, receivables_turnover, GP/A all use end-of-period denominators rather than the academic convention of average ((t + t-1)/2). Internally consistent with the docs; but cross-paper comparability of alpha will be slightly biased for fast-growing firms.
 - **C-5 (RESOLVED, 2026-04-20)** `interest_coverage` accepts the alias `InterestIncomeExpenseNet`, which can be negative (net interest income) for firms with large cash piles. Dividing OpInc by a negative net-interest figure produces a negative coverage ratio that is not comparable to the standard EBIT/InterestExpense signal. Either restrict to gross `InterestExpense` / `InterestExpenseDebt`, or take `abs()`. **Fix:** `InterestIncomeExpenseNet` removed from the alias chain in `R/fundamental_fetcher.R`; `.filter_deprecated_tags()` drops pre-existing cached rows on read; unit-tested.
 
@@ -408,21 +425,81 @@ Rename to `inventory_cogs_change` would remove ambiguity. Low priority.
 
 ---
 
-## 12. Z-Scoring (`zscore_cross_section`, L597-641)
+## 12. Z-Scoring (`zscore_cross_section`, `zscore_expanding_window`)
 
-| Step | Correctness |
+**Updated 2026-04-20** to a robust standardization pipeline. Two entry
+points share one core helper (`.robust_zscore` in `R/indicator_compute.R`):
+
+| Step | Implementation |
 |---|---|
-| Financial-NA masking | Uses `.FINANCIAL_NA_INDICATORS` (gpa, inventory_turnover, cash_based_op, capex_depreciation, inventory_sales_change). Consistent with docs |
-| Min N | >=3 non-NA required -- reasonable for testing |
-| Mean / SD | Sample mean and sd() -- not robust |
-| Winsorize | Clips z-scores to [-3, 3] (not raw values) |
-| NA preservation | Original NAs stay NA. Correct |
-| Verdict | **PASS-WITH-NOTE** |
+| 1. Cross-sectional winsorization | Raw values clipped at per-snapshot `p2.5 / p97.5` |
+| 2. Standardization location | `median` of calibration sample |
+| 2. Standardization scale | `mad(., constant = 1.4826)` -- equal to `sd` under a Gaussian null |
+| Calibration sample | `zscore_cross_section`: current cross-section; `zscore_expanding_window`: pooled winsorized values across all `pit_*_raw.parquet` with date < current plus current snapshot |
+| Financial-NA masking | `.FINANCIAL_NA_INDICATORS` excluded from both winsorization and calibration; output NA-masked on the financial rows |
+| Min N | `>= 3` non-NA required (caller-tunable) |
+| Post-standardization clip | `c(-5, 5)` by default (see sec. 12a decision); `NULL` disables, `c(-3, 3)` for the tighter legacy bound. Diagnostic in `tools/diag_zscore_tails.R` is the source of truth for the final decision |
+| NA preservation | Original NAs preserved in output |
+| Verdict | **PASS** |
 
-Notes:
-- The `.winsorize` helper exists (L100-104) but is not called in the z-score path; it is dead code except for tests.
-- Fat-tailed factors (e.g., negative P/E, extreme PEG) can pull the mean significantly before z-scoring. Consider median / MAD as an option, or pre-winsorize the raw indicator at [1%, 99%] before computing mean/SD.
-- No sector-neutral z-scoring. For BSTAR, this may be intentional; the sector bucket is passed separately. Flag for downstream consumers: the z-scores are raw cross-sectional, not sector-neutral.
+Design rationale:
+- Pre-winsorize before computing location / scale so fat-tailed outliers
+  cannot contaminate the standardization statistics.
+- Median / MAD (scaled by 1.4826 to estimate sigma under a Gaussian
+  null) is robust to the remaining within-band skew. On well-behaved
+  indicators it coincides with mean / SD to within sampling noise.
+- Expanding-window calibration stabilizes location / scale over time as
+  evidence accumulates, avoiding single-quarter sampling noise.
+  Per-snapshot winsorization bounds keep each cross-section's regime
+  intact (a firm in the 2nd percentile this quarter gets pulled to p2.5
+  of this quarter's distribution, not of a 10-year pool).
+- Post-standardization clip default is `c(-5, 5)` (chosen 2026-04-20
+  after running `tools/diag_zscore_tails.R`). See the decision note
+  immediately below.
+
+### 12a. Clip-default decision (2026-04-20)
+
+The tail diagnostic built 8 quarterly snapshots (2024-Q1 through 2025-Q4)
+using the expanding-window path with `clip = NULL`, then tabulated |z|
+tails across ~140k cross-sectional observations.
+
+**Unclipped pooled distribution:**
+- p50 = 0.67, p90 = 2.87, p99 = 11.6, p99.9 = 23.2, max = 47.5.
+- 9.43 % of values have |z| >= 3; 4.49 % have |z| >= 5.
+- Tail asymmetry: 7.6 % of values above z = +3 vs. 1.8 % below z = -3
+  (ratio 4.16 : 1 positive-heavy). The positive extremes are dominated
+  by size / valuation / growth indicators (peg p999 = 47.5, pb = 29.1,
+  market_cap = 18.1, enterprise_value = 20.3, revenue_raw = 19.6) --
+  log-normal-by-construction, not distress. The negative extremes are
+  dominated by genuine distress (negative book value, negative FCF,
+  negative operating income).
+
+**Options evaluated:**
+
+| Option | Pros | Cons |
+|---|---|---|
+| A: `clip = c(-3, 3)` | Strong scale comparability (critical for factor blends: peg z at 47 would swamp gross_margin at 2). Robust to single-firm noise. Matches institutional precedent (Barra / Axioma / Qontigo). Preserves full rank ordering inside the 90.5 % of values within the band. | 9.46 % of values collapse onto exactly \|z\| = 3. For `peg`, 20 % of firms get the same score; for `pb`, 19 %; for `market_cap`, 15 %. Rank inside those buckets is destroyed. Damage is asymmetric: censors 1.8 % of distress-heavy negative tail alongside 7.6 % of noise-heavy positive tail. Treats symptom (heavy tails), not cause (log-normal size indicators). |
+| B: `clip = c(-5, 5)` | Still scale-bounded for factor combinations. Negative tail effectively preserved (~0.15 % clipped). Positive tail in [3, 5] differentiable -- recovers ~5 % of values flattened by A. Honors the "negatives carry distress signal" principle. | ~4.49 % of values still saturate at 5; `peg` still pins 13 % at the bound. Threshold is arbitrary (why 5, not 4 or 6) -- no principled reason. Less institutional precedent. |
+| C: `clip = NULL` | Full information fidelity. No arbitrary bound. Most consistent with "don't destroy information via clipping". | Size indicators dominate factor combinations (peg z at 47 swamps quieter signals). One quirky near-zero denominator moves aggregate factor scores. Diagnostic shows p999 = 23 is systemic, not a few outliers. Unsafe downstream until size / valuation indicators are log-transformed. |
+
+**Decision:** default is **B, `clip = c(-5, 5)`**, as a stopgap. Rationale:
+
+1. The tail asymmetry in the unclipped diagnostic makes A wrong-direction:
+   A sacrifices 1.8 % of high-value distress granularity to also censor
+   7.6 % of low-value size / growth puffery. B preserves virtually all
+   of the distress granularity at the cost of a modest scale increase.
+2. C is unsafe today because size / valuation indicators dominate the
+   factor space without a log-transform.
+3. B is an interim. The long-term answer is the §14 item #11 follow-up
+   (log-transform size / valuation before winsorization); once that
+   lands, re-run the diagnostic and, if p99.9 drops near 4 with
+   symmetric tails, drop the clip (flip default to `NULL`).
+
+Callers who want the aggressive bound can still pass `clip = c(-3, 3)`;
+callers who want no clipping can pass `clip = NULL`.
+- No sector-neutral z-scoring. For BSTAR, this may be intentional; the
+  sector bucket is passed separately. Flag for downstream consumers:
+  the z-scores are cross-sectional, not sector-neutral.
 
 ---
 
@@ -430,7 +507,7 @@ Notes:
 
 | # | Indicator | Constitution | Replication | Verdict |
 |---|---|---|---|---|
-| 1 | pe_trailing | OK | OK | PASS-WITH-NOTE (TTM misnomer, sign asymmetry) |
+| 1 | pe_trailing | OK | OK | PASS-WITH-NOTE (TTM misnomer; sign asymmetry **RESOLVED** 2026-04-20 via robust z-score) |
 | 2 | peg | OK | OK | PASS |
 | 3 | pb | OK | OK | PASS |
 | 4 | ps | OK | OK | PASS |
@@ -493,14 +570,33 @@ Notes:
 ### Should-fix (methodology)
 
 4. **[ROIC] Switch numerator to NOPAT** (`opinc * (1 - tax_rate)`). Use statutory or effective rate. Current NI-based ROIC biases cross-section by tax and non-operating income.
-5. **[C-3] Derived quantities NA vs. zero.** In `.derive_quantities`, stop using `nafill(0)` for components whose absence is ambiguous (LTD, STD, cash, depr, capex). Track a presence bitmask per row and propagate NA where appropriate.
-6. **[pe_trailing] Sign guard.** Align the EPS guard with `pb`/`pfcf`: set PE to NA when EPS <= 0. Or explicitly document that negative P/E is a valid extreme signal.
+5. **[C-3 RESOLVED 2026-04-20]** `.derive_quantities` now propagates NA from missing `depreciation`, `capex`, both-absent `long_term_debt + short_term_debt`, and `cash`. One-present / one-absent for LTD/STD retained as zero to match filing practice. EV fallback in `.compute_valuation` (which substituted `total_debt` for NA `net_debt`) dropped. `ic` in `.compute_profitability` stops silently treating missing cash as zero.
+6. **[§14 #6 RESOLVED 2026-04-20, re-framed]** Rather than NA-ing out negative P/E, the asymmetry is resolved by removing positive-denominator guards across the indicator set (pb, pfcf, ev_ebitda, roe, roic, debt_equity, net_debt_ebitda, payout_ratio). Negative multiples now propagate as distress signals. Fat-tail protection handled by the new cross-sectional p2.5/p97.5 winsorization + expanding-window median/MAD z-score (Section 12).
 
 ### Nice-to-have
 
 7. **[QoQ] Switch to YoY-same-quarter** for revenue_growth_qoq unless the sequential variant is explicitly wanted as a momentum signal.
 8. **[capex_depreciation]** Add materiality threshold (e.g., NA if both CapEx and D&A are < 0.1% of revenue or of assets).
-9. **[z-score]** Optionally pre-winsorize raw indicators at [1%, 99%] before computing mean/SD; consider median/MAD as a robust variant.
+9. **[z-score RESOLVED 2026-04-20]** Implemented per-snapshot cross-sectional winsorization at [p2.5, p97.5] of raw values, then median / MAD (constant = 1.4826) standardization. Expanding-window variant in `pit_assembler.R` pools winsorized values across all prior pit_*_raw.parquet + current for location / scale. Clip default set to c(-5, 5) after running `tools/diag_zscore_tails.R` -- see Section 12a for the A/B/C trade-off analysis and decision.
+
+### Should-fix (added 2026-04-20)
+
+11. **Log-transform size / valuation indicators before winsorization.**
+    The tail diagnostic (§12a) shows that `market_cap`, `revenue_raw`,
+    `enterprise_value`, `peg`, `pb`, `pe_trailing`, `pfcf`, `ev_ebitda`,
+    and similar heavy-right-skew indicators have p99.9 of |z| in the
+    range 18-47 even after p2.5 / p97.5 cross-sectional winsorization.
+    Root cause: these are log-normal by construction (mega-caps dwarf
+    small-caps; growth-stock multiples span orders of magnitude).
+    Percentile-based winsorization on the raw scale cannot tame an
+    order-of-magnitude spread. Fix: apply `log(abs(x)) * sign(x)`
+    (sign-preserving log, so negatives still propagate as distress
+    signals) before passing into `.robust_zscore` for the affected
+    indicators. Re-run `tools/diag_zscore_tails.R`; once p99.9 lands
+    near 4 with symmetric tails, drop the clip (flip default from
+    c(-5, 5) to NULL). The list of candidate indicators to log-transform
+    is the Section 12a top-15 by p999; for margin / growth / quality
+    indicators that are already bounded-ratio, no transform is needed.
 10. **[naming]** Rename `fcf_stability` -> `cfo_stability`, `inventory_sales_change` -> `inventory_cogs_change`.
 
 ---
@@ -519,9 +615,64 @@ No indicator required abandoning the review due to undocumented formulas. All 57
 
 ---
 
-## 16. Session Handoff -- State at 2026-04-20
+## 16. Session Handoff -- State at 2026-04-20 (part 2 of the day)
 
-### 16.1 What was done in this session
+### 16.0 What was done in this (second) session (2026-04-20 PM)
+
+Remaining "should-fix" methodology items from §14 addressed (ROIC still
+pending, now the only open WARN):
+
+- **C-3 derive_quantities NA-vs-zero split.** `.derive_quantities`
+  propagates NA from missing `depreciation`, `capex`, `long_term_debt`
+  + `short_term_debt` (both absent), and `cash`. One-present /
+  one-absent for LTD/STD kept as zero to match filing practice. EV
+  fallback in `.compute_valuation` (silently substituting total_debt
+  for NA net_debt) dropped. `ic` in `.compute_profitability` stops
+  silently treating missing cash as zero.
+- **§14 #6 pe_trailing sign guard -- reframed.** The user's principle
+  is *"negative denominators carry distress; don't discard via NA,
+  handle fat tails with smart winsorization"*. Consequently the
+  positive-denominator guards were removed from `pb`, `pfcf`,
+  `ev_ebitda`, `roe`, `roic`, `debt_equity`, `net_debt_ebitda`, and
+  `payout_ratio`. Negatives now propagate.
+- **Section 12 z-score pipeline -- rewritten.** New
+  `.robust_zscore(x, calib_sample, probs = c(0.025, 0.975), clip)`
+  helper in `R/indicator_compute.R`: cross-sectional winsorization at
+  p2.5 / p97.5 followed by median / MAD (constant = 1.4826)
+  standardization. `zscore_cross_section` now calls it for the
+  per-snapshot path.
+- **Expanding-window standardization -- new.** `zscore_expanding_window`
+  in `R/pit_assembler.R` pools winsorized per-snapshot values from all
+  `pit_*_raw.parquet` with date < current + current snapshot,
+  standardizes current via median / MAD of the pool. `assemble_snapshot`
+  defaults `zscore_mode = "expanding_window"`; pass `"cross_section"`
+  to revert.
+- **Clip evaluation diagnostic.** `tools/diag_zscore_tails.R` builds
+  8 quarterly snapshots (2024-Q1..2025-Q4), computes unclipped z-scores,
+  tabulates per-indicator `|z|` tails and pooled `|z|` at p99 / p99.9
+  with tail-symmetry check. Recommendation output at the bottom decides
+  among "drop clip", "loosen to [-5, 5]", or "keep [-3, 3]" based on
+  p99.9 and tail mass above 3 / 5.
+
+Test status at handoff: **182 indicator_compute tests passing** (35 new
+since the morning session) + **55 pit_assembler tests passing** (9 new
+for zscore_expanding_window + .load_history_snapshots).
+
+Files modified in this session:
+- `R/indicator_compute.R`   -- `.robust_zscore`, guard removal,
+  `.derive_quantities` NA-vs-zero split, `zscore_cross_section`
+  rewrite
+- `R/pit_assembler.R`       -- `zscore_expanding_window`,
+  `.build_pooled_calib`, `.load_history_snapshots`,
+  `assemble_snapshot` integration
+- `tests/test_indicator_compute.R` -- 35 new tests (C-3, sign
+  preservation, robust zscore, winsorization)
+- `tests/test_pit_assembler.R`     -- 9 new tests
+- `docs/research/06_indicator_verification_report.md` -- status updates,
+  §12 rewrite, §14 updates, this §16 entry
+- `tools/diag_zscore_tails.R`      -- new diagnostic script
+
+### 16.1 What was done in the morning session (2026-04-20 AM)
 
 Three cross-cutting findings from the 2026-04-19 report were implemented,
 reviewed, unit-tested, and gate-tested in the session ending 2026-04-20:
