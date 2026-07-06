@@ -76,21 +76,11 @@ for (col in ind_names) {
   raw_dt[na_idx, (col) := NA_real_]
 }
 
-# Synthetic z-scored snapshot (same structure, z-scored values)
+# Synthetic z-scored snapshot: use the pipeline's own .robust_zscore so
+# the fixture satisfies the median/MAD invariants validate_snapshot asserts.
 zsc_dt <- copy(raw_dt)
 for (col in ind_names) {
-  vals <- zsc_dt[[col]]
-  valid <- !is.na(vals)
-  if (sum(valid) > 2) {
-    mu <- mean(vals[valid])
-    s  <- sd(vals[valid])
-    if (s > 1e-9) {
-      z <- (vals - mu) / s
-      z <- pmin(pmax(z, -3), 3)
-      z[!valid] <- NA_real_
-      zsc_dt[, (col) := z]
-    }
-  }
+  zsc_dt[, (col) := .robust_zscore(zsc_dt[[col]])]
 }
 
 # Write parquet
@@ -152,8 +142,11 @@ test("validate: details has n_tickers",
 test("validate: details has na_rates",
      length(val$details$na_rates) == length(ind_names))
 
-test("validate: z-score mean near zero",
-     val$checks["zscore_mean_near_zero"])
+test("validate: z-score median exactly zero (median/MAD invariant)",
+     val$checks["zscore_median_zero"])
+
+test("validate: z-score MAD exactly one (median/MAD invariant)",
+     val$checks["zscore_mad_one"])
 
 # Test with missing file
 val_missing <- validate_snapshot("1999-01-01", output_dir = test_dir)
@@ -287,10 +280,7 @@ for (col in ind_names) {
 
 large_zsc <- copy(large_raw)
 for (col in ind_names) {
-  vals <- large_zsc[[col]]
-  mu <- mean(vals, na.rm = TRUE)
-  s <- sd(vals, na.rm = TRUE)
-  if (s > 0) large_zsc[, (col) := (vals - mu) / s]
+  large_zsc[, (col) := .robust_zscore(large_zsc[[col]])]
 }
 
 arrow::write_parquet(large_raw,

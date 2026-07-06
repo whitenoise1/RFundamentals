@@ -7,7 +7,12 @@ interpretation.
 **Data sources:**
 - **EDGAR**: SEC EDGAR XBRL companyfacts (10-K and 10-Q filings). Stamped by
   filing date, not period end date, to avoid look-ahead bias.
-- **Yahoo**: Daily adjusted closing price via `quantmod::getSymbols()`.
+- **Yahoo**: Daily as-traded closing price via `quantmod::getSymbols()` --
+  the split-adjusted Close column divided by the post-date split factor, so
+  every price level matches the print on that date. The Adjusted column
+  (dividends removed, re-based by future corporate events) is never used:
+  it mis-scales ratios against as-reported fundamentals and drifts on every
+  re-download.
 - **Derived**: Intermediate quantities computed from EDGAR fields (gross profit,
   EBITDA, FCF, total debt, net debt).
 
@@ -50,7 +55,7 @@ moves (price-sensitive indicators).
 | **Formula** | Price / EPS (diluted) |
 | **Guard** | \|EPS\| >= 0.01; otherwise NA |
 | **XBRL** | EarningsPerShareDiluted |
-| **Price** | Yahoo adjusted close on filing date |
+| **Price** | Yahoo as-traded close on filing date |
 | **Interpretation** | How much investors pay per dollar of earnings. Lower = cheaper. |
 
 ### 1.2 `peg` -- Price/Earnings to Growth
@@ -69,7 +74,7 @@ moves (price-sensitive indicators).
 | **Formula** | Market Cap / Stockholders' Equity |
 | **Guard** | Equity must be > 0 |
 | **XBRL** | StockholdersEquity, CommonStockSharesOutstanding |
-| **Price** | Yahoo adjusted close |
+| **Price** | Yahoo as-traded close |
 | **Interpretation** | Market value vs. book value. < 1 means market values the firm below its accounting net worth. |
 
 ### 1.4 `ps` -- Price-to-Sales
@@ -78,7 +83,7 @@ moves (price-sensitive indicators).
 |---|---|
 | **Formula** | Market Cap / Revenue |
 | **XBRL** | Revenues, CommonStockSharesOutstanding |
-| **Price** | Yahoo adjusted close |
+| **Price** | Yahoo as-traded close |
 | **Interpretation** | What investors pay per dollar of revenue. Useful for unprofitable companies where P/E is undefined. |
 
 ### 1.5 `pfcf` -- Price-to-Free Cash Flow
@@ -88,7 +93,7 @@ moves (price-sensitive indicators).
 | **Formula** | Market Cap / FCF |
 | **Guard** | FCF must be > 0 |
 | **XBRL** | NetCashProvidedByUsedInOperatingActivities, PaymentsToAcquirePropertyPlantAndEquipment |
-| **Price** | Yahoo adjusted close |
+| **Price** | Yahoo as-traded close |
 | **Interpretation** | What investors pay per dollar of cash the business actually generates after reinvestment. |
 
 ### 1.6 `ev_ebitda` -- Enterprise Value to EBITDA
@@ -98,7 +103,7 @@ moves (price-sensitive indicators).
 | **Formula** | Enterprise Value / EBITDA |
 | **Guard** | EBITDA must be > 0 |
 | **XBRL** | OperatingIncomeLoss, DepreciationDepletionAndAmortization, LongTermDebt, ShortTermBorrowings, CashAndCashEquivalentsAtCarryingValue |
-| **Price** | Yahoo adjusted close |
+| **Price** | Yahoo as-traded close |
 | **Interpretation** | Valuation independent of capital structure. Lower = cheaper. Preferred over P/E for cross-company comparison because it normalizes for debt levels. |
 
 ### 1.7 `ev_revenue` -- Enterprise Value to Revenue
@@ -116,7 +121,7 @@ moves (price-sensitive indicators).
 | **Formula** | EPS (diluted) / Price |
 | **Guard** | \|Price\| >= 0.01 |
 | **XBRL** | EarningsPerShareDiluted |
-| **Price** | Yahoo adjusted close |
+| **Price** | Yahoo as-traded close |
 | **Interpretation** | Inverse of P/E. Higher = cheaper. Directly comparable to bond yields and risk-free rate. |
 
 ---
@@ -345,7 +350,7 @@ use market cap).
 |---|---|
 | **Formula** | \|Dividends Paid\| / Market Cap |
 | **XBRL** | PaymentsOfDividendsCommonStock |
-| **Price** | Yahoo adjusted close (via Market Cap) |
+| **Price** | Yahoo as-traded close (via Market Cap) |
 | **Interpretation** | Annual dividend as a percentage of market value. Uses absolute value because dividends are reported as negative cash outflows. |
 
 ### 7.2 `payout_ratio` -- Payout Ratio
@@ -363,7 +368,7 @@ use market cap).
 |---|---|
 | **Formula** | \|Buybacks\| / Market Cap |
 | **XBRL** | PaymentsForRepurchaseOfCommonStock |
-| **Price** | Yahoo adjusted close (via Market Cap) |
+| **Price** | Yahoo as-traded close (via Market Cap) |
 | **Interpretation** | Share repurchases as a percentage of market value. Combined with dividend yield gives total shareholder yield. |
 
 ---
@@ -378,7 +383,7 @@ Absolute scale measures. Price-sensitive (market cap, EV).
 |---|---|
 | **Formula** | Price x Shares Outstanding |
 | **XBRL** | CommonStockSharesOutstanding |
-| **Price** | Yahoo adjusted close |
+| **Price** | Yahoo as-traded close |
 | **Interpretation** | Total market value of equity. In dollars. |
 
 ### 8.2 `enterprise_value` -- Enterprise Value
@@ -387,7 +392,7 @@ Absolute scale measures. Price-sensitive (market cap, EV).
 |---|---|
 | **Formula** | Market Cap + Net Debt |
 | **XBRL** | CommonStockSharesOutstanding, LongTermDebt, ShortTermBorrowings, CashAndCashEquivalentsAtCarryingValue |
-| **Price** | Yahoo adjusted close |
+| **Price** | Yahoo as-traded close |
 | **Interpretation** | Total value of the business (equity + debt - cash). The price an acquirer would pay. |
 
 ### 8.3 `revenue_raw` -- Revenue (Raw)
@@ -810,7 +815,11 @@ singleton industries and sparsely-lagged years are NA. NA for
 Utilities (OpenAP's permanent SIC-49 exclusion). Concentration is
 relative to S&P 500 large-cap peers, not the full market. `kz_index`:
 txdb (deferred taxes) not fetched, omitted; price-sensitive
-(stub_kz_prefix + 0.283 ME/AT). `ww_index`: firm terms travel as
+(stub_kz_prefix + 0.283 ME/AT). Coverage runs ~62-65%, below the 70%
+bar used elsewhere -- ACCEPTED as structural: debt-free firms lack the
+debt tags, some filers lack cash breakdowns, and the ME term needs a
+filing-date price (OpenAP is stricter still). The coverage flag on
+this indicator is expected, not a defect. `ww_index`: firm terms travel as
 ing_ww_partial; the industry sales-growth term (aggregate revenue of
 the >= 2 firms with both current and lag-1 revenue) is added at the
 cross-section stage; OpenAP's 1-month panel-lag artifact in the firm

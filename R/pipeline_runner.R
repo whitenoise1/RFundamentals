@@ -285,27 +285,30 @@ validate_snapshot <- function(snapshot_date,
 
   # -- Z-score validation --
   if (!is.null(zsc)) {
-    # Check mean near 0, SD near 1 for non-NA indicators
-    z_means <- sapply(ind_names, function(col) {
-      if (col %in% names(zsc)) mean(zsc[[col]], na.rm = TRUE) else NA
+    # .robust_zscore centers on the median and scales by 1.4826*MAD, so
+    # median(z) = 0 and mad(z) = 1 hold EXACTLY by construction (symmetric
+    # clipping moves neither). The former mean/sd checks assumed mean-
+    # centering and were permanently red on ~25 skewed level indicators;
+    # these invariants are strict and distribution-free instead.
+    z_meds <- sapply(ind_names, function(col) {
+      if (col %in% names(zsc)) median(zsc[[col]], na.rm = TRUE) else NA
     })
-    z_sds <- sapply(ind_names, function(col) {
-      if (col %in% names(zsc)) sd(zsc[[col]], na.rm = TRUE) else NA
+    z_mads <- sapply(ind_names, function(col) {
+      if (col %in% names(zsc)) mad(zsc[[col]], na.rm = TRUE) else NA
     })
 
-    valid_z <- !is.na(z_means) & !is.na(z_sds)
+    valid_z <- !is.na(z_meds) & !is.na(z_mads)
     if (sum(valid_z) > 0) {
-      checks["zscore_mean_near_zero"] <- all(abs(z_means[valid_z]) < 0.5)
-      # Low-coverage indicators can have compressed SD after winsorization
-      n_bad_sd <- sum(z_sds[valid_z] <= 0.1 | z_sds[valid_z] > 2.0)
-      checks["zscore_sd_reasonable"]  <- n_bad_sd <= 5
-      details$z_mean_range <- range(z_means[valid_z])
-      details$z_sd_range   <- range(z_sds[valid_z])
+      checks["zscore_median_zero"] <- all(abs(z_meds[valid_z]) < 0.05)
+      checks["zscore_mad_one"]     <- all(z_mads[valid_z] > 0.9 &
+                                          z_mads[valid_z] < 1.1)
+      details$z_median_range <- range(z_meds[valid_z])
+      details$z_mad_range    <- range(z_mads[valid_z])
 
-      message(sprintf("  z-score means: [%.3f, %.3f]",
-                      details$z_mean_range[1], details$z_mean_range[2]))
-      message(sprintf("  z-score SDs:   [%.3f, %.3f]",
-                      details$z_sd_range[1], details$z_sd_range[2]))
+      message(sprintf("  z-score medians: [%.3f, %.3f]",
+                      details$z_median_range[1], details$z_median_range[2]))
+      message(sprintf("  z-score MADs:    [%.3f, %.3f]",
+                      details$z_mad_range[1], details$z_mad_range[2]))
     }
   }
 
