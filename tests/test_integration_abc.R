@@ -160,11 +160,10 @@ message(sprintf("  Non-financial tickers fetched: %d",
 # Cash-Based OP (needs cogs), CAPEX/DA, Inventory/Sales Change
 # Check that financials LACK cogs and inventory
 #
-# NOTE: FB is misclassified as Financial by finviz (it should be
-# Communication Services -- the old "FB" ticker resolves incorrectly).
-# This is a known Session B data issue. We exclude known misclassifications
-# from the financial sector tests.
-known_misclassified <- c("FB")
+# Reused-symbol misclassification is now handled upstream: renamed
+# constituents are relabeled to current tickers in the roster (FB ->
+# META) and .SECTOR_OVERRIDES corrects data-bearing reused symbols.
+known_misclassified <- character(0)
 true_financials <- setdiff(financial_tickers, known_misclassified)
 
 if (length(true_financials) > 0) {
