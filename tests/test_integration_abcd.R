@@ -331,16 +331,27 @@ for (cn in sector_specific) {
 # ============================================================================
 message("\n=== 7. Dedup Integrity ===")
 
-dedup_violations <- 0L
+# The vintage cache deliberately keeps one row per (concept, period,
+# filing) so reporting vintages survive re-fetches; pit_dedup(as_of)
+# resolves to one row per (concept, period_end, fiscal_qtr) at read time.
+vintage_violations <- 0L
+resolve_violations <- 0L
 for (tk in fetched_tickers) {
   dt_tk <- fund_all[ticker == tk]
-  n_dup <- anyDuplicated(dt_tk[, .(concept, period_end, fiscal_qtr)])
-  if (n_dup > 0) {
-    dedup_violations <- dedup_violations + 1L
-    message(sprintf("    Dedup violation: %s", tk))
+  if (anyDuplicated(dt_tk[, .(concept, period_end, fiscal_qtr, accession)]) > 0) {
+    vintage_violations <- vintage_violations + 1L
+    message(sprintf("    Vintage-key violation: %s", tk))
+  }
+  resolved <- pit_dedup(dt_tk, as_of = Sys.Date())
+  if (anyDuplicated(resolved[, .(concept, period_end, fiscal_qtr)]) > 0) {
+    resolve_violations <- resolve_violations + 1L
+    message(sprintf("    pit_dedup resolution violation: %s", tk))
   }
 }
-test("no dedup violations in any ticker", dedup_violations == 0L)
+test("vintage key (concept, period, filing) unique in every ticker",
+     vintage_violations == 0L)
+test("pit_dedup resolves to one row per period in every ticker",
+     resolve_violations == 0L)
 
 # Each ticker should have exactly one CIK
 multi_cik <- fund_all[, .(n_cik = uniqueN(cik)), by = ticker][n_cik > 1]

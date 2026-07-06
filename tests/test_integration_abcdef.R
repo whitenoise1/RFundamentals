@@ -21,7 +21,7 @@
 #   8. Spot checks: AAPL, JPM, MSFT in snapshot
 #   9. load_snapshot round-trip
 #  10. list_snapshots
-#  11. Scale gate: 400+ tickers, 59 indicators
+#  11. Scale gate: 400+ tickers, 130 indicators
 # ============================================================================
 
 suppressPackageStartupMessages({
@@ -503,6 +503,11 @@ message("\n=== 11. Scale Gate ===")
 
 test("scale: >= 400 tickers in snapshot",
      nrow(raw) >= 400)
+
+# Pin the count: a silently shrunken indicator set would still satisfy the
+# dynamic all-columns-present check below.
+test("scale: indicator set is exactly 130",
+     length(get_indicator_names()) == 130L)
 
 test("scale: all indicator columns present",
      sum(ind_names %in% names(raw)) == length(get_indicator_names()))

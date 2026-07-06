@@ -19,7 +19,7 @@
 #   6. Spot checks: AAPL, JPM, MSFT indicators against known values
 #   7. Growth indicator temporal consistency
 #   8. Piotroski F-Score distribution
-#   9. Scale gate: 500+ tickers, 59 indicators
+#   9. Scale gate: 500+ tickers, 130 indicators
 # ============================================================================
 
 suppressPackageStartupMessages({
@@ -494,11 +494,15 @@ message("\n=== 11. Scale Gate ===")
 test("scale: >= 450 tickers computed",
      length(indicator_list) >= 450)
 
+# Pin the count so a silently shrunken indicator set cannot pass.
+test("scale: indicator set is exactly 130",
+     length(get_indicator_names()) == 130L)
+
 test("scale: raw matrix dimensions match",
-     nrow(cs$raw) >= 450 && ncol(cs$raw) >= 57)
+     nrow(cs$raw) >= 450 && ncol(cs$raw) >= 130)
 
 test("scale: zscored matrix dimensions match",
-     nrow(cs$zscored) >= 450 && ncol(cs$zscored) >= 57)
+     nrow(cs$zscored) >= 450 && ncol(cs$zscored) >= 130)
 
 # Coverage floor for price-independent indicators at 80%+ non-NA.
 # The C-3 NA-vs-zero fix (stops fabricating zeros for absent debt/capex/depr/
