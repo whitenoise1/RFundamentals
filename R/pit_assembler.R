@@ -137,11 +137,14 @@ fetch_ticker_prices <- function(ticker, from = "2009-01-01",
   memo_key <- sprintf("%s_%s", ticker, from)
   if (isTRUE(.PRICE_FETCH_FAILED[[memo_key]])) return(NULL)
 
-  # Download from Yahoo
+  # Download from Yahoo. Yahoo uses dashes for class tickers (BRK-B),
+  # while the index roster uses dots (BRK.B); without the conversion the
+  # request 404s and class-share tickers never get price data.
+  yahoo_symbol <- gsub("\\.", "-", ticker)
   px <- NULL
   for (attempt in seq_len(retries)) {
     px <- tryCatch({
-      p <- getSymbols(ticker, src = "yahoo", from = from,
+      p <- getSymbols(yahoo_symbol, src = "yahoo", from = from,
                       to = Sys.Date(), auto.assign = FALSE)
       if (is.null(p) || nrow(p) == 0) stop("empty result")
       p

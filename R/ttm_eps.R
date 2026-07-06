@@ -151,7 +151,9 @@ load_ticker_splits <- function(tk, split_dir = "cache/splits", fetch = TRUE) {
   }
   empty <- data.table(ex_date = as.Date(character()), ratio = numeric())
   if (!fetch || !requireNamespace("quantmod", quietly = TRUE)) return(empty)
-  sx <- tryCatch(quantmod::getSplits(tk), error = function(e) NULL)
+  # Yahoo uses dashes for class tickers (BRK-B), the roster uses dots
+  sx <- tryCatch(quantmod::getSplits(gsub("\\.", "-", tk)),
+                 error = function(e) NULL)
   s <- if (is.null(sx) || !length(sx)) empty else
     data.table(ex_date = as.Date(zoo::index(sx)), ratio = as.numeric(sx))
   s <- s[!is.na(ratio) & ratio > 0]
