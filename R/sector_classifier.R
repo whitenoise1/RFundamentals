@@ -28,6 +28,14 @@ suppressPackageStartupMessages({
 
 .FINVIZ_BASE     <- "https://finviz.com/quote.ashx"
 .FINVIZ_RATE_SEC <- 0.5
+
+# Ticker -> c(sector, industry) for constituents whose symbol was reused
+# by an unrelated listing after delisting (finviz would return the wrong
+# company). Only data-bearing constituents need entries; symbols with no
+# fundamentals never enter snapshots.
+.SECTOR_OVERRIDES <- list(
+  INFO = c("Industrials", "Specialty Business Services")  # IHS Markit
+)
 .FINVIZ_UA       <- paste0(
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ",
   "AppleWebKit/537.36 (KHTML, like Gecko) ",
@@ -282,6 +290,22 @@ build_sector_industry <- function(
   # Step 4: Deduplicate (keep finviz over fallback)
   result <- result[order(ticker, source != "finviz")]
   result <- result[!duplicated(ticker)]
+
+  # Step 4b: Manual overrides. Finviz serves the CURRENT listing at a
+  # ticker; when a symbol is reused (or redirected) after a constituent
+  # delists, the scraped sector describes the wrong company. Override
+  # only data-bearing cases (constituent has fundamentals in its era).
+  # Precedent: resolve_all_ciks pass-3 manual CIK overrides.
+  for (tk in names(.SECTOR_OVERRIDES)) {
+    ov <- .SECTOR_OVERRIDES[[tk]]
+    if (tk %in% result$ticker) {
+      result[ticker == tk, `:=`(sector = ov[1], industry = ov[2],
+                                source = "override")]
+    } else {
+      result <- rbind(result, data.table(
+        ticker = tk, sector = ov[1], industry = ov[2], source = "override"))
+    }
+  }
 
   # Step 5: Final summary
   still_missing <- setdiff(tickers, result$ticker)

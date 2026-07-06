@@ -252,8 +252,17 @@ if (file.exists(pq_path)) {
        !any(grepl("&amp;|&lt;|&gt;|&quot;|&#39;", dt$industry)))
 
   # Gate 5: Source field is valid
-  test("source is finviz or fallback",
-       all(dt$source %in% c("finviz", "fallback")))
+  test("source is finviz, fallback, or override",
+       all(dt$source %in% c("finviz", "fallback", "override")))
+
+  # Gate 5b: manual overrides applied (reused-ticker protection)
+  for (tk in names(.SECTOR_OVERRIDES)) {
+    if (tk %in% dt$ticker) {
+      test(sprintf("override applied: %s -> %s", tk, .SECTOR_OVERRIDES[[tk]][1]),
+           dt[ticker == tk, sector] == .SECTOR_OVERRIDES[[tk]][1] &&
+           dt[ticker == tk, source] == "override")
+    }
+  }
 
   # Gate 6: Known ticker spot checks
   if ("AAPL" %in% dt$ticker) {
