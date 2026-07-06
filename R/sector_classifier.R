@@ -71,24 +71,31 @@ suppressPackageStartupMessages({
 #' @param html Character. Raw HTML content.
 #' @return Named list with sector and industry, or NULL.
 .extract_finviz_sector_industry <- function(html) {
-  # Finviz uses screener links with sec_ and ind_ prefixes:
+  # Finviz uses screener links with sec_ and ind_ prefixes. Layouts seen:
   #   <a href="screener.ashx?v=111&f=sec_technology" class="tab-link">Technology</a>
-  #   <a href="screener.ashx?v=111&f=ind_consumerelectronics" class="tab-link"...>Consumer Electronics</a>
-  sector_m <- regmatches(html,
-    regexpr('f=sec_[^"]*"[^>]*>([^<]+)</a>', html, perl = TRUE))
-  industry_m <- regmatches(html,
-    regexpr('f=ind_[^"]*"[^>]*>([^<]+)</a>', html, perl = TRUE))
-
-  if (length(sector_m) == 0 || length(industry_m) == 0) return(NULL)
-
-  sector <- sub('.*>([^<]+)</a>$', "\\1", sector_m, perl = TRUE)
-  industry <- sub('.*>([^<]+)</a>$', "\\1", industry_m, perl = TRUE)
-
-  sector   <- .decode_html_entities(trimws(sector))
-  industry <- .decode_html_entities(trimws(industry))
-  if (nchar(sector) == 0 || nchar(industry) == 0) return(NULL)
+  #   <a href="screener?v=111&f=ind_consumerelectronics" class="quote-header_category"
+  #     title="Consumer Electronics"><span class="min-w-0 truncate">Consumer Electronics</span></a>
+  # The 2026 layout wraps the link text in a <span>, so allow one nested tag
+  # between the anchor and its text.
+  sector   <- .finviz_link_text(html, "sec")
+  industry <- .finviz_link_text(html, "ind")
+  if (is.null(sector) || is.null(industry)) return(NULL)
 
   list(sector = sector, industry = industry)
+}
+
+#' Extract the text of the first finviz screener link with the given prefix
+#' @param html Character. Raw HTML content.
+#' @param prefix Character. "sec" or "ind".
+#' @return Character scalar, or NULL if no link found.
+.finviz_link_text <- function(html, prefix) {
+  pat <- sprintf('f=%s_[^"]*"[^>]*>(?:<span[^>]*>)?([^<]+)', prefix)
+  m <- regmatches(html, regexpr(pat, html, perl = TRUE))
+  if (length(m) == 0) return(NULL)
+
+  txt <- .decode_html_entities(trimws(sub(pat, "\\1", m, perl = TRUE)))
+  if (nchar(txt) == 0) return(NULL)
+  txt
 }
 
 #' Decode common HTML entities to plain text

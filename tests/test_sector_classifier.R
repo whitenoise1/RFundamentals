@@ -94,6 +94,19 @@ test("extracts from links with title attribute",
      title_result$sector == "Consumer Defensive" &&
      title_result$industry == "Beverages - Wineries & Distilleries")
 
+# 2026 layout: quote-header_category class, text wrapped in a <span>
+mock_html_2026 <- paste0(
+  '<a href="screener?v=111&f=sec_technology" ',
+  'class="quote-header_category">Technology</a>',
+  '<a href="screener?v=111&f=ind_consumerelectronics" ',
+  'class="quote-header_category" title="Consumer Electronics">',
+  '<span class="min-w-0 truncate">Consumer Electronics</span></a>')
+span_result <- .extract_finviz_sector_industry(mock_html_2026)
+test("extracts from 2026 span-wrapped links",
+     !is.null(span_result) &&
+     span_result$sector == "Technology" &&
+     span_result$industry == "Consumer Electronics")
+
 
 # ============================================================================
 # UNIT TESTS: .finviz_fetch_one() -- dot-ticker handling
