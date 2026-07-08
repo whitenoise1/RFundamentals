@@ -30,6 +30,16 @@ suppressPackageStartupMessages({
 .DEFAULT_PRICE_DIR    <- "cache/prices"
 .DEFAULT_SNAPSHOT_DIR <- "cache/snapshots"
 
+# Indicators with multi-year lookback windows that are structurally all-NA
+# on snapshot dates near the ~2009 start of XBRL data (5y issuance/rd_cap
+# windows, 16q volatility panels, 3y capex growth). validate_snapshot
+# exempts exactly this set from the >99%-NA check before 2013-06-30; the
+# set is empirically fully populated from 2013-03-31 onward.
+.EARLY_HISTORY_NA_OK <- c(
+  "fcf_stability", "composite_debt_issuance", "share_iss_5y",
+  "grcapx3y", "rd_cap", "ms_roa_vol", "ms_rev_vol", "ms_score"
+)
+
 
 # =============================================================================
 # PRIVATE HELPERS
@@ -264,7 +274,15 @@ validate_snapshot <- function(snapshot_date,
   })
   details$na_rates <- na_rates
 
+  # Multi-year-lookback indicators cannot exist in the earliest snapshots:
+  # XBRL data starts ~2009, so 3-5y windows and 16q volatility panels are
+  # structurally empty before ~2013 (the set shrinks each year and is fully
+  # populated from 2013-03-31 on). Exempt exactly that named set on early
+  # dates; everywhere else the check stays strict.
   high_na <- na_rates[na_rates > 0.99]
+  if (snapshot_date < as.Date("2013-06-30")) {
+    high_na <- high_na[!names(high_na) %in% .EARLY_HISTORY_NA_OK]
+  }
   checks["no_99pct_na_indicators"] <- length(high_na) == 0
   if (length(high_na) > 0) {
     message(sprintf("  WARNING: %d indicators >99%% NA: %s",
