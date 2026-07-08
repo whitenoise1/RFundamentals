@@ -1315,15 +1315,30 @@ pivot_fundamentals <- function(fund_dt) {
   if (!any(sel)) 1 else prod(rt[sel])
 }
 
+# Preference order for share-count rows, applied by .fy_shares_at and
+# .q_shares_at. The Wave M synthetic whole-company count outranks the DEI
+# cover count, which outranks everything else: the DEI cover is the true
+# point-in-time outstanding count, whereas some filers populate the
+# balance-sheet CommonStockSharesOutstanding line with the constant
+# ISSUED count and vary treasury stock instead (BA: 1,012.26M for years
+# on end while outstanding moved 610M -> 750M through the 2024 offering).
+.SHARES_TAG_PREF <- c("MulticlassSharesOutstanding",
+                      "EntityCommonStockSharesOutstanding",
+                      "MulticlassSharesOutstandingBS")
+
+.prefer_share_tag <- function(win) {
+  if (!"tag" %in% names(win)) return(win)
+  for (pref in .SHARES_TAG_PREF) {
+    sel <- win[tag == pref]
+    if (nrow(sel)) return(sel)
+  }
+  win
+}
+
 # FY share count for the fiscal year ending at pe, with the row's own
 # filed date (the basis date). Candidates are FY-labeled share rows dated
 # in [pe, pe + 120d]: the balance-sheet date itself plus the 10-K
-# cover-page instant a few weeks later. The DEI cover tag
-# (EntityCommonStockSharesOutstanding) is preferred when present: it is
-# the true point-in-time outstanding count, whereas some filers populate
-# the balance-sheet CommonStockSharesOutstanding line with the constant
-# ISSUED count and vary treasury stock instead (BA: 1,012.26M for years
-# on end while outstanding moved 610M -> 750M through the 2024 offering).
+# cover-page instant a few weeks later.
 # Returns list(v, filed) or NULL.
 .fy_shares_at <- function(fund_dt, pe) {
   if (is.null(pe)) return(NULL)
@@ -1331,10 +1346,7 @@ pivot_fundamentals <- function(fund_dt) {
                    !is.na(value) & !is.na(period_end) &
                    period_end >= pe & period_end <= pe + 120]
   if (nrow(win) == 0) return(NULL)
-  if ("tag" %in% names(win)) {
-    dei <- win[tag == "EntityCommonStockSharesOutstanding"]
-    if (nrow(dei)) win <- dei
-  }
+  win <- .prefer_share_tag(win)
   r <- win[order(period_end)][1]
   list(v = r$value[1], filed = r$filed[1])
 }
@@ -1570,10 +1582,7 @@ pivot_fundamentals <- function(fund_dt) {
                    !is.na(period_end) &
                    period_end >= qend & period_end <= qend + 75]
   if (nrow(win) == 0) return(NA_real_)
-  if ("tag" %in% names(win)) {
-    dei <- win[tag == "EntityCommonStockSharesOutstanding"]
-    if (nrow(dei)) win <- dei
-  }
+  win <- .prefer_share_tag(win)
   # filed breaks ties between an original report and a later re-report of
   # the same instant (original wins; its filed date is the split basis)
   r <- win[order(period_end, filed)][1]

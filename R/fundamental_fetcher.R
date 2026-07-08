@@ -28,6 +28,7 @@ suppressPackageStartupMessages({
   library(arrow)
   library(jsonlite)
   library(httr)
+  library(xml2)     # Wave M: per-filing XBRL instance parsing
 })
 
 
@@ -118,11 +119,16 @@ suppressPackageStartupMessages({
     "NetIncomeLoss"
   ),
 
+  # Multiclass* tags are synthetic (Wave M, see section 4b): per-class facts
+  # recovered from filing instances and combined into the priced class.
+  # Ranked first so dedup prefers them over legacy single-class fragments.
   eps_basic = c(
+    "MulticlassEPSBasic",
     "EarningsPerShareBasic"
   ),
 
   eps_diluted = c(
+    "MulticlassEPSDiluted",
     "EarningsPerShareDiluted"
   ),
 
@@ -220,7 +226,17 @@ suppressPackageStartupMessages({
     "Cash"
   ),
 
+  # MulticlassSharesOutstanding = synthesized from per-class DEI cover
+  # counts (authoritative); ...BS = synthesized from per-class balance-
+  # sheet counts. BS ranks above the organic balance-sheet line (a whole-
+  # company sum beats a possibly single-class fragment on a same-date
+  # collision) but the organic DEI cover keeps priority at the selector
+  # level (.SHARES_TAG_PREF in indicator_compute.R): cover dates never
+  # collide with balance-sheet dates in dedup, so this rank only decides
+  # the same-date contest.
   shares_outstanding = c(
+    "MulticlassSharesOutstanding",
+    "MulticlassSharesOutstandingBS",
     "CommonStockSharesOutstanding",
     "EntityCommonStockSharesOutstanding",
     "WeightedAverageNumberOfShareOutstandingBasicAndDiluted",
@@ -709,6 +725,858 @@ classify_period <- function(dt) {
 
 
 # =============================================================================
+# 4b. MULTI-CLASS SHARE / EPS EXTRACTION (Wave M)
+# =============================================================================
+# The companyfacts API omits every fact that carries a dimension. Multi-class
+# filers tag cover-page share counts (dei:EntityCommonStockSharesOutstanding)
+# and per-class EPS with StatementClassOfStockAxis members, so those facts
+# never reach the cache: shares_outstanding / eps_* are NA for these names
+# and market_cap plus every ratio built on it dies.
+#
+# This section recovers per-class facts from the per-filing XBRL instances
+# and synthesizes canonical rows:
+#   shares_outstanding = sum over classes of cover shares x conversion into
+#                        the priced class (as-traded close x count = whole-
+#                        company market cap)
+#   eps_basic/diluted  = the priced class's own reported EPS
+# Synthetic rows carry first-ranked Multiclass* tags so existing dedup
+# prefers them over legacy single-class fragments, and real accession/filed
+# dates so PIT semantics are identical to organic rows.
+# Design: docs/DESIGN_MULTICLASS_SHARES.md
+
+.MULTICLASS_RAW_DIR <- "cache/multiclass_raw"
+
+.MULTICLASS_SHARES_TAG      <- "MulticlassSharesOutstanding"
+.MULTICLASS_SHARES_BS_TAG   <- "MulticlassSharesOutstandingBS"
+.MULTICLASS_EPS_BASIC_TAG   <- "MulticlassEPSBasic"
+.MULTICLASS_EPS_DILUTED_TAG <- "MulticlassEPSDiluted"
+
+# Instance fact tags extracted (matched by local name, namespace-year agnostic)
+.MC_INSTANCE_TAGS <- c(
+  "EntityCommonStockSharesOutstanding",
+  "CommonStockSharesOutstanding",
+  "EarningsPerShareBasic",
+  "EarningsPerShareDiluted",
+  "EarningsPerShareBasicAndDiluted"
+)
+
+# Registry of multi-class CIKs. Fields:
+#   ticker      roster ticker (priced listing)
+#   priced      canonical class letter of the priced listing
+#   conv        per non-priced class: list(mode = "eps_ratio"|"fixed",
+#               fallback = numeric). eps_ratio derives the conversion from
+#               per-class EPS in the same filing (handles V's floating
+#               class-B rate and BRK's 1500:1); fallback applies when the
+#               ratio is not derivable. fixed uses fallback directly.
+#               NA fallback = skip that class with a warning.
+#   default_conv conversion for class members not in conv (triage names
+#               whose single class is tagged dimensionally). NA = skip.
+#   member_map  optional ordered list(pattern = class) tried before the
+#               generic Class([A-Z]) regex (MKC voting/non-voting).
+#   organic_eps_class class letter that NON-dimensional instance EPS
+#               represents when dimensional priced EPS is absent (BRK
+#               pre-2014 tagged Class A equivalent EPS undimensioned);
+#               converted into the priced class via conv.
+#   drop_organic_shares / drop_organic_eps  drop ALL organic rows of that
+#               concept for this CIK (legacy fragments are garbage on the
+#               priced basis: BRK 1.6M Class-A weighted counts against a
+#               Class B price).
+#   window      c(from, to) filing-date bounds for instance fetching;
+#               NA side = open. NULL = full history.
+.MULTICLASS_REGISTRY <- list(
+
+  # Berkshire: A converts into B at 30:1 before the 2010-01-21 B 50:1
+  # split, 1500:1 after. All synthetic values are AS-FILED basis, so the
+  # fallback must match the conversion in force on the filing date
+  # (downstream .split_factor rescales to the current basis). Legacy
+  # non-dimensional EPS rows are Class A values and legacy share rows are
+  # Class A fragments -> drop both.
+  "0001067983" = list(
+    ticker = "BRK.B", priced = "B",
+    conv = list(A = list(mode = "eps_ratio",
+                         fallback = function(filed) {
+                           if (!is.na(filed) && filed < as.Date("2010-01-21")) 30 else 1500
+                         })),
+    organic_eps_class = "A",
+    drop_organic_shares = TRUE, drop_organic_eps = TRUE,
+    window = c("2009-08-01", NA)
+  ),
+
+  # Visa: class B floating conversion (~1.6, litigation escrow), class C
+  # 1:1 pre-2015 split then 4:1. eps_ratio tracks both regimes.
+  "0001403161" = list(
+    ticker = "V", priced = "A",
+    conv = list(B = list(mode = "eps_ratio", fallback = NA_real_),
+                C = list(mode = "eps_ratio", fallback = NA_real_)),
+    drop_organic_shares = TRUE,
+    window = c("2009-06-01", NA)
+  ),
+
+  # Constellation Brands: class B 1:1 economics, retired Nov 2022.
+  "0000016918" = list(
+    ticker = "STZ", priced = "A",
+    conv = list(B = list(mode = "eps_ratio", fallback = 1)),
+    drop_organic_shares = TRUE,
+    window = c("2010-07-01", NA)
+  ),
+
+  # GoDaddy Up-C: class B has voting only, no economic rights.
+  "0001609711" = list(
+    ticker = "GDDY", priced = "A",
+    conv = list(B = list(mode = "fixed", fallback = 0)),
+    drop_organic_shares = TRUE,
+    window = c("2015-01-01", NA)
+  ),
+
+  # Baker Hughes (BHGE era) Up-C: GE-held class B non-economic.
+  "0001701605" = list(
+    ticker = "BKR", priced = "A",
+    conv = list(B = list(mode = "fixed", fallback = 0)),
+    drop_organic_shares = TRUE,
+    window = c("2017-01-01", "2023-12-31")
+  ),
+
+  # Under Armour: A/B/C equal economics; roster ticker UA = class C
+  # after the 2016-03 split, class A before it.
+  "0001336917" = list(
+    ticker = "UA", priced = "C",
+    conv = list(A = list(mode = "eps_ratio", fallback = 1),
+                B = list(mode = "eps_ratio", fallback = 1)),
+    drop_organic_shares = TRUE,
+    window = c("2016-01-01", "2021-12-31")
+  ),
+
+  # Erie Indemnity: class A listed; class B unlisted. Fixed 2400:1
+  # CONVERSION basis (market-value convention), not eps_ratio: the
+  # reported two-class EPS allocates participation at ~150:1, but B's
+  # market value follows its conversion right into 2400 A shares.
+  "0000922621" = list(
+    ticker = "ERIE", priced = "A",
+    conv = list(B = list(mode = "fixed", fallback = 2400)),
+    drop_organic_shares = TRUE,
+    window = c("2023-01-01", NA)
+  ),
+
+  # Kinder Morgan post-IPO structure: P public; A/B/C investor-retained
+  # stock converting into P near 1:1. Filings tag EPS only for P and A
+  # (verified 2012 10-Q), so B/C carry fixed ~parity fallbacks (B 94M,
+  # C 2.3M of ~800M total -- bounded approximation).
+  "0001506307" = list(
+    ticker = "KMI", priced = "P",
+    conv = list(A = list(mode = "eps_ratio", fallback = 1),
+                B = list(mode = "fixed", fallback = 1),
+                C = list(mode = "fixed", fallback = 1)),
+    drop_organic_shares = TRUE,
+    window = c("2011-01-01", "2015-12-31")
+  ),
+
+  # Lennar: class B ~1:1 economics (trades at a small discount; conv 1
+  # slightly overstates ~2% of B's ~10% weight -- accepted).
+  "0000920760" = list(
+    ticker = "LEN", priced = "A",
+    conv = list(B = list(mode = "eps_ratio", fallback = 1)),
+    drop_organic_shares = TRUE,
+    window = c("2013-02-07", NA)
+  ),
+
+  # McCormick (MKC) is deliberately ABSENT: its 2011 share gap is
+  # unrecoverable point-in-time -- the H2-2011 10-Qs tag no share counts
+  # at all and the first per-class counts arrive with the 10-K filed
+  # 2012-01-27, after every gap snapshot date. 2012+ is already covered
+  # by the organic weighted-average fallback. A wide-window recipe made
+  # things WORSE (replaced good organic totals with an NV-only
+  # undercount at the 2012 golden date).
+
+  # Nike: class A unlisted, class B listed, equal economics.
+  "0000320187" = list(
+    ticker = "NKE", priced = "B",
+    conv = list(A = list(mode = "eps_ratio", fallback = 1)),
+    drop_organic_shares = TRUE,
+    window = c("2009-01-01", "2013-12-31")
+  ),
+
+  # Discovery: series A priced (DISCA); B and C (DISCK) equal economics.
+  "0001437107" = list(
+    ticker = "DISCA", priced = "A",
+    conv = list(B = list(mode = "eps_ratio", fallback = 1),
+                C = list(mode = "eps_ratio", fallback = 1)),
+    drop_organic_shares = TRUE,
+    window = c("2009-01-01", "2022-06-30")
+  ),
+
+  # Triage names: single class, cover shares tagged dimensionally in some
+  # vintages. default_conv 1 counts whatever single member appears.
+  "0001137774" = list(
+    ticker = "PRU", priced = "A", conv = list(), default_conv = 1,
+    drop_organic_shares = TRUE,
+    window = c("2010-01-01", "2014-12-31")
+  ),
+  # Mosaic post-Cargill split (2011-2015): listed common is tagged with a
+  # custom NoClassCommonStockMember; restricted Class A/B convert 1:1.
+  "0001285785" = list(
+    ticker = "MOS", priced = "NC",
+    conv = list(A = list(mode = "fixed", fallback = 1),
+                B = list(mode = "fixed", fallback = 1)),
+    member_map = list("NoClassCommonStock" = "NC"),
+    drop_organic_shares = TRUE,
+    window = c("2014-01-01", "2016-12-31")
+  ),
+  "0000080424" = list(
+    ticker = "PG", priced = "A", conv = list(), default_conv = 1,
+    drop_organic_shares = TRUE,
+    window = c("2009-01-01", "2011-12-31")
+  )
+)
+
+
+# -- Canonical class letter for an explicit member qname.
+# member_map patterns first (ordered), then Class([A-Z]) / Series([A-Z]).
+# Preferred members return NA (not common equity). Unknown members return
+# the raw local member name so recipes can decide via default_conv.
+.mc_canonical_class <- function(member, member_map = NULL) {
+  local <- sub("^[^:]*:", "", member)
+  if (grepl("Preferred", local)) return(NA_character_)
+  if (!is.null(member_map)) {
+    for (pat in names(member_map)) {
+      if (grepl(pat, local)) return(member_map[[pat]])
+    }
+  }
+  m <- regmatches(local, regexpr("(Class|Series)[A-Z](?![a-z])", local,
+                                 perl = TRUE))
+  if (length(m) == 1) return(substr(m, nchar(m), nchar(m)))
+  local
+}
+
+
+# -- Filing index (10-K / 10-Q family) from the submissions API, including
+# older paginated files. window = c(from, to) skips paginated pages whose
+# filingFrom/filingTo range falls entirely outside it (each page is an
+# extra rate-limited round trip). Returns data.table(accession, form,
+# filed, primary_doc) sorted by filed, or NULL on fetch failure.
+fetch_filing_index <- function(cik, window = NULL) {
+
+  url <- sprintf("%s/submissions/CIK%s.json", .EDGAR_BASE, cik)
+  txt <- .edgar_fetch(url)
+  if (is.null(txt)) return(NULL)
+  subs <- tryCatch(jsonlite::fromJSON(txt), error = function(e) NULL)
+  if (is.null(subs)) return(NULL)
+
+  block_to_dt <- function(b) {
+    if (is.null(b) || is.null(b$accessionNumber)) return(NULL)
+    data.table(accession   = b$accessionNumber,
+               form        = b$form,
+               filed       = as.Date(b$filingDate),
+               primary_doc = b$primaryDocument %||% NA_character_)
+  }
+
+  win_from <- if (!is.null(window) && !is.na(window[1])) as.Date(window[1]) else NULL
+  win_to   <- if (!is.null(window) && length(window) > 1 && !is.na(window[2])) {
+    as.Date(window[2])
+  } else NULL
+
+  parts <- list(block_to_dt(subs$filings$recent))
+  extra <- subs$filings$files
+  if (!is.null(extra) && NROW(extra) > 0) {
+    for (i in seq_len(NROW(extra))) {
+      pg_from <- suppressWarnings(as.Date(extra$filingFrom[i]))
+      pg_to   <- suppressWarnings(as.Date(extra$filingTo[i]))
+      if (!is.null(win_from) && !is.na(pg_to)   && pg_to   < win_from) next
+      if (!is.null(win_to)   && !is.na(pg_from) && pg_from > win_to)   next
+      txt2 <- .edgar_fetch(sprintf("%s/submissions/%s", .EDGAR_BASE,
+                                   extra$name[i]))
+      if (is.null(txt2)) next
+      older <- tryCatch(jsonlite::fromJSON(txt2), error = function(e) NULL)
+      parts[[length(parts) + 1L]] <- block_to_dt(older)
+    }
+  }
+
+  dt <- rbindlist(Filter(Negate(is.null), parts))
+  if (nrow(dt) == 0) return(NULL)
+  dt <- dt[form %in% names(.FORM_PRIORITY)]
+  setorder(dt, filed)
+
+  .assert_output(dt, "fetch_filing_index", list(
+    "is data.table"  = is.data.table,
+    "has accession"  = function(x) "accession" %in% names(x),
+    "filed is Date"  = function(x) inherits(x$filed, "Date")
+  ))
+  dt
+}
+
+
+# -- Locate the XBRL instance document inside one filing. Inline-XBRL era
+# filings extract to {doc}_htm.xml; older filings ship a schema-named
+# {prefix}-{yyyymmdd}.xml. Returns the full URL, "" when the filing index
+# was fetched but holds no instance (permanent: pre-XBRL filing), or NULL
+# on fetch failure (transient: retry later).
+locate_xbrl_instance <- function(cik, accession) {
+
+  accn <- gsub("-", "", accession)
+  base <- sprintf("https://www.sec.gov/Archives/edgar/data/%d/%s",
+                  as.integer(cik), accn)
+  txt <- .edgar_fetch(paste0(base, "/index.json"))
+  if (is.null(txt)) return(NULL)
+  idx <- tryCatch(jsonlite::fromJSON(txt), error = function(e) NULL)
+  if (is.null(idx)) return(NULL)
+  items <- idx$directory$item
+  if (is.null(items) || NROW(items) == 0) return("")
+
+  nm <- items$name
+  cand <- nm[grepl("_htm\\.xml$", nm)]
+  if (length(cand) == 0) {
+    cand <- nm[grepl("^[a-z0-9]+-[0-9]{8}\\.xml$", nm, ignore.case = TRUE)]
+  }
+  if (length(cand) == 0) {
+    excl <- grepl("(_cal|_def|_lab|_pre|_ref)\\.xml$|\\.xsd$|FilingSummary",
+                  nm, ignore.case = TRUE)
+    xml_only <- grepl("\\.xml$", nm, ignore.case = TRUE) & !excl
+    if (any(xml_only)) {
+      sz <- suppressWarnings(as.numeric(items$size[xml_only]))
+      cand <- nm[xml_only][which.max(fifelse(is.na(sz), 0, sz))]
+    }
+  }
+  if (length(cand) == 0) return("")
+  paste0(base, "/", cand[1])
+}
+
+
+# -- Parse one instance document. Keeps facts whose context is either
+# non-dimensional or dimensioned ONLY on a ClassOfStock axis. Returns
+# data.table(tag, member, value, period_start, period_end) or NULL.
+# Facts are collected first so only referenced contexts are parsed --
+# large instances (BRK 10-K ~30MB) carry thousands of contexts.
+parse_instance_classes <- function(xml_text) {
+
+  doc <- tryCatch(xml2::read_xml(xml_text), error = function(e) NULL)
+  if (is.null(doc)) return(NULL)
+
+  facts <- list()
+  for (tag in .MC_INSTANCE_TAGS) {
+    fact_nodes <- xml2::xml_find_all(doc,
+      sprintf("//*[local-name()='%s']", tag))
+    if (length(fact_nodes) == 0) next
+    facts[[tag]] <- data.table(
+      tag   = tag,
+      cref  = xml2::xml_attr(fact_nodes, "contextRef"),
+      value = suppressWarnings(as.numeric(xml2::xml_text(fact_nodes)))
+    )
+  }
+  if (length(facts) == 0) return(NULL)
+  fdt <- rbindlist(facts)[!is.na(cref) & !is.na(value)]
+  if (nrow(fdt) == 0) return(NULL)
+
+  # one document pass over contexts, filtered to those the facts reference
+  # (the local-name() XPath visits every element; per-ref queries would
+  # rescan a ~30MB BRK instance dozens of times)
+  refs <- unique(fdt$cref)
+  ctx_nodes <- xml2::xml_find_all(doc, "//*[local-name()='context']")
+  ctx_ids <- xml2::xml_attr(ctx_nodes, "id")
+  sel <- which(ctx_ids %in% refs)
+  ctx <- vector("list", length(sel))
+  names(ctx) <- ctx_ids[sel]
+  for (j in seq_along(sel)) {
+    node <- ctx_nodes[[sel[j]]]
+    mem_nodes <- xml2::xml_find_all(node,
+      ".//*[local-name()='explicitMember']")
+    dims <- xml2::xml_attr(mem_nodes, "dimension")
+    mems <- xml2::xml_text(mem_nodes)
+    class_ok <- length(dims) == 0 || all(grepl("ClassOfStock", dims))
+    inst  <- xml2::xml_text(xml2::xml_find_first(node,
+      ".//*[local-name()='instant']"))
+    start <- xml2::xml_text(xml2::xml_find_first(node,
+      ".//*[local-name()='startDate']"))
+    end   <- xml2::xml_text(xml2::xml_find_first(node,
+      ".//*[local-name()='endDate']"))
+    ctx[[j]] <- list(
+      ok     = class_ok,
+      member = if (length(mems)) mems[1] else "",
+      ps     = if (!is.na(inst)) NA_character_ else start,
+      pe     = if (!is.na(inst)) inst else end
+    )
+  }
+
+  keep <- vapply(fdt$cref, function(r)
+    !is.null(ctx[[r]]) && isTRUE(ctx[[r]]$ok), logical(1))
+  fdt <- fdt[keep]
+  if (nrow(fdt) == 0) return(NULL)
+
+  fdt[, member       := vapply(cref, function(r) ctx[[r]]$member, character(1))]
+  fdt[, period_start := as.Date(vapply(cref, function(r) ctx[[r]]$ps, character(1)))]
+  fdt[, period_end   := as.Date(vapply(cref, function(r) ctx[[r]]$pe, character(1)))]
+  fdt[, cref := NULL]
+  unique(fdt)
+}
+
+
+# -- Fetch + parse all instances for one registry CIK. Resumable: extracted
+# rows cached in {raw_dir}/{cik}_{ticker}.parquet, processed accessions in
+# {raw_dir}/{cik}_{ticker}_accessions.parquet (n_rows = -1 marks a failed
+# fetch/parse, retried on the next run). Never stops on a single filing.
+build_multiclass_raw <- function(ticker, cik,
+                                 raw_dir = .MULTICLASS_RAW_DIR,
+                                 force_refresh = FALSE) {
+
+  rec <- .MULTICLASS_REGISTRY[[cik]]
+  if (is.null(rec)) return(NULL)
+
+  if (!dir.exists(raw_dir)) dir.create(raw_dir, recursive = TRUE)
+  raw_file <- file.path(raw_dir, sprintf("%s_%s.parquet", cik, ticker))
+  acc_file <- file.path(raw_dir, sprintf("%s_%s_accessions.parquet",
+                                         cik, ticker))
+
+  raw_dt <- if (!force_refresh && file.exists(raw_file)) {
+    tryCatch(as.data.table(arrow::read_parquet(raw_file)),
+             error = function(e) NULL)
+  } else NULL
+  acc_dt <- if (!force_refresh && file.exists(acc_file)) {
+    tryCatch(as.data.table(arrow::read_parquet(acc_file)),
+             error = function(e) NULL)
+  } else NULL
+
+  win <- rec$window
+  idx <- fetch_filing_index(cik, window = win)
+  if (is.null(idx) || nrow(idx) == 0) {
+    warning(sprintf("build_multiclass_raw: no filing index for %s (CIK %s)",
+                    ticker, cik), call. = FALSE)
+    return(raw_dt)
+  }
+
+  # XBRL mandate floor: nothing to extract from pre-2009 filings
+  idx <- idx[filed >= as.Date("2009-01-01")]
+  if (!is.null(win)) {
+    if (!is.na(win[1])) idx <- idx[filed >= as.Date(win[1])]
+    if (length(win) > 1 && !is.na(win[2])) idx <- idx[filed <= as.Date(win[2])]
+  }
+
+  # n_rows >= 0: extracted. n_rows == -2: permanent (filing carries no
+  # XBRL instance: pre-mandate or amendment without exhibits) -- never
+  # retried. n_rows == -1: transient fetch/parse failure -- retried.
+  done <- if (!is.null(acc_dt)) {
+    acc_dt[n_rows >= 0 | n_rows == -2L, accession]
+  } else character(0)
+  todo <- idx[!accession %in% done]
+
+  if (nrow(todo) > 0) {
+    message(sprintf("build_multiclass_raw: %s -- %d filings to extract",
+                    ticker, nrow(todo)))
+  }
+
+  new_raw <- list(); new_acc <- list()
+  for (i in seq_len(nrow(todo))) {
+    accn <- todo$accession[i]
+    inst_url <- locate_xbrl_instance(cik, accn)
+    if (!is.null(inst_url) && identical(inst_url, "")) {
+      new_acc[[length(new_acc) + 1L]] <- data.table(
+        accession = accn, filed = todo$filed[i], form = todo$form[i],
+        n_rows = -2L)
+      next
+    }
+    parsed <- NULL
+    if (!is.null(inst_url)) {
+      xml_text <- .edgar_fetch(inst_url)
+      if (!is.null(xml_text)) parsed <- parse_instance_classes(xml_text)
+    }
+    if (is.null(parsed)) {
+      warning(sprintf("build_multiclass_raw: extraction failed for %s %s",
+                      ticker, accn), call. = FALSE)
+      new_acc[[length(new_acc) + 1L]] <- data.table(
+        accession = accn, filed = todo$filed[i], form = todo$form[i],
+        n_rows = -1L)
+      next
+    }
+    parsed[, `:=`(accession = accn, form = todo$form[i],
+                  filed = todo$filed[i])]
+    new_raw[[length(new_raw) + 1L]] <- parsed
+    new_acc[[length(new_acc) + 1L]] <- data.table(
+      accession = accn, filed = todo$filed[i], form = todo$form[i],
+      n_rows = nrow(parsed))
+    if (i %% 10 == 0) {
+      message(sprintf("build_multiclass_raw: %s -- %d/%d filings",
+                      ticker, i, nrow(todo)))
+    }
+  }
+
+  if (length(new_raw) > 0) {
+    raw_dt <- unique(rbindlist(c(list(raw_dt), new_raw), use.names = TRUE,
+                               fill = TRUE))
+    arrow::write_parquet(raw_dt, raw_file)
+  }
+  if (length(new_acc) > 0) {
+    keep <- if (!is.null(acc_dt)) acc_dt[n_rows >= 0 | n_rows == -2L] else NULL
+    acc_dt <- unique(rbindlist(c(list(keep), new_acc), use.names = TRUE,
+                               fill = TRUE))
+    arrow::write_parquet(acc_dt, acc_file)
+  }
+
+  if (!is.null(raw_dt) && nrow(raw_dt) > 0) {
+    .assert_output(raw_dt, "build_multiclass_raw", list(
+      "is data.table" = is.data.table,
+      "has tag/value/accession" = function(x)
+        all(c("tag", "value", "accession", "filed") %in% names(x))
+    ))
+  }
+  raw_dt
+}
+
+
+# -- Conversion factors into the priced class for one filing's rows.
+# Returns named numeric vector (class -> factor), priced class = 1.
+# eps_ratio = median of per-period EPS_class / EPS_priced within the
+# filing (basic first, diluted fallback), guarded against tiny EPS.
+# A fallback may be a function(filed) -> numeric for conversions that
+# changed over time on the as-filed basis (BRK pre/post the 2010 split).
+.mc_conversions <- function(sub, rec) {
+
+  conv <- c(1); names(conv) <- rec$priced
+  filed <- suppressWarnings(min(sub$filed, na.rm = TRUE))
+
+  ratio_from_eps <- function(cl) {
+    for (tg in c("EarningsPerShareBasic", "EarningsPerShareDiluted")) {
+      pr <- sub[tag == tg & class == rec$priced & !is.na(value)]
+      ot <- sub[tag == tg & class == cl & !is.na(value)]
+      if (nrow(pr) == 0 || nrow(ot) == 0) next
+      m <- merge(pr[, .(period_start, period_end, v_pr = value)],
+                 ot[, .(period_start, period_end, v_ot = value)],
+                 by = c("period_start", "period_end"))
+      m <- m[abs(v_pr) >= 0.05]
+      if (nrow(m) > 0) return(stats::median(m$v_ot / m$v_pr))
+    }
+    NA_real_
+  }
+
+  for (cl in names(rec$conv)) {
+    spec <- rec$conv[[cl]]
+    fb <- spec$fallback
+    if (is.function(fb)) fb <- fb(filed)
+    r <- NA_real_
+    if (identical(spec$mode, "eps_ratio")) r <- ratio_from_eps(cl)
+    if (is.na(r)) r <- fb
+    conv[cl] <- r
+  }
+  conv
+}
+
+
+# -- Combine raw per-class rows into canonical cache rows for one CIK.
+# organic_dt supplies the filer's own fy/fp labels per accession.
+synthesize_multiclass_rows <- function(raw_dt, cik, ticker,
+                                       organic_dt = NULL) {
+
+  rec <- .MULTICLASS_REGISTRY[[cik]]
+  if (is.null(rec) || is.null(raw_dt) || nrow(raw_dt) == 0) return(NULL)
+
+  dt <- copy(raw_dt)
+  dt[, class := vapply(member, .mc_canonical_class, character(1),
+                       member_map = rec$member_map)]
+  # invariant: member == "" <=> class == "" (non-dimensional facts)
+  dt <- dt[!is.na(class)]                       # drop preferred-stock members
+
+  # fy/fp per accession: modal organic label. Accessions absent from the
+  # organic frame are SKIPPED (rare: amendments that never reached
+  # companyfacts) -- calendar inference mislabels non-calendar fiscal
+  # years (NKE May FYE, STZ Feb FYE) and a mislabeled FY row corrupts the
+  # timeseries filed_date anchor. NA beats a wrong label.
+  meta <- NULL
+  if (!is.null(organic_dt) && nrow(organic_dt) > 0 &&
+      all(c("accession", "fiscal_year", "fiscal_qtr") %in%
+          names(organic_dt))) {
+    meta <- organic_dt[!is.na(accession),
+                       .N, by = .(accession, fiscal_year, fiscal_qtr)]
+    setorder(meta, accession, -N)
+    meta <- meta[!duplicated(accession), .(accession, fiscal_year,
+                                           fiscal_qtr)]
+  }
+  if (is.null(meta)) {
+    warning(sprintf(
+      "synthesize_multiclass_rows: %s -- no organic fy/fp metadata, skipping",
+      ticker), call. = FALSE)
+    return(NULL)
+  }
+  no_meta <- setdiff(unique(dt$accession), meta$accession)
+  if (length(no_meta) > 0) {
+    warning(sprintf(
+      "synthesize_multiclass_rows: %s -- %d accession(s) lack organic fy/fp, skipped",
+      ticker, length(no_meta)), call. = FALSE)
+    dt <- dt[!accession %in% no_meta]
+  }
+  if (nrow(dt) == 0) return(NULL)
+
+  # accessions whose organic rows already carry genuine diluted EPS: do
+  # NOT synthesize basic-as-diluted there, the organic row must win
+  org_dil_accn <- if (isTRUE(rec$drop_organic_eps)) character(0) else {
+    unique(organic_dt[concept == "eps_diluted" & !is.na(accession),
+                      accession])
+  }
+
+  default_conv <- rec$default_conv %||% NA_real_
+  known_classes <- unique(c(rec$priced, names(rec$conv)))
+  unknown_seen <- character(0)
+  skipped_na_conv <- character(0)
+
+  out <- list()
+  for (accn in unique(dt$accession)) {
+    sub <- dt[accession == accn]
+    conv <- .mc_conversions(sub, rec)
+
+    conv_of <- function(cl) {
+      if (cl %in% names(conv)) {
+        if (is.na(conv[[cl]])) {
+          skipped_na_conv <<- union(skipped_na_conv, cl)
+        }
+        return(conv[[cl]])
+      }
+      if (cl == "") return(NA_real_)
+      unknown_seen <<- union(unknown_seen, cl)
+      default_conv
+    }
+
+    # ---- shares_outstanding: candidates from the dei cover (authoritative
+    # tag) and the balance sheet (demoted tag; may carry the issued-count
+    # defect). Per source: use the period_end carrying the most classes
+    # (comparative instants and conversion-date one-offs carry partial
+    # class sets); a known-class member beats default_conv umbrellas at
+    # the same date (no double count); any NA conversion at the chosen
+    # date kills the candidate -- NA beats an understated sum. The cover
+    # source wins unless the balance sheet covers MORE classes (a cover
+    # tagging only one class must not shadow a complete per-class BS).
+    share_candidate <- function(src_tag) {
+      cov <- sub[tag == src_tag & !is.na(value)]
+      if (nrow(cov) == 0) return(NULL)
+      dim_cov <- cov[class != ""]
+      dim_cov <- dim_cov[!duplicated(paste(class, period_end))]
+      if (nrow(dim_cov) > 0) {
+        n_cls <- dim_cov[, .(n = uniqueN(class)), by = period_end]
+        setorder(n_cls, -n, -period_end)
+        pe_use <- n_cls$period_end[1]
+        cur <- dim_cov[period_end == pe_use]
+        cur_known <- cur[class %in% known_classes]
+        if (nrow(cur_known) > 0) {
+          unknown_seen <<- union(unknown_seen,
+                                 setdiff(cur$class, known_classes))
+          cur <- cur_known
+        }
+        cur[, cf := vapply(class, conv_of, numeric(1))]
+        if (nrow(cur) == 0 || anyNA(cur$cf)) return(NULL)
+        return(list(value = sum(cur$value * cur$cf), pe = pe_use,
+                    n_classes = nrow(cur)))
+      }
+      if (length(rec$conv) == 0) {
+        # undimensioned counts are trusted only for single-class triage
+        # names; for true multi-class filers they are one class's count
+        # on the wrong basis (BRK Class-A fragments)
+        nod <- cov[class == ""]
+        pe_use <- max(nod$period_end)
+        return(list(value = nod[period_end == pe_use, value[1]],
+                    pe = pe_use, n_classes = 1L))
+      }
+      NULL
+    }
+    cand_dei <- share_candidate("EntityCommonStockSharesOutstanding")
+    cand_bs  <- share_candidate("CommonStockSharesOutstanding")
+    pick <- NULL; pick_tag <- NULL
+    if (!is.null(cand_dei) &&
+        (is.null(cand_bs) || cand_dei$n_classes >= cand_bs$n_classes)) {
+      pick <- cand_dei; pick_tag <- .MULTICLASS_SHARES_TAG
+    } else if (!is.null(cand_bs)) {
+      pick <- cand_bs; pick_tag <- .MULTICLASS_SHARES_BS_TAG
+    }
+    # zero-value cover facts occur in the wild (BRK 2010-04-30 dei = 0,
+    # retired classes); a zero count must never win dedup
+    if (!is.null(pick) && !is.na(pick$value) && pick$value > 0) {
+      out[[length(out) + 1L]] <- data.table(
+        concept = "shares_outstanding", tag = pick_tag,
+        value = pick$value, period_end = pick$pe,
+        period_start = as.Date(NA), accession = accn, unit = "shares")
+    }
+
+    # ---- eps: priced-class dimensional first; non-dimensional converted
+    # via organic_eps_class when configured. Source tags are tried in
+    # order; basic is the last-resort diluted source (filers with no
+    # dilutive securities report only basic and diluted == basic), but
+    # only when the filing's organic rows carry no genuine diluted EPS.
+    eps_rows <- function(srcs) {
+      for (src in srcs) {
+        eps <- sub[tag == src & class == rec$priced & !is.na(value)]
+        if (nrow(eps) > 0) return(eps)
+        if (!is.null(rec$organic_eps_class)) {
+          cf <- conv_of(rec$organic_eps_class)
+          nod <- sub[tag == src & class == "" & !is.na(value)]
+          if (nrow(nod) > 0 && !is.na(cf) && cf != 0) {
+            return(copy(nod)[, value := value / cf])
+          }
+        }
+      }
+      NULL
+    }
+    dil_srcs <- c("EarningsPerShareDiluted", "EarningsPerShareBasicAndDiluted")
+    if (!accn %in% org_dil_accn) {
+      dil_srcs <- c(dil_srcs, "EarningsPerShareBasic")
+    }
+    for (spec in list(list(srcs = c("EarningsPerShareBasic",
+                                    "EarningsPerShareBasicAndDiluted"),
+                           out_tag = .MULTICLASS_EPS_BASIC_TAG,
+                           concept = "eps_basic"),
+                      list(srcs = dil_srcs,
+                           out_tag = .MULTICLASS_EPS_DILUTED_TAG,
+                           concept = "eps_diluted"))) {
+      eps <- eps_rows(spec$srcs)
+      if (is.null(eps)) next
+      out[[length(out) + 1L]] <- eps[, .(
+        concept = spec$concept, tag = spec$out_tag, value,
+        period_end, period_start, accession = accn,
+        unit = "USD/shares")]
+    }
+  }
+
+  if (length(unknown_seen) > 0) {
+    warning(sprintf(
+      "synthesize_multiclass_rows: %s -- unmapped class members: %s",
+      ticker, paste(unknown_seen, collapse = ", ")), call. = FALSE)
+  }
+  if (length(skipped_na_conv) > 0) {
+    warning(sprintf(
+      "synthesize_multiclass_rows: %s -- classes skipped (no conversion): %s",
+      ticker, paste(skipped_na_conv, collapse = ", ")), call. = FALSE)
+  }
+  if (length(out) == 0) return(NULL)
+
+  syn <- rbindlist(out, use.names = TRUE)
+  form_filed <- unique(dt[, .(accession, form, filed)])
+  syn <- merge(syn, form_filed, by = "accession", all.x = TRUE)
+  syn <- merge(syn, meta, by = "accession", all.x = TRUE)
+
+  syn[, `:=`(ticker = ticker, cik = cik)]
+  setcolorder(syn, c("ticker", "cik", "concept", "tag", "value",
+                     "period_end", "period_start", "filed", "form",
+                     "accession", "fiscal_year", "fiscal_qtr", "unit"))
+
+  .assert_output(syn, "synthesize_multiclass_rows", list(
+    "is data.table"       = is.data.table,
+    "synthetic tags only" = function(x) all(grepl("^Multiclass", x$tag)),
+    "no NA filed"         = function(x) !anyNA(x$filed),
+    "no NA fiscal labels" = function(x) !anyNA(x$fiscal_qtr),
+    "positive share counts" = function(x)
+      x[concept == "shares_outstanding", all(value > 0)]
+  ))
+  syn
+}
+
+
+# -- Merge hook: drop configured legacy rows, append synthetic rows.
+# Used by fetch_and_cache_ticker (rebuild path) and patch_multiclass_cache.
+.merge_multiclass <- function(dt, ticker, cik,
+                              raw_dir = .MULTICLASS_RAW_DIR) {
+
+  rec <- .MULTICLASS_REGISTRY[[cik]]
+  if (is.null(rec)) return(dt)
+
+  syn <- tryCatch({
+    raw_dt <- build_multiclass_raw(ticker, cik, raw_dir = raw_dir)
+    synthesize_multiclass_rows(raw_dt, cik, ticker, organic_dt = dt)
+  }, error = function(e) {
+    warning(sprintf(".merge_multiclass: synthesis failed for %s: %s",
+                    ticker, e$message), call. = FALSE)
+    NULL
+  })
+
+  # No synthesis -> return dt UNTOUCHED. Applying the drop flags without
+  # replacement rows would gut shares/eps coverage on a transient EDGAR
+  # failure (legacy garbage beats an empty cache that used to be good).
+  if (is.null(syn) || nrow(syn) == 0) {
+    warning(sprintf(
+      ".merge_multiclass: %s -- no synthetic rows, organic rows kept as-is",
+      ticker), call. = FALSE)
+    return(dt)
+  }
+
+  # Drops are scoped to the registry window (by filed date): outside the
+  # window synthesis has no coverage and organic rows must survive.
+  # Inside it, organic share rows are unreliable mixtures of totals and
+  # single-class fragments that would win pit_dedup's accession-first
+  # ordering when a later filing re-reports a comparative instant.
+  in_window <- function(filed) {
+    win <- rec$window
+    if (is.null(win)) return(rep(TRUE, length(filed)))
+    ok <- rep(TRUE, length(filed))
+    if (!is.na(win[1])) ok <- ok & filed >= as.Date(win[1])
+    if (length(win) > 1 && !is.na(win[2])) ok <- ok & filed <= as.Date(win[2])
+    ok & !is.na(filed)
+  }
+  if (isTRUE(rec$drop_organic_shares)) {
+    dt <- dt[!(concept == "shares_outstanding" &
+                 !grepl("^Multiclass", tag) & in_window(filed))]
+  }
+  if (isTRUE(rec$drop_organic_eps)) {
+    dt <- dt[!(concept %in% c("eps_basic", "eps_diluted") &
+                 !grepl("^Multiclass", tag) & in_window(filed))]
+  }
+
+  message(sprintf(".merge_multiclass: %s -- %d synthetic rows (%d shares, %d eps)",
+                  ticker, nrow(syn),
+                  syn[concept == "shares_outstanding", .N],
+                  syn[concept != "shares_outstanding", .N]))
+  # fill: the patch path carries period_type already; classify_period
+  # recomputes it for the appended rows downstream
+  rbindlist(list(dt, syn), use.names = TRUE, fill = TRUE)
+}
+
+
+# -- Patch existing per-ticker caches in place (no companyfacts re-fetch).
+# Strips previous synthetic rows, re-synthesizes, re-dedups, re-writes.
+patch_multiclass_cache <- function(cache_dir = "cache/fundamentals",
+                                   raw_dir = .MULTICLASS_RAW_DIR,
+                                   tickers = NULL) {
+
+  results <- list()
+  for (cik in names(.MULTICLASS_REGISTRY)) {
+    rec <- .MULTICLASS_REGISTRY[[cik]]
+    if (!is.null(tickers) && !(rec$ticker %in% tickers)) next
+
+    cache_file <- file.path(cache_dir,
+                            sprintf("%s_%s.parquet", cik, rec$ticker))
+    if (!file.exists(cache_file)) {
+      warning(sprintf("patch_multiclass_cache: no cache for %s", rec$ticker),
+              call. = FALSE)
+      next
+    }
+    dt <- tryCatch(as.data.table(arrow::read_parquet(cache_file)),
+                   error = function(e) NULL)
+    if (is.null(dt) || nrow(dt) == 0) next
+
+    had_syn <- dt[grepl("^Multiclass", tag), .N]
+    dt <- dt[!grepl("^Multiclass", tag)]
+    dt <- .merge_multiclass(dt, rec$ticker, cik, raw_dir = raw_dir)
+
+    # never trade previously-good synthetic rows for nothing (transient
+    # EDGAR failure must not gut the cache)
+    if (had_syn > 0 && dt[grepl("^Multiclass", tag), .N] == 0) {
+      warning(sprintf(
+        "patch_multiclass_cache: %s -- re-synthesis produced no rows, cache left untouched",
+        rec$ticker), call. = FALSE)
+      next
+    }
+
+    dt <- dedup_fundamentals(dt)
+    dt <- classify_period(dt)
+
+    .assert_output(dt, "patch_multiclass_cache", list(
+      "is data.table"      = is.data.table,
+      "has concept column" = function(x) "concept" %in% names(x),
+      "no duplicate concept+period+qtr+accession" = function(x)
+        !anyDuplicated(x[, .(concept, period_end, fiscal_qtr, accession)])
+    ))
+
+    arrow::write_parquet(dt, cache_file)
+    n_syn <- dt[grepl("^Multiclass", tag), .N]
+    message(sprintf("patch_multiclass_cache: %s -- %d synthetic rows in cache",
+                    rec$ticker, n_syn))
+    results[[rec$ticker]] <- n_syn
+  }
+  invisible(results)
+}
+
+
+# =============================================================================
 # 5. fetch_and_cache_ticker()
 # =============================================================================
 #' Fetch, parse, dedup, and cache fundamentals for a single ticker
@@ -732,7 +1600,25 @@ fetch_and_cache_ticker <- function(ticker, cik,
     dt <- tryCatch(
       as.data.table(arrow::read_parquet(cache_file)),
       error = function(e) NULL)
-    if (!is.null(dt) && nrow(dt) > 0) return(dt)
+    if (!is.null(dt) && nrow(dt) > 0) {
+      # Self-heal (Wave M): a true multi-class cache without synthetic
+      # rows is a poisoned artifact of a transient synthesis failure --
+      # the idempotent cached path would otherwise never retry.
+      rec <- .MULTICLASS_REGISTRY[[cik]]
+      if (!is.null(rec) && length(rec$conv) > 0 &&
+          !any(grepl("^Multiclass", dt$tag))) {
+        message(sprintf(
+          "fetch_and_cache_ticker: %s -- no synthetic multiclass rows in cache, re-synthesizing",
+          ticker))
+        healed <- .merge_multiclass(dt, ticker, cik)
+        if (any(grepl("^Multiclass", healed$tag))) {
+          healed <- classify_period(dedup_fundamentals(healed))
+          arrow::write_parquet(healed, cache_file)
+          return(healed)
+        }
+      }
+      return(dt)
+    }
   }
 
   # Fetch from EDGAR
@@ -749,6 +1635,12 @@ fetch_and_cache_ticker <- function(ticker, cik,
     warning(sprintf("fetch_and_cache_ticker: no target tags found for %s (CIK %s)",
                     ticker, cik), call. = FALSE)
     return(NULL)
+  }
+
+  # Multi-class recovery (Wave M): registry CIKs get per-class facts from
+  # filing instances; companyfacts drops all dimensional facts
+  if (cik %in% names(.MULTICLASS_REGISTRY)) {
+    dt <- .merge_multiclass(dt, ticker, cik)
   }
 
   # Dedup
