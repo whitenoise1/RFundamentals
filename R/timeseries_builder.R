@@ -542,11 +542,11 @@ update_ticker_daily <- function(ticker,
 
   if (last_date >= through_date) return(existing_dt)
 
-  # -- Handle price refresh --
+  # -- Handle price refresh (both providers' cache files) --
   if (refresh_price) {
     escaped_tk <- gsub("\\.", "\\\\.", ticker)
     cache_files <- list.files(price_dir,
-                              pattern = sprintf("^%s_yahoo_", escaped_tk),
+                              pattern = sprintf("^%s_(yahoo|tiingo)_", escaped_tk),
                               full.names = TRUE)
     for (f in cache_files) file.remove(f)
   }

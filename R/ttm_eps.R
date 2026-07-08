@@ -143,6 +143,65 @@ build_ttm_eps_series <- function(fund_dt, splits = NULL) {
 # tickers, so we never refetch them. Returns data.table(ex_date, ratio); 0 rows
 # = no splits. Same Yahoo provider that split-adjusted the price, so the EPS and
 # price split bases stay consistent.
+# Renamed chains where Yahoo keys the continuous history (and splits)
+# under the CURRENT symbol only. Duplicated from pit_assembler.R's
+# .PROVIDER_SYMBOL_MAP so this module sources standalone -- keep in sync
+# (tests/test_price_fallback.R asserts equality).
+.SPLITS_SYMBOL_MAP <- c(
+  COG = "CTRA", GPS = "GAP", FBHS = "FBIN",
+  DISCA = "WBD", VIAC = "PARA", CDAY = "DAY"
+)
+
+# Tiingo split-event fallback for Yahoo-PURGED symbols (Wave P): getSplits
+# errors on a purged symbol, but the split events are needed regardless of
+# whether the Tiingo PRICE fetch has run yet (the fund layer loads splits
+# before any price fetch). Derives TRUE split events from the daily
+# splitFactor column with the same spinoff band filter as pit_assembler's
+# .tiingo_convert -- keep the band in sync. Returns data.table, or NULL
+# when Tiingo is unreachable (no token / HTTP failure) so the caller can
+# avoid caching a false empty.
+.tiingo_splits <- function(sym) {
+  tok <- ""
+  for (nm in c("TIINGO_TOKEN", "tiingo_token")) {
+    v <- Sys.getenv(nm); if (nzchar(v)) { tok <- v; break }
+  }
+  if (tok == "" && file.exists("~/.Renviron")) {
+    readRenviron("~/.Renviron")
+    for (nm in c("TIINGO_TOKEN", "tiingo_token")) {
+      v <- Sys.getenv(nm); if (nzchar(v)) { tok <- v; break }
+    }
+  }
+  if (tok == "" || !requireNamespace("httr", quietly = TRUE) ||
+      !requireNamespace("jsonlite", quietly = TRUE)) return(NULL)
+  d <- tryCatch({
+    resp <- httr::GET(sprintf(
+      "https://api.tiingo.com/tiingo/daily/%s/prices?startDate=2009-01-01&token=%s",
+      tolower(sym), tok), httr::timeout(30))
+    if (httr::status_code(resp) != 200) stop(httr::status_code(resp))
+    as.data.table(jsonlite::fromJSON(
+      httr::content(resp, as = "text", encoding = "UTF-8")))
+  }, error = function(e) NULL)
+  if (is.null(d)) return(NULL)
+  empty <- data.table(ex_date = as.Date(character()), ratio = numeric())
+  if (nrow(d) == 0 || !"splitFactor" %in% names(d)) return(empty)
+  d[, date := as.Date(substr(date, 1, 10))]
+  # duplicated from pit_assembler.R .is_true_split_factor -- keep in sync:
+  # clean small-integer ratio away from 1; spinoffs (arbitrary decimals)
+  # and nonpositive dirty factors rejected
+  is_split <- vapply(d$splitFactor, function(x) {
+    if (is.na(x) || x <= 0 || x == 1) return(FALSE)
+    if (abs(log(x)) < log(1.15)) return(FALSE)
+    for (q in 1:10) {
+      p <- round(x * q)
+      if (p >= 1 && p != q && abs(x - p / q) / x < 0.002) return(TRUE)
+    }
+    FALSE
+  }, logical(1))
+  ev <- d[is_split]
+  if (nrow(ev) == 0) return(empty)
+  ev[, .(ex_date = date, ratio = 1 / splitFactor)]
+}
+
 load_ticker_splits <- function(tk, split_dir = "cache/splits", fetch = TRUE) {
   cf <- file.path(split_dir, paste0(tk, ".parquet"))
   if (file.exists(cf)) {
@@ -151,12 +210,25 @@ load_ticker_splits <- function(tk, split_dir = "cache/splits", fetch = TRUE) {
   }
   empty <- data.table(ex_date = as.Date(character()), ratio = numeric())
   if (!fetch || !requireNamespace("quantmod", quietly = TRUE)) return(empty)
-  # Yahoo uses dashes for class tickers (BRK-B), the roster uses dots
-  sx <- tryCatch(quantmod::getSplits(gsub("\\.", "-", tk)),
-                 error = function(e) NULL)
+  # Renamed chains resolve to the current symbol; Yahoo uses dashes for
+  # class tickers (BRK-B), the roster uses dots
+  sym <- .SPLITS_SYMBOL_MAP[tk]
+  sym <- if (!is.na(sym)) as.character(sym) else tk
+  yerr <- FALSE
+  sx <- tryCatch(quantmod::getSplits(gsub("\\.", "-", sym)),
+                 error = function(e) { yerr <<- TRUE; NULL })
   s <- if (is.null(sx) || !length(sx)) empty else
     data.table(ex_date = as.Date(zoo::index(sx)), ratio = as.numeric(sx))
   s <- s[!is.na(ratio) & ratio > 0]
+  # A getSplits ERROR (vs a clean no-splits answer) means Yahoo does not
+  # know the symbol -- purged delisting. Ask Tiingo before caching, and
+  # do NOT cache when Tiingo is unreachable (a false empty poisons the
+  # as-traded reconstruction of a split-adjusted Tiingo price cache).
+  if (yerr && nrow(s) == 0) {
+    ts <- .tiingo_splits(gsub("\\.", "-", sym))
+    if (is.null(ts)) return(empty)
+    s <- ts
+  }
   if (!dir.exists(split_dir)) dir.create(split_dir, recursive = TRUE)
   tryCatch(arrow::write_parquet(s, cf), error = function(e) NULL)
   s

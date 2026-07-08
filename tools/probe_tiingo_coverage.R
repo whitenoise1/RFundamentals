@@ -13,7 +13,20 @@ suppressPackageStartupMessages({
   library(data.table)
 })
 
-.TOKEN <- Sys.getenv("TIINGO_TOKEN")
+# token from env or ~/.Renviron; both TIINGO_TOKEN and tiingo_token accepted
+.tiingo_token <- function() {
+  for (nm in c("TIINGO_TOKEN", "tiingo_token")) {
+    v <- Sys.getenv(nm)
+    if (nzchar(v)) return(v)
+  }
+  if (file.exists("~/.Renviron")) readRenviron("~/.Renviron")
+  for (nm in c("TIINGO_TOKEN", "tiingo_token")) {
+    v <- Sys.getenv(nm)
+    if (nzchar(v)) return(v)
+  }
+  ""
+}
+.TOKEN <- .tiingo_token()
 if (.TOKEN == "") stop("Set TIINGO_TOKEN (free account at tiingo.com)")
 
 # Gap census 2026-07-08 (docs/DESIGN_SECOND_PRICE_SOURCE.md section 1):
