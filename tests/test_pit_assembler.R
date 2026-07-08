@@ -208,12 +208,73 @@ test("universe returns data.table with required columns", {
 # ============================================================================
 message("\n=== get_price_on_date ===")
 
-test("price on trading day: returns adjusted close", {
+test("price on trading day: returns as-traded close (column 4)", {
   # First trading day in mock data
   d <- index(mock_prices)[1]
   p <- get_price_on_date(mock_prices, d)
-  !is.na(p) && abs(p - as.numeric(coredata(mock_prices[d, 6]))) < 0.01
+  !is.na(p) && abs(p - as.numeric(coredata(mock_prices[d, 4]))) < 0.01
 })
+
+test("price: post-date split is un-adjusted (Close / ratio)", {
+  d <- index(mock_prices)[1]
+  splits <- data.table(ex_date = max(index(mock_prices)) + 30, ratio = 0.25)
+  p <- get_price_on_date(mock_prices, d, splits)
+  expected <- as.numeric(coredata(mock_prices[d, 4])) / 0.25
+  !is.na(p) && abs(p - expected) < 1e-9
+})
+
+test("price: split before the date does not change it", {
+  d <- index(mock_prices)[10]
+  splits <- data.table(ex_date = index(mock_prices)[1] - 30, ratio = 0.25)
+  p_split <- get_price_on_date(mock_prices, d, splits)
+  p_plain <- get_price_on_date(mock_prices, d)
+  !is.na(p_split) && abs(p_split - p_plain) < 1e-9
+})
+
+test("price: multiple post-date splits compound", {
+  d <- index(mock_prices)[1]
+  splits <- data.table(
+    ex_date = c(index(mock_prices)[5], max(index(mock_prices)) + 30),
+    ratio   = c(0.25, 0.1))
+  p <- get_price_on_date(mock_prices, d, splits)
+  expected <- as.numeric(coredata(mock_prices[d, 4])) / (0.25 * 0.1)
+  !is.na(p) && abs(p - expected) < 1e-9
+})
+
+test(".split_factor: NULL and empty splits give 1", {
+  empty <- data.table(ex_date = as.Date(character()), ratio = numeric())
+  all(.split_factor(Sys.Date(), NULL) == 1,
+      .split_factor(Sys.Date(), empty) == 1)
+})
+
+# -- Truth anchors: external facts, not code-derived expectations. These
+# catch basis errors that internal-consistency tests cannot (the Adjusted-
+# close defect passed every suite while NVDA's 2015 P/E read 0.49).
+if (file.exists("cache/splits/AAPL.parquet") &&
+    length(list.files("cache/prices", pattern = "^AAPL_")) > 0) {
+  message("\n=== truth anchors: as-traded prices from real cache ===")
+
+  aapl_px <- fetch_ticker_prices("AAPL", cache_dir = "cache/prices")
+  aapl_sp <- as.data.table(arrow::read_parquet("cache/splits/AAPL.parquet"))
+  p2015 <- get_price_on_date(aapl_px, "2015-06-30", aapl_sp)
+  test("anchor: AAPL 2015-06-30 as-traded close ~ $125",
+       !is.na(p2015) && p2015 > 120 && p2015 < 130)
+
+  p_recent <- get_price_on_date(aapl_px, "2024-06-28", aapl_sp)
+  test("anchor: AAPL 2024-06-28 as-traded close ~ $210",
+       !is.na(p_recent) && p_recent > 205 && p_recent < 216)
+
+  if (file.exists("cache/splits/NVDA.parquet") &&
+      length(list.files("cache/prices", pattern = "^NVDA_")) > 0) {
+    nvda_px <- fetch_ticker_prices("NVDA", cache_dir = "cache/prices")
+    nvda_sp <- as.data.table(arrow::read_parquet("cache/splits/NVDA.parquet"))
+    n2015 <- get_price_on_date(nvda_px, "2015-06-30", nvda_sp)
+    test("anchor: NVDA 2015-06-30 as-traded close ~ $20 (40x split factor)",
+         !is.na(n2015) && n2015 > 17 && n2015 < 24)
+  }
+} else {
+  message("\n=== SKIP: truth anchors (no cached AAPL prices/splits) ===")
+}
 
 test("price on weekend: falls back to prior trading day", {
   # Find a Friday that is in the data, then test Saturday lookup

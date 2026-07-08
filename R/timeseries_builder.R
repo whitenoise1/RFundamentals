@@ -558,11 +558,20 @@ update_ticker_daily <- function(ticker,
   )
   if (is.null(price_xts) || nrow(price_xts) == 0) return(existing_dt)
 
-  # Extract adjusted close for all trading days at once
+  # Extract the as-traded close for all trading days at once: Close
+  # (column 4, split-adjusted to today's basis) divided by the post-date
+  # split factor. Adjusted (column 6) additionally removes dividends and
+  # is never a valid level against as-reported fundamentals. Without a
+  # splits cache this falls back to Close: exact for never-split tickers.
+  splits <- if (exists("load_ticker_splits")) {
+    tryCatch(load_ticker_splits(ticker, fetch = FALSE), error = function(e) NULL)
+  } else NULL
+
   nc <- ncol(price_xts)
-  price_col <- if (nc >= 6) 6 else if (nc >= 4) 4 else 1
+  price_col <- if (nc >= 4) 4 else 1
   all_prices <- as.numeric(coredata(price_xts[, price_col]))
   all_dates  <- as.Date(index(price_xts))
+  all_prices <- all_prices / .split_factor(all_dates, splits)
 
   # -- Filter to new dates --
   new_mask <- all_dates > last_date & all_dates <= through_date
@@ -689,6 +698,13 @@ build_timeseries <- function(start_date  = "2010-01-04",
 
   t0 <- Sys.time()
   message("build_timeseries: starting historical build...")
+
+  if (!exists("load_ticker_splits")) {
+    warning(paste0("build_timeseries: ttm_eps.R not sourced -- daily prices ",
+                   "fall back to split-adjusted Close (mis-scaled before a ",
+                   "ticker's splits) and no eps_ttm augment will run"),
+            call. = FALSE)
+  }
 
   # Load lookups
   master  <- as.data.table(arrow::read_parquet(master_path))

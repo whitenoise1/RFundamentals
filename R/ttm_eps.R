@@ -151,7 +151,9 @@ load_ticker_splits <- function(tk, split_dir = "cache/splits", fetch = TRUE) {
   }
   empty <- data.table(ex_date = as.Date(character()), ratio = numeric())
   if (!fetch || !requireNamespace("quantmod", quietly = TRUE)) return(empty)
-  sx <- tryCatch(quantmod::getSplits(tk), error = function(e) NULL)
+  # Yahoo uses dashes for class tickers (BRK-B), the roster uses dots
+  sx <- tryCatch(quantmod::getSplits(gsub("\\.", "-", tk)),
+                 error = function(e) NULL)
   s <- if (is.null(sx) || !length(sx)) empty else
     data.table(ex_date = as.Date(zoo::index(sx)), ratio = as.numeric(sx))
   s <- s[!is.na(ratio) & ratio > 0]
@@ -197,9 +199,13 @@ augment_daily_ttm <- function(fund_dir  = "cache/fundamentals",
     }
 
     eps_ttm <- .pit_eps_ttm(ttm, d$date)
-    # P/E numerator = the _daily `price` (the same Adjusted close the modal displays),
-    # so Price / eps_ttm reconciles with the shown pe_ttm. eps_ttm is split-normalized
-    # to the current basis, matching the (split-adjusted) price at every date.
+    # Convert from today's split basis (build_ttm_eps_series normalizes all
+    # quarters there so TTM sums can span splits) back to the as-traded
+    # basis of each date, matching the as-traded daily `price`. The split
+    # factors cancel, so pe_ttm = Close / eps_ttm_today_basis either way;
+    # storing eps_ttm as-traded keeps Price / eps_ttm reconciling with the
+    # shown pe_ttm.
+    eps_ttm <- eps_ttm / .split_factor(d$date, splits)
     # Guard: positive trailing EPS only -- eps_ttm <= 0 (TTM loss) is "not meaningful"
     # for P/E and is surfaced as N/M by the frontend (pe_ttm = NA).
     pe_ttm  <- ifelse(!is.na(d$price) & !is.na(eps_ttm) & eps_ttm >= 0.01,

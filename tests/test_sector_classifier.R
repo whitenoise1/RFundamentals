@@ -94,6 +94,19 @@ test("extracts from links with title attribute",
      title_result$sector == "Consumer Defensive" &&
      title_result$industry == "Beverages - Wineries & Distilleries")
 
+# 2026 layout: quote-header_category class, text wrapped in a <span>
+mock_html_2026 <- paste0(
+  '<a href="screener?v=111&f=sec_technology" ',
+  'class="quote-header_category">Technology</a>',
+  '<a href="screener?v=111&f=ind_consumerelectronics" ',
+  'class="quote-header_category" title="Consumer Electronics">',
+  '<span class="min-w-0 truncate">Consumer Electronics</span></a>')
+span_result <- .extract_finviz_sector_industry(mock_html_2026)
+test("extracts from 2026 span-wrapped links",
+     !is.null(span_result) &&
+     span_result$sector == "Technology" &&
+     span_result$industry == "Consumer Electronics")
+
 
 # ============================================================================
 # UNIT TESTS: .finviz_fetch_one() -- dot-ticker handling
@@ -239,8 +252,17 @@ if (file.exists(pq_path)) {
        !any(grepl("&amp;|&lt;|&gt;|&quot;|&#39;", dt$industry)))
 
   # Gate 5: Source field is valid
-  test("source is finviz or fallback",
-       all(dt$source %in% c("finviz", "fallback")))
+  test("source is finviz, fallback, or override",
+       all(dt$source %in% c("finviz", "fallback", "override")))
+
+  # Gate 5b: manual overrides applied (reused-ticker protection)
+  for (tk in names(.SECTOR_OVERRIDES)) {
+    if (tk %in% dt$ticker) {
+      test(sprintf("override applied: %s -> %s", tk, .SECTOR_OVERRIDES[[tk]][1]),
+           dt[ticker == tk, sector] == .SECTOR_OVERRIDES[[tk]][1] &&
+           dt[ticker == tk, source] == "override")
+    }
+  }
 
   # Gate 6: Known ticker spot checks
   if ("AAPL" %in% dt$ticker) {

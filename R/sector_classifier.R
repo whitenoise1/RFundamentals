@@ -28,6 +28,14 @@ suppressPackageStartupMessages({
 
 .FINVIZ_BASE     <- "https://finviz.com/quote.ashx"
 .FINVIZ_RATE_SEC <- 0.5
+
+# Ticker -> c(sector, industry) for constituents whose symbol was reused
+# by an unrelated listing after delisting (finviz would return the wrong
+# company). Only data-bearing constituents need entries; symbols with no
+# fundamentals never enter snapshots.
+.SECTOR_OVERRIDES <- list(
+  INFO = c("Industrials", "Specialty Business Services")  # IHS Markit
+)
 .FINVIZ_UA       <- paste0(
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ",
   "AppleWebKit/537.36 (KHTML, like Gecko) ",
@@ -71,24 +79,31 @@ suppressPackageStartupMessages({
 #' @param html Character. Raw HTML content.
 #' @return Named list with sector and industry, or NULL.
 .extract_finviz_sector_industry <- function(html) {
-  # Finviz uses screener links with sec_ and ind_ prefixes:
+  # Finviz uses screener links with sec_ and ind_ prefixes. Layouts seen:
   #   <a href="screener.ashx?v=111&f=sec_technology" class="tab-link">Technology</a>
-  #   <a href="screener.ashx?v=111&f=ind_consumerelectronics" class="tab-link"...>Consumer Electronics</a>
-  sector_m <- regmatches(html,
-    regexpr('f=sec_[^"]*"[^>]*>([^<]+)</a>', html, perl = TRUE))
-  industry_m <- regmatches(html,
-    regexpr('f=ind_[^"]*"[^>]*>([^<]+)</a>', html, perl = TRUE))
-
-  if (length(sector_m) == 0 || length(industry_m) == 0) return(NULL)
-
-  sector <- sub('.*>([^<]+)</a>$', "\\1", sector_m, perl = TRUE)
-  industry <- sub('.*>([^<]+)</a>$', "\\1", industry_m, perl = TRUE)
-
-  sector   <- .decode_html_entities(trimws(sector))
-  industry <- .decode_html_entities(trimws(industry))
-  if (nchar(sector) == 0 || nchar(industry) == 0) return(NULL)
+  #   <a href="screener?v=111&f=ind_consumerelectronics" class="quote-header_category"
+  #     title="Consumer Electronics"><span class="min-w-0 truncate">Consumer Electronics</span></a>
+  # The 2026 layout wraps the link text in a <span>, so allow one nested tag
+  # between the anchor and its text.
+  sector   <- .finviz_link_text(html, "sec")
+  industry <- .finviz_link_text(html, "ind")
+  if (is.null(sector) || is.null(industry)) return(NULL)
 
   list(sector = sector, industry = industry)
+}
+
+#' Extract the text of the first finviz screener link with the given prefix
+#' @param html Character. Raw HTML content.
+#' @param prefix Character. "sec" or "ind".
+#' @return Character scalar, or NULL if no link found.
+.finviz_link_text <- function(html, prefix) {
+  pat <- sprintf('f=%s_[^"]*"[^>]*>(?:<span[^>]*>)?([^<]+)', prefix)
+  m <- regmatches(html, regexpr(pat, html, perl = TRUE))
+  if (length(m) == 0) return(NULL)
+
+  txt <- .decode_html_entities(trimws(sub(pat, "\\1", m, perl = TRUE)))
+  if (nchar(txt) == 0) return(NULL)
+  txt
 }
 
 #' Decode common HTML entities to plain text
@@ -275,6 +290,22 @@ build_sector_industry <- function(
   # Step 4: Deduplicate (keep finviz over fallback)
   result <- result[order(ticker, source != "finviz")]
   result <- result[!duplicated(ticker)]
+
+  # Step 4b: Manual overrides. Finviz serves the CURRENT listing at a
+  # ticker; when a symbol is reused (or redirected) after a constituent
+  # delists, the scraped sector describes the wrong company. Override
+  # only data-bearing cases (constituent has fundamentals in its era).
+  # Precedent: resolve_all_ciks pass-3 manual CIK overrides.
+  for (tk in names(.SECTOR_OVERRIDES)) {
+    ov <- .SECTOR_OVERRIDES[[tk]]
+    if (tk %in% result$ticker) {
+      result[ticker == tk, `:=`(sector = ov[1], industry = ov[2],
+                                source = "override")]
+    } else {
+      result <- rbind(result, data.table(
+        ticker = tk, sector = ov[1], industry = ov[2], source = "override"))
+    }
+  }
 
   # Step 5: Final summary
   still_missing <- setdiff(tickers, result$ticker)

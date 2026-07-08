@@ -137,11 +137,14 @@ fetch_ticker_prices <- function(ticker, from = "2009-01-01",
   memo_key <- sprintf("%s_%s", ticker, from)
   if (isTRUE(.PRICE_FETCH_FAILED[[memo_key]])) return(NULL)
 
-  # Download from Yahoo
+  # Download from Yahoo. Yahoo uses dashes for class tickers (BRK-B),
+  # while the index roster uses dots (BRK.B); without the conversion the
+  # request 404s and class-share tickers never get price data.
+  yahoo_symbol <- gsub("\\.", "-", ticker)
   px <- NULL
   for (attempt in seq_len(retries)) {
     px <- tryCatch({
-      p <- getSymbols(ticker, src = "yahoo", from = from,
+      p <- getSymbols(yahoo_symbol, src = "yahoo", from = from,
                       to = Sys.Date(), auto.assign = FALSE)
       if (is.null(p) || nrow(p) == 0) stop("empty result")
       p
@@ -169,15 +172,47 @@ fetch_ticker_prices <- function(ticker, from = "2009-01-01",
 # =============================================================================
 # 3. get_price_on_date()
 # =============================================================================
-#' Look up adjusted closing price on a specific date
+#' Cumulative split factor applied after a date
+#'
+#' Yahoo's Close column is retroactively split-adjusted to today's share
+#' basis: Close(d) = as_traded(d) * prod(ratio of splits with ex_date > d),
+#' where a 4:1 split has ratio 0.25. Dividing Close by this factor recovers
+#' the as-traded print. Returns 1 where no later splits exist.
+#' (Duplicated from ttm_eps.R so both modules source standalone.)
+#'
+#' @param filed Date vector.
+#' @param splits data.table with ex_date, ratio; NULL/empty allowed.
+#' @return Numeric vector, same length as filed.
+.split_factor <- function(filed, splits = NULL) {
+  if (is.null(splits) || !NROW(splits)) return(rep(1, length(filed)))
+  ex <- as.Date(splits$ex_date); rt <- as.numeric(splits$ratio)
+  vapply(filed, function(f) {
+    if (is.na(f)) return(1)
+    sel <- ex > f & !is.na(rt) & rt > 0
+    if (!any(sel)) 1 else prod(rt[sel])
+  }, numeric(1))
+}
+
+
+#' Look up the as-traded closing price on a specific date
 #'
 #' If the target date is not a trading day, uses the most recent prior
 #' trading day (up to 10 calendar days back).
 #'
+#' Basis: Yahoo's Close is split-adjusted to today's basis and Adjusted
+#' additionally removes dividends -- both bake future corporate events
+#' into historical levels, mis-scaling ratios against as-reported
+#' fundamentals (a stock with a later 4:1 split looked 4x cheaper).
+#' The as-traded print is Close divided by the post-date split factor.
+#' Without splits this equals Close: exact for never-split tickers,
+#' still dividend-clean for the rest.
+#'
 #' @param price_xts xts. OHLCV price data for one ticker.
 #' @param target_date Date or character. The date to look up.
-#' @return Numeric scalar (adjusted close), or NA_real_ if unavailable.
-get_price_on_date <- function(price_xts, target_date) {
+#' @param splits data.table with ex_date, ratio (load_ticker_splits
+#'   output), or NULL for tickers without split history.
+#' @return Numeric scalar (as-traded close), or NA_real_ if unavailable.
+get_price_on_date <- function(price_xts, target_date, splits = NULL) {
 
   if (is.null(price_xts) || nrow(price_xts) == 0) return(NA_real_)
 
@@ -193,14 +228,11 @@ get_price_on_date <- function(price_xts, target_date) {
   row <- coredata(price_xts[closest, ])
   nc <- ncol(price_xts)
 
-  # Adjusted close is column 6, regular close is column 4
-  if (nc >= 6) {
-    as.numeric(row[1, 6])
-  } else if (nc >= 4) {
-    as.numeric(row[1, 4])
-  } else {
-    NA_real_
-  }
+  # Close is column 4; single-column series fall back to column 1
+  px <- if (nc >= 4) as.numeric(row[1, 4]) else if (nc >= 1)
+    as.numeric(row[1, 1]) else NA_real_
+
+  px / .split_factor(closest, splits)
 }
 
 
@@ -386,6 +418,16 @@ assemble_snapshot <- function(snapshot_date,
   snapshot_date <- as.Date(snapshot_date)
   message(sprintf("assemble_snapshot: %s", snapshot_date))
 
+  # Splits are needed for the as-traded price basis and split-adjusted
+  # share issuance. Do not fail standalone use, but never degrade silently:
+  # the regression harness bug of 2026-07-06 showed silent gating produces
+  # plausible-but-wrong split-sensitive indicators.
+  if (!exists("load_ticker_splits")) {
+    warning(paste0("assemble_snapshot: ttm_eps.R not sourced -- prices fall ",
+                   "back to split-adjusted Close and share issuance is ",
+                   "computed unadjusted"), call. = FALSE)
+  }
+
   # -- Load lookups (use pre-loaded if provided) --
   if (!is.null(.master_dt)) {
     master <- .master_dt
@@ -467,22 +509,22 @@ assemble_snapshot <- function(snapshot_date,
       next
     }
 
-    # Get price on filing date
+    # Split events: needed for the as-traded price basis and for
+    # share-issuance adjustment. load_ticker_splits lives in ttm_eps.R;
+    # a startup warning is emitted when it is absent (see loop preamble).
+    # fetch = FALSE: no network in the snapshot loop; the splits cache is
+    # populated by the timeseries TTM augment.
+    splits <- if (exists("load_ticker_splits")) {
+      tryCatch(load_ticker_splits(tk, fetch = FALSE), error = function(e) NULL)
+    } else NULL
+
+    # Get as-traded price on filing date
     price_data <- tryCatch(
       fetch_ticker_prices(tk, cache_dir = price_cache_dir),
       error = function(e) NULL
     )
-    price <- get_price_on_date(price_data, filing$filed_date)
+    price <- get_price_on_date(price_data, filing$filed_date, splits)
     if (is.na(price)) n_no_price <- n_no_price + 1L
-
-    # Split events for share-issuance adjustment. load_ticker_splits lives
-    # in ttm_eps.R; guard so pit_assembler still works standalone (share
-    # issuance is then computed unadjusted). fetch = FALSE: no network in
-    # the snapshot loop; the splits cache is populated by the timeseries
-    # TTM augment.
-    splits <- if (exists("load_ticker_splits")) {
-      tryCatch(load_ticker_splits(tk, fetch = FALSE), error = function(e) NULL)
-    } else NULL
 
     # Compute indicators (pass point-in-time-filtered fundamentals)
     sector_label <- if (is.na(sec)) "Unknown" else sec
