@@ -419,11 +419,11 @@ suppressPackageStartupMessages({
   formatC(as.integer(cik), width = 10, flag = "0")
 }
 
-.edgar_fetch <- function(url, retries = 3L) {
+.edgar_fetch <- function(url, retries = 3L, timeout_s = 30) {
   for (attempt in seq_len(retries)) {
     resp <- tryCatch({
       httr::GET(url, httr::add_headers(`User-Agent` = .EDGAR_UA),
-                httr::timeout(30))
+                httr::timeout(timeout_s))
     }, error = function(e) NULL)
 
     if (!is.null(resp) && httr::status_code(resp) == 200) {
@@ -820,12 +820,16 @@ classify_period <- function(dt) {
     window = c("2010-07-01", NA)
   ),
 
-  # GoDaddy Up-C: class B has voting only, no economic rights.
+  # GoDaddy Up-C: class B has voting only, no economic rights. Window
+  # ends where dimensional cover tagging stops (last per-class cover
+  # filed 2025-05-02, verified in the terminal-rebuild residual check):
+  # later filings tag the cover NON-dimensionally and reach companyfacts
+  # organically, so the drop must not touch them.
   "0001609711" = list(
     ticker = "GDDY", priced = "A",
     conv = list(B = list(mode = "fixed", fallback = 0)),
     drop_organic_shares = TRUE,
-    window = c("2015-01-01", NA)
+    window = c("2015-01-01", "2025-06-30")
   ),
 
   # Baker Hughes (BHGE era) Up-C: GE-held class B non-economic.
@@ -1047,7 +1051,10 @@ locate_xbrl_instance <- function(cik, accession) {
 # large instances (BRK 10-K ~30MB) carry thousands of contexts.
 parse_instance_classes <- function(xml_text) {
 
-  doc <- tryCatch(xml2::read_xml(xml_text), error = function(e) NULL)
+  # HUGE lifts libxml2's input-size safety limit: >10MB instances (DISCA
+  # FY2018 10-K, 11.7MB) fail with "Huge input lookup" without it
+  doc <- tryCatch(xml2::read_xml(xml_text, options = c("HUGE")),
+                  error = function(e) NULL)
   if (is.null(doc)) return(NULL)
 
   facts <- list()
@@ -1173,7 +1180,9 @@ build_multiclass_raw <- function(ticker, cik,
     }
     parsed <- NULL
     if (!is.null(inst_url)) {
-      xml_text <- .edgar_fetch(inst_url)
+      # instances run to tens of MB (DISCA FY2018 10-K broke the default
+      # 30s ceiling for good, not transiently)
+      xml_text <- .edgar_fetch(inst_url, timeout_s = 180)
       if (!is.null(xml_text)) parsed <- parse_instance_classes(xml_text)
     }
     if (is.null(parsed)) {

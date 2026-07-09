@@ -206,7 +206,11 @@ anchor <- function(d, tk, col, lo, hi) {
   ok
 }
 a <- c(
-  anchor("2015-06-30", "AAPL",  "market_cap", 6.5e11, 8.5e11),
+  # AAPL band is on the FILING-DATE price basis: the previously verified
+  # anchor is $616B (see memory/postmortem), NOT the ~$725B calendar
+  # mid-2015 peak -- the first terminal-rebuild run flagged a false FAIL
+  # here with the value at exactly 6.165e11.
+  anchor("2015-06-30", "AAPL",  "market_cap", 5.5e11, 7.0e11),
   anchor("2015-06-30", "NVDA",  "pe_trailing", 12, 35),
   anchor("2015-06-30", "BRK.B", "market_cap", 2.8e11, 3.9e11),
   anchor("2018-06-30", "ATVI",  "market_cap", 4.5e10, 6.5e10),
