@@ -1,6 +1,6 @@
 # Design: Second Price Source for Yahoo-Purged Names (Wave P)
 
-Status: DESIGN -- not yet implemented. Blocked on: TIINGO_TOKEN (free
+Status: IMPLEMENTED 2026-07-08 (commit b1e266f). Token was provided (free
 signup) + phase-0 coverage verification.
 Date: 2026-07-08. Companion doc: DESIGN_MULTICLASS_SHARES.md.
 
