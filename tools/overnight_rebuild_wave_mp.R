@@ -18,7 +18,7 @@ args <- commandArgs(trailingOnly = TRUE)
 preflight_only <- "--preflight" %in% args
 
 STATE_FILE <- "cache/.rebuild_state_wave_mp"
-GATED_COMMIT <- "b1e266f"
+GATED_COMMIT <- "afd2dcc"
 
 msg <- function(...) message(sprintf("[%s] %s",
   format(Sys.time(), "%H:%M:%S"), sprintf(...)))
