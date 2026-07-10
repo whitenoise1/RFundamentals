@@ -64,7 +64,7 @@ required_fns <- c("load_ticker_splits", ".split_factor", ".merge_multiclass",
 missing <- required_fns[!vapply(required_fns, exists, logical(1))]
 if (length(missing)) stop("missing functions: ", paste(missing, collapse = ", "))
 
-stopifnot(length(.MULTICLASS_REGISTRY) == 14)
+stopifnot(length(.MULTICLASS_REGISTRY) == 16)
 stopifnot(identical(sort(names(.PROVIDER_SYMBOL_MAP)),
                     sort(names(.SPLITS_SYMBOL_MAP))))
 stopifnot(all(.SPLITS_SYMBOL_MAP[names(.PROVIDER_SYMBOL_MAP)] ==

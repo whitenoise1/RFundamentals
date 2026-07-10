@@ -29,12 +29,17 @@ suppressPackageStartupMessages({
 .FINVIZ_BASE     <- "https://finviz.com/quote.ashx"
 .FINVIZ_RATE_SEC <- 0.5
 
-# Ticker -> c(sector, industry) for constituents whose symbol was reused
-# by an unrelated listing after delisting (finviz would return the wrong
-# company). Only data-bearing constituents need entries; symbols with no
-# fundamentals never enter snapshots.
+# Ticker -> c(sector, industry) for constituents finviz cannot classify:
+# symbols reused by an unrelated listing after delisting (finviz returns
+# the wrong company) and dead symbols finviz no longer serves. Only
+# data-bearing constituents need entries; symbols with no fundamentals
+# never enter snapshots. Values mirror the finviz row of the surviving
+# sibling listing where one exists (DISCA/DISCK -> WBD).
 .SECTOR_OVERRIDES <- list(
-  INFO = c("Industrials", "Specialty Business Services")  # IHS Markit
+  INFO  = c("Industrials", "Specialty Business Services"),  # IHS Markit
+  DISCA = c("Communication Services", "Entertainment"),     # Discovery A
+  DISCK = c("Communication Services", "Entertainment"),     # Discovery C
+  FRC   = c("Financial", "Banks - Regional")                # First Republic
 )
 .FINVIZ_UA       <- paste0(
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ",

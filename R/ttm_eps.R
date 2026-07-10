@@ -152,6 +152,16 @@ build_ttm_eps_series <- function(fund_dt, splits = NULL) {
   DISCA = "WBD", VIAC = "PARA", CDAY = "DAY"
 )
 
+# Fundamentals-cache aliases for roster tickers that share a CIK with the
+# cached listing (build_fundamentals dedups the fetch list by CIK, so one
+# file serves every listing of the filer). Mirrors get_fundamentals'
+# CIK-prefix fallback, which this module cannot use because daily files
+# carry no CIK -- keep in sync with the shared-CIK pairs in
+# constituent_master (tests assert each alias resolves to a cache file).
+.FUND_CACHE_ALIASES <- c(
+  DISCK = "DISCA", WBD = "DISCA", UAA = "UA", NWSA = "NWS", FOXA = "FOX"
+)
+
 # Tiingo split-event fallback for Yahoo-PURGED symbols (Wave P): getSplits
 # errors on a purged symbol, but the split events are needed regardless of
 # whether the Tiingo PRICE fetch has run yet (the fund layer loads splits
@@ -250,6 +260,14 @@ augment_daily_ttm <- function(fund_dir  = "cache/fundamentals",
   # `tk` silently resolves `.(tk)` to the whole column, returning row 1 for all).
   path_by_tk <- stats::setNames(fund_files,
                   sub("^[0-9]+_(.*)\\.parquet$", "\\1", basename(fund_files)))
+  # Shared-CIK listings resolve to the sibling ticker's cache file
+  # (DISCK/WBD -> DISCA, ...); never shadow a ticker's own file.
+  for (al in names(.FUND_CACHE_ALIASES)) {
+    tgt <- .FUND_CACHE_ALIASES[[al]]
+    if (!al %in% names(path_by_tk) && tgt %in% names(path_by_tk)) {
+      path_by_tk[al] <- path_by_tk[[tgt]]
+    }
+  }
 
   n_ok <- 0L; n_ttm <- 0L; n_fail <- 0L
   for (f in daily_files) {

@@ -710,10 +710,15 @@ build_timeseries <- function(start_date  = "2010-01-04",
   master  <- as.data.table(arrow::read_parquet(master_path))
   sectors <- as.data.table(arrow::read_parquet(sector_path))
 
-  # Determine tickers to process
+  # Determine tickers to process: every roster ticker whose CIK has a
+  # fundamentals cache file. The filename ticker suffix alone misses
+  # shared-CIK listings (the fetch dedups by CIK, so 0001437107_DISCA
+  # also serves DISCK and WBD; get_fundamentals resolves the alias).
   if (is.null(tickers)) {
     fund_files <- list.files(fund_dir, pattern = "\\.parquet$")
-    tickers <- gsub("^\\d+_(.+)\\.parquet$", "\\1", fund_files)
+    file_tks   <- gsub("^\\d+_(.+)\\.parquet$", "\\1", fund_files)
+    file_ciks  <- gsub("^(\\d+)_.+\\.parquet$", "\\1", fund_files)
+    tickers <- union(file_tks, master[cik %in% file_ciks, ticker])
   }
 
   # Merge metadata

@@ -908,6 +908,34 @@ classify_period <- function(dt) {
     window = c("2009-01-01", "2022-06-30")
   ),
 
+  # News Corp (post-2013 spin entity): class B voting (NWS, the cached
+  # roster ticker), class A non-voting (NWSA, served via CIK alias);
+  # equal economics, single combined EPS. Cover shares are tagged
+  # dimensionally in every filing to date (zero organic
+  # EntityCommonStockSharesOutstanding rows in companyfacts), so the
+  # window stays open. The two 2013 organic CommonStockSharesOutstanding
+  # fragments are dropped. Synthesis warns on nws:SeriesCommonStockMember
+  # every run: an authorized-but-unissued series line, 0 shares in every
+  # filing, correctly skipped.
+  "0001564708" = list(
+    ticker = "NWS", priced = "B",
+    conv = list(A = list(mode = "eps_ratio", fallback = 1)),
+    drop_organic_shares = TRUE,
+    window = c("2013-06-01", NA)
+  ),
+
+  # Fox Corp (post-2019 spin entity): class B voting (FOX, the cached
+  # roster ticker), class A non-voting (FOXA, served via CIK alias);
+  # equal economics, single combined EPS. Dimensional cover tagging
+  # throughout; the lone organic cover row is a registration-statement
+  # placeholder (value 1, 2019-03-18) and is dropped.
+  "0001754301" = list(
+    ticker = "FOX", priced = "B",
+    conv = list(A = list(mode = "eps_ratio", fallback = 1)),
+    drop_organic_shares = TRUE,
+    window = c("2019-01-01", NA)
+  ),
+
   # Triage names: single class, cover shares tagged dimensionally in some
   # vintages. default_conv 1 counts whatever single member appears.
   "0001137774" = list(
@@ -2116,6 +2144,23 @@ get_fundamentals <- function(ticker, cik = NULL,
 
   if (!is.null(cik)) {
     path <- file.path(cache_dir, sprintf("%s_%s.parquet", cik, ticker))
+    if (!file.exists(path)) {
+      # Shared-CIK alias: build_fundamentals dedups the fetch list by CIK,
+      # so multi-listing filers cache under one roster ticker only
+      # (0001437107_DISCA also serves DISCK and WBD; UA serves UAA; NWS
+      # serves NWSA; FOX serves FOXA). Any file with the same CIK prefix
+      # is the same filer.
+      hits <- list.files(cache_dir,
+                         pattern = sprintf("^%s_.*\\.parquet$", cik),
+                         full.names = TRUE)
+      if (length(hits) > 1) {
+        warning(sprintf(
+          "get_fundamentals: multiple cache files for CIK %s, using most recent",
+          cik), call. = FALSE)
+        hits <- hits[order(file.mtime(hits), decreasing = TRUE)]
+      }
+      if (length(hits) >= 1) path <- hits[1]
+    }
     if (file.exists(path)) {
       dt <- as.data.table(arrow::read_parquet(path))
     }
