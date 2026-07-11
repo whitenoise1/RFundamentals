@@ -129,7 +129,10 @@ suppressPackageStartupMessages({
 
   eps_diluted = c(
     "MulticlassEPSDiluted",
-    "EarningsPerShareDiluted"
+    "EarningsPerShareDiluted",
+    # single-class filers that report one combined figure (TIE, WIN --
+    # old-CIK wave Tier 2); ranked last so a real diluted tag always wins
+    "EarningsPerShareBasicAndDiluted"
   ),
 
   interest_expense = c(

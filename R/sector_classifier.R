@@ -312,6 +312,32 @@ build_sector_industry <- function(
     }
   }
 
+  # Step 4c: Old-CIK wave static assignments (Tier 2, 2026-07). ~145
+  # recovered delisted names are dead on finviz (or their reused symbol
+  # serves an unrelated ETF/company); their era-correct classifications
+  # live in a data file rather than a code literal. Same precedence as
+  # .SECTOR_OVERRIDES: always wins over a scrape of the reused symbol.
+  ov_csv <- "data/sector_overrides_oldcik.csv"
+  if (file.exists(ov_csv)) {
+    ov_dt <- fread(ov_csv)
+    n_new <- 0L; n_repl <- 0L
+    for (i in seq_len(nrow(ov_dt))) {
+      tk <- ov_dt$ticker[i]
+      if (tk %in% result$ticker) {
+        result[ticker == tk, `:=`(sector = ov_dt$sector[i],
+                                  industry = ov_dt$industry[i],
+                                  source = "override")]
+        n_repl <- n_repl + 1L
+      } else {
+        result <- rbind(result, data.table(
+          ticker = tk, sector = ov_dt$sector[i],
+          industry = ov_dt$industry[i], source = "override"))
+        n_new <- n_new + 1L
+      }
+    }
+    message(sprintf("  old-CIK overrides: %d added, %d replaced", n_new, n_repl))
+  }
+
   # Step 5: Final summary
   still_missing <- setdiff(tickers, result$ticker)
   if (length(still_missing) > 0) {

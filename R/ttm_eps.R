@@ -149,8 +149,15 @@ build_ttm_eps_series <- function(fund_dt, splits = NULL) {
 # (tests/test_price_fallback.R asserts equality).
 .SPLITS_SYMBOL_MAP <- c(
   COG = "CTRA", GPS = "GAP", FBHS = "FBIN",
-  DISCA = "WBD", VIAC = "PARA", CDAY = "DAY"
+  DISCA = "WBD", VIAC = "PARA", CDAY = "DAY",
+  # old-CIK wave Tier 2 same-share-line chains (see pit_assembler.R)
+  ACE = "CB", ADS = "BFH", ARNC = "HWM", CCE = "CCEP", DLPH = "APTV",
+  HFC = "DINO", HRS = "LHX", JEC = "J", KFT = "MDLZ", SAI = "LDOS",
+  TSO = "ANDV", TYC = "JCI", WPI = "AGN"
 )
+
+# mirror of pit_assembler.R .YAHOO_REUSED_BLOCKLIST -- keep in sync
+.SPLITS_YAHOO_BLOCKLIST <- c("COL", "CAM", "PCL", "PCLN", "PCS")
 
 # Fundamentals-cache aliases for roster tickers that share a CIK with the
 # cached listing (build_fundamentals dedups the fetch list by CIK, so one
@@ -159,7 +166,13 @@ build_ttm_eps_series <- function(fund_dt, splits = NULL) {
 # carry no CIK -- keep in sync with the shared-CIK pairs in
 # constituent_master (tests assert each alias resolves to a cache file).
 .FUND_CACHE_ALIASES <- c(
-  DISCK = "DISCA", WBD = "DISCA", UAA = "UA", NWSA = "NWS", FOXA = "FOX"
+  DISCK = "DISCA", WBD = "DISCA", UAA = "UA", NWSA = "NWS", FOXA = "FOX",
+  # old-CIK wave Tier 2: recovered delisted names whose filer's cache
+  # lives under the current-ticker sibling (same CIK, no second fetch)
+  ACE = "CB", ARNC = "HWM", CHK = "EXE", CMCSK = "CMCSA", DLPH = "APTV",
+  DPS = "KDP", DWDP = "DD", HRS = "LHX", JEC = "J", KFT = "MDLZ",
+  KORS = "CPRI", LUK = "JEF", PCLN = "BKNG", PCS = "TMUS", SAI = "LDOS",
+  TYC = "JCI", ANDV = "TSO"
 )
 
 # Tiingo split-event fallback for Yahoo-PURGED symbols (Wave P): getSplits
@@ -221,12 +234,15 @@ load_ticker_splits <- function(tk, split_dir = "cache/splits", fetch = TRUE) {
   empty <- data.table(ex_date = as.Date(character()), ratio = numeric())
   if (!fetch || !requireNamespace("quantmod", quietly = TRUE)) return(empty)
   # Renamed chains resolve to the current symbol; Yahoo uses dashes for
-  # class tickers (BRK-B), the roster uses dots
+  # class tickers (BRK-B), the roster uses dots. Reused dead symbols
+  # (mirror of pit_assembler.R .YAHOO_REUSED_BLOCKLIST) never ask Yahoo:
+  # it would answer with the reusing company's split history.
   sym <- .SPLITS_SYMBOL_MAP[tk]
   sym <- if (!is.na(sym)) as.character(sym) else tk
   yerr <- FALSE
-  sx <- tryCatch(quantmod::getSplits(gsub("\\.", "-", sym)),
-                 error = function(e) { yerr <<- TRUE; NULL })
+  sx <- if (tk %in% .SPLITS_YAHOO_BLOCKLIST) { yerr <- TRUE; NULL } else
+    tryCatch(quantmod::getSplits(gsub("\\.", "-", sym)),
+             error = function(e) { yerr <<- TRUE; NULL })
   s <- if (is.null(sx) || !length(sx)) empty else
     data.table(ex_date = as.Date(zoo::index(sx)), ratio = as.numeric(sx))
   s <- s[!is.na(ratio) & ratio > 0]
@@ -258,8 +274,27 @@ augment_daily_ttm <- function(fund_dir  = "cache/fundamentals",
   # ticker -> fundamentals path via a NAMED VECTOR (not a keyed data.table: a
   # keyed join `dt[.(tk), ]` whose lookup variable shares the key column's name
   # `tk` silently resolves `.(tk)` to the whole column, returning row 1 for all).
-  path_by_tk <- stats::setNames(fund_files,
-                  sub("^[0-9]+_(.*)\\.parquet$", "\\1", basename(fund_files)))
+  fund_tks <- sub("^[0-9]+_(.*)\\.parquet$", "\\1", basename(fund_files))
+  # Occurrence-split tickers (old-CIK wave Tier 2: CCE, ESRX) have TWO
+  # cache files with the same ticker suffix under different CIKs. The
+  # daily layer runs to the ticker's final trading window, so it must use
+  # the LATEST entity's fundamentals: keep the file whose newest filed
+  # date is most recent (alphabetical CIK order would pick the OLD one).
+  if (anyDuplicated(fund_tks)) {
+    for (tk_dup in unique(fund_tks[duplicated(fund_tks)])) {
+      idx <- which(fund_tks == tk_dup)
+      last_filed <- vapply(fund_files[idx], function(f) {
+        d <- tryCatch(arrow::read_parquet(f, col_select = "filed"),
+                      error = function(e) NULL)
+        if (is.null(d) || !nrow(d)) return(-Inf)
+        as.numeric(max(as.Date(d$filed), na.rm = TRUE))
+      }, numeric(1))
+      drop <- idx[-which.max(last_filed)]
+      fund_files <- fund_files[-drop]
+      fund_tks   <- fund_tks[-drop]
+    }
+  }
+  path_by_tk <- stats::setNames(fund_files, fund_tks)
   # Shared-CIK listings resolve to the sibling ticker's cache file
   # (DISCK/WBD -> DISCA, ...); never shadow a ticker's own file.
   for (al in names(.FUND_CACHE_ALIASES)) {

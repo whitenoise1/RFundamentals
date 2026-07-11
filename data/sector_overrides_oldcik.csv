@@ -1,0 +1,146 @@
+ticker,sector,industry,note
+ACE,Financial,Insurance - Property & Casualty,renamed to Chubb (CB); mirrors CB row
+ADS,Financial,Credit Services,card/loyalty services; now Bread Financial (BFH) Credit Services
+AET,Healthcare,Healthcare Plans,health insurer
+AGN,Healthcare,Drug Manufacturers - General,Botox maker post-Actavis merger
+AKS,Basic Materials,Steel,integrated steelmaker
+ALTR,Technology,Semiconductors,FPGA maker
+ALXN,Healthcare,Biotechnology,rare-disease biologics; SIC pharma
+ANDV,Energy,Oil & Gas Refining & Marketing,ex-Tesoro refiner
+ANR,Energy,Coking Coal,true finviz industry (out of current vocab)
+APOL,Consumer Defensive,Education & Training Services,true finviz industry (out of current vocab)
+ARG,Basic Materials,Specialty Chemicals,industrial gases producer/distributor; wholesale SIC
+ARNC,Industrials,Aerospace & Defense,engineered Al for aero; mirrors successor Howmet (HWM)
+AVP,Consumer Defensive,Household & Personal Products,cosmetics direct seller
+BCR,Healthcare,Medical Instruments & Supplies,catheters and devices
+BIG,Consumer Defensive,Discount Stores,closeout retailer
+BMC,Technology,Software - Infrastructure,IT systems management software
+BMS,Consumer Cyclical,Packaging & Containers,flexible packaging; mirrors acquirer Amcor
+BRCM,Technology,Semiconductors,comms chips
+BXLT,Healthcare,Biotechnology,Baxter bioscience spinoff; plasma/hemophilia biologics
+CA,Technology,Software - Infrastructure,enterprise IT management software
+CAM,Energy,Oil & Gas Equipment & Services,oilfield equipment
+CBE,Industrials,Electrical Equipment & Parts,electrical products; acquired by Eaton
+CCE,Consumer Defensive,Beverages - Non-Alcoholic,Coke bottler
+CELG,Healthcare,Biotechnology,oncology biotech; SIC pharma
+CEPH,Healthcare,Drug Manufacturers - Specialty & Generic,specialty pharma (Provigil)
+CFN,Healthcare,Medical Instruments & Supplies,infusion/dispensing devices
+CHK,Energy,Oil & Gas E&P,gas E&P; successor Expand Energy E&P
+CMCSK,Communication Services,Telecom Services,mirrors CMCSA row
+COL,Industrials,Aerospace & Defense,avionics; now part of RTX
+COV,Healthcare,Medical Devices,mirrors acquirer Medtronic
+CPGX,Energy,Oil & Gas Midstream,gas pipelines
+CSC,Technology,Information Technology Services,IT services; DXC predecessor
+CSRA,Technology,Information Technology Services,government IT services
+CVC,Communication Services,Telecom Services,cable operator; mirrors Charter/Comcast treatment
+CVH,Healthcare,Healthcare Plans,health insurer
+CXO,Energy,Oil & Gas E&P,Permian E&P
+DF,Consumer Defensive,Packaged Foods,dairy processor; SIC 2020 dairy
+DLPH,Consumer Cyclical,Auto Parts,mirrors APTV on finviz
+DNB,Financial,Financial Data & Stock Exchanges,mirrors relisted DNB on finviz
+DNR,Energy,Oil & Gas E&P,SIC 1311 crude oil producer
+DO,Energy,Oil & Gas Drilling,offshore drilling contractor SIC 1381
+DPS,Consumer Defensive,Beverages - Non-Alcoholic,mirrors KDP on finviz
+DTV,Communication Services,Entertainment,satellite pay-TV; finviz put DISH under Entertainment; Telecom Services also arguable
+DWDP,Basic Materials,Chemicals,DowDuPont merged chemical conglomerate
+EMC,Technology,Computer Hardware,storage systems SIC 3572
+ENDP,Healthcare,Drug Manufacturers - Specialty & Generic,specialty/generic pharma
+ESRX,Healthcare,Healthcare Plans,PBM; finviz grouped PBMs with health plans
+ESV,Energy,Oil & Gas Drilling,mirrors VAL on finviz
+ETFC,Financial,Capital Markets,online brokerage; finviz listed ETFC as Capital Markets despite thrift SIC
+EVHC,Healthcare,Medical Care Facilities,physician services and ambulatory care
+FDO,Consumer Defensive,Discount Stores,mirrors DLTR on finviz
+FII,Financial,Asset Management,mirrors FHI on finviz
+FL,Consumer Cyclical,Apparel Retail,finviz classified FL as Apparel Retail (shoe retail)
+FLIR,Technology,Scientific & Technical Instruments,thermal imaging; finviz listing pre-2021
+FRX,Healthcare,Drug Manufacturers - Specialty & Generic,branded specialty pharma
+FTR,Communication Services,Telecom Services,wireline telecom SIC 4813
+GAS,Utilities,Utilities - Regulated Gas,Nicor gas distribution SIC 4924
+GGP,Real Estate,REIT - Retail,regional mall REIT
+GMCR,Consumer Defensive,Packaged Foods,coffee roaster/K-cups; finviz puts coffee roasters in Packaged Foods
+GR,Industrials,Aerospace & Defense,aerospace systems; acquired by UTC
+HAR,Consumer Cyclical,Consumer Electronics,audio equipment SIC 3651
+HCBK,Financial,Banks - Regional,thrift/savings institution
+HFC,Energy,Oil & Gas Refining & Marketing,mirrors DINO on finviz
+HNZ,Consumer Defensive,Packaged Foods,mirrors KHC on finviz
+HOT,Consumer Cyclical,Lodging,hotel operator SIC 7011
+HRS,Industrials,Aerospace & Defense,mirrors LHX on finviz
+HSP,Healthcare,Drug Manufacturers - Specialty & Generic,injectable generics
+IGT,Consumer Cyclical,Gambling,slot machines; mirrors current IGT on finviz
+JCP,Consumer Cyclical,Department Stores,SIC 5311 department stores
+JDSU,Technology,Communication Equipment,mirrors VIAV on finviz; optical networking
+JEC,Industrials,Engineering & Construction,mirrors J on finviz
+JNS,Financial,Asset Management,mirrors JHG on finviz
+JOY,Industrials,Farm & Heavy Construction Machinery,mining equipment maker; matches CAT/Komatsu peers
+JWN,Consumer Cyclical,Department Stores,Nordstrom; finviz JWN was Department Stores
+KFT,Consumer Defensive,Packaged Foods,pre-split diversified Kraft; MDLZ successor is Confectioners but combined firm was grocery+snacks
+KORS,Consumer Cyclical,Luxury Goods,handbags/accessories; CPRI successor luxury group; Footwear & Accessories also plausible
+KRFT,Consumer Defensive,Packaged Foods,NA grocery arm; KHC successor is Packaged Foods
+LLL,Industrials,Aerospace & Defense,defense electronics; merged into L3Harris (Aerospace & Defense)
+LLTC,Technology,Semiconductors,analog chipmaker; SIC 3674 agrees
+LM,Financial,Asset Management,asset manager; acquired by Franklin Resources
+LO,Consumer Defensive,Tobacco,cigarettes; SIC 2111 agrees
+LSI,Technology,Semiconductors,storage/networking chips; SIC 3674 agrees
+LUK,Financial,Capital Markets,renamed Jefferies Financial (JEF = Capital Markets); holding co with Jefferies core
+LVLT,Communication Services,Telecom Services,fiber backbone carrier; merged into Lumen
+LXK,Technology,Computer Hardware,printers and imaging; SIC computer equipment agrees
+MHS,Healthcare,Healthcare Plans,PBM; mirrors finviz treatment of ESRX/CVS PBMs
+MJN,Consumer Defensive,Packaged Foods,infant formula; peer to food producers
+MNK,Healthcare,Drug Manufacturers - Specialty & Generic,specialty generics pharma; SIC 2834 agrees
+MOLX,Technology,Electronic Components,connectors; SIC 3678 agrees
+MON,Basic Materials,Agricultural Inputs,seeds and agrochemicals; peers CTVA/FMC
+MWW,Industrials,Staffing & Employment Services,online recruitment; SIC 7363 help supply agrees
+NBL,Energy,Oil & Gas E&P,independent E&P; SIC 1311 agrees
+NFX,Energy,Oil & Gas E&P,independent E&P; SIC 1311 agrees
+NSM,Technology,Semiconductors,analog chipmaker acquired by TXN; SIC 3674 agrees
+NVLS,Technology,Semiconductor Equipment & Materials,deposition equipment; merged into Lam Research
+NYX,Financial,Financial Data & Stock Exchanges,exchange operator; peer ICE classification
+PCL,Real Estate,REIT - Specialty,timber REIT; WY successor is REIT - Specialty
+PCLN,Consumer Cyclical,Travel Services,renamed Booking Holdings (BKNG = Travel Services)
+PCP,Industrials,Aerospace & Defense,aerospace castings/fasteners; SIC foundries but end-market aero (verified)
+PCS,Communication Services,Telecom Services,prepaid wireless carrier; merged into T-Mobile
+PDCO,Healthcare,Medical Distribution,dental/vet distributor; finviz PDCO = Medical Distribution
+PETM,Consumer Cyclical,Specialty Retail,pet superstore retailer
+PGN,Utilities,Utilities - Regulated Electric,regulated electric; merged into Duke
+PLL,Industrials,Specialty Industrial Machinery,filtration systems; acquired by Danaher
+QEP,Energy,Oil & Gas E&P,independent E&P; SIC 1311 agrees
+RAI,Consumer Defensive,Tobacco,cigarettes; SIC 2111 agrees
+RDC,Energy,Oil & Gas Drilling,offshore driller; SIC 1381 agrees
+RHT,Technology,Software - Infrastructure,enterprise Linux/middleware; acquired by IBM
+RRD,Industrials,Specialty Business Services,commercial printer; finviz put RRD under Specialty Business Services
+RSH,Consumer Cyclical,Specialty Retail,consumer electronics retailer
+RTN,Industrials,Aerospace & Defense,defense prime; merged into RTX
+SAI,Technology,Information Technology Services,govt IT services; mirrors Leidos LDOS
+SCG,Utilities,Utilities - Regulated Electric,SCE&G electric-led electric+gas utility
+SHLD,Consumer Cyclical,Department Stores,Sears/Kmart department stores
+SIAL,Basic Materials,Specialty Chemicals,lab/fine chemicals; GICS specialty chemicals
+SNI,Communication Services,Entertainment,cable networks HGTV/Food Network
+SPLS,Consumer Cyclical,Specialty Retail,office supplies retailer
+SRCL,Industrials,Waste Management,medical waste services
+STJ,Healthcare,Medical Devices,cardiac devices; acquired by Abbott
+SVU,Consumer Defensive,Food Distribution,grocery wholesaler plus retail banners
+SWN,Energy,Oil & Gas E&P,natural gas producer
+SWY,Consumer Defensive,Grocery Stores,supermarket chain
+TEG,Utilities,Utilities - Diversified,combined electric and gas holding co
+TGNA,Communication Services,Broadcasting,true finviz industry (out of current vocab)
+TIE,Basic Materials,Other Industrial Metals & Mining,true finviz industry (out of current vocab)
+TIF,Consumer Cyclical,Luxury Goods,jewelry; acquired by LVMH
+TLAB,Technology,Communication Equipment,telecom network equipment
+TSO,Energy,Oil & Gas Refining & Marketing,independent refiner
+TSS,Industrials,Specialty Business Services,payment processor; mirrors acquirer GPN
+TWC,Communication Services,Telecom Services,cable operator; mirrors Charter
+TWX,Communication Services,Entertainment,media networks/studios; now WBD
+TYC,Industrials,Security & Protection Services,fire and security products/services
+VAR,Healthcare,Medical Devices,radiation oncology systems
+VIAB,Communication Services,Entertainment,media networks; successor PARA
+WCG,Healthcare,Healthcare Plans,managed Medicaid/Medicare insurer
+WFM,Consumer Defensive,Grocery Stores,natural foods supermarkets
+WFR,Technology,Semiconductor Equipment & Materials,silicon wafer maker
+WIN,Communication Services,Telecom Services,rural wireline telecom
+WPI,Healthcare,Drug Manufacturers - Specialty & Generic,generic drugmaker; became Actavis
+WPX,Energy,Oil & Gas E&P,shale oil and gas producer
+WYN,Consumer Cyclical,Lodging,hotel franchisor plus timeshare pre-split
+X,Basic Materials,Steel,integrated steelmaker
+XEC,Energy,Oil & Gas E&P,Permian/Mid-Continent producer
+XL,Financial,Insurance - Property & Casualty,P&C and specialty insurer
+YHOO,Communication Services,Internet Content & Information,web portal and search

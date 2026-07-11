@@ -98,6 +98,18 @@ We do not currently know the reclassification rate. Two cheap probes bound it:
 Neither probe requires a rebuild. Probe 1 should run before the single full
 rebuild; probe 2 reports annually.
 
+**Probe 1 result (2026-07-11, `tools/probe_sic_vs_finviz.R`):** across 495
+mapped current constituents, SIC-derived sector agrees with finviz for 374
+(75.6%) and disagrees for 121 (24.4%). The disagreements concentrate on
+structural taxonomy boundaries (consumer-vs-industrial suppliers, healthcare
+distributors/IT, exchange-listed financial data firms), not on instability --
+i.e. SIC is a coarse *fallback taxonomy*, roughly 1-in-4 names would be
+grouped differently under it. Consequences: (a) delisted names whose sector
+came from SIC-family reasoning carry that ambiguity into sector-relative
+indicators; (b) the probe does NOT measure time-drift, so probe 2 (dated
+dimension) remains the exit-criterion measurement. Raw table:
+`cache/lookups/sic_finviz_probe.parquet`.
+
 ### Exit criteria (what would close L1)
 
 Close L1 only if BOTH:
@@ -159,5 +171,68 @@ An FDIC/FFIEC call-report ingestion path, or a licensed fundamentals
 source covering FDIC-only filers. If one lands: fetch fundamentals, then
 fetch prices via a direct Tiingo pull under FRCB (bypassing the provider
 map), then rebuild FRC's 17 dates.
+
+---
+
+## L3 -- SBNY (Signature Bank) has no recoverable fundamentals
+
+**Status:** OPEN (accepted 2026-07-11, old-CIK wave Tier 2)
+**Severity:** LOW (one ticker, 6 member dates, 2021-12-20 .. 2023-03-15)
+
+Same class as L2/FRC: Signature Bank was a New York state-chartered bank
+with **no holding company**, filing its 10-K/10-Q with the **FDIC** under
+Exchange Act 12(i). Its EDGAR CIK (1288784, "Signature Bank Corp")
+carries only third-party SC 13G/13D filings -- zero 10-K/10-Q forms, no
+companyfacts payload. Verified 2026-07-11 during Tier 2 CIK resolution
+(`tools/oldcik_resolve_ciks.R` marked it UNRECOVERABLE_FDIC). Exit
+criteria identical to L2.
+
+---
+
+## L4 -- Old-CIK wave price-unrecoverable windows
+
+**Status:** OPEN (accepted 2026-07-11, old-CIK wave Tier 2)
+**Severity:** LOW-MEDIUM (fundamentals present, market-cap/price ratios NA)
+
+### The decision
+
+Tier 2 recovered FUNDAMENTALS for ~147 delisted constituents, but a
+subset of their membership windows has no recoverable daily price series
+from either provider: Yahoo purges delisted symbols (and REUSES some for
+unrelated listings -- see the `.YAHOO_REUSED_BLOCKLIST` in
+pit_assembler.R, added after Yahoo's "COL" served a $0.15 penny stock
+across Rockwell Collins' window), and Tiingo's delisted-chain backfill
+for many dead names only reaches back to 2016-01-04.
+
+These names keep their fundamentals columns (balance-sheet ratios,
+margins, accruals, growth) on their member dates; only price-dependent
+indicators (market cap, valuation ratios, price-scaled composites) stay
+NA. This enlarges the fundamentals-present-but-market-cap-NA census
+relative to the pre-Tier-2 ledger BY DESIGN -- those rows previously had
+NO data at all.
+
+### The ledger (window with no or partial price coverage; final 2026-07-11)
+
+- **No provider coverage** (window fully dark, 31 names): ALTR, APOL,
+  BIG, BMC, CA, CBE, CEPH, DF, DNB, DO, DTV, EMC, ENDP, ESV, FTR, GR,
+  IGT, JCP, LXK, MNK, MOLX, MON, NFX, NSM, NYX, PGN, SHLD, SPLS, TLAB,
+  WFR, WIN (+ carried over from Wave P: BTU and INFO old-entity windows,
+  WRK). Tiingo's metadata advertises chains for several of these (NYX
+  1996-2013) but its /prices payload for names delisted before ~2016 is
+  empty -- the metadata is not the data.
+- **Tail-only coverage** (Tiingo's 2016-01-04 delisted backfill floor,
+  or Yahoo's residual series): HAR, LLTC, CVC, PCP, BRCM (2016+ only),
+  HOT (2015+ only) -- earlier member dates stay price-NA.
+- Yahoo-reused symbols recovered via the Tiingo chain instead
+  (`.YAHOO_REUSED_BLOCKLIST`): COL, CAM, PCL, PCLN, PCS.
+- Recovered IN FULL for the grid despite earlier windows: YHOO, LO
+  (caches 2009+, windows start pre-grid -- all in-grid member dates
+  priced).
+
+### Exit criteria
+
+A price source with pre-2016 delisted coverage (CRSP, Sharadar SEP,
+Norgate). If one lands: fetch the listed windows, warm splits, and
+regenerate only the affected ticker-dates.
 
 ---

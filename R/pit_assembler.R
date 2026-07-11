@@ -118,13 +118,38 @@ get_universe_at_date <- function(snapshot_date, master_dt) {
   FBHS  = "FBIN",   # Fortune Brands Home -> Innovations (2022)
   DISCA = "WBD",    # Discovery series A -> Warner Bros. Discovery (2022)
   VIAC  = "PARA",   # Viacom/ViacomCBS -> Paramount (2022)
-  CDAY  = "DAY"     # Ceridian -> Dayforce (2024)
+  CDAY  = "DAY",    # Ceridian -> Dayforce (2024)
+  # old-CIK wave Tier 2 (2026-07): same-share-line renames whose full
+  # chain both providers key under the CURRENT symbol. Corporate
+  # mechanics verified per name -- conversions with share RATIOS (e.g.
+  # WPX->DVN) must never be mapped.
+  ACE   = "CB",     # ACE Ltd renamed Chubb (2016)
+  ADS   = "BFH",    # Alliance Data renamed Bread Financial (2022)
+  ARNC  = "HWM",    # Arconic Inc renamed Howmet (2020; ARNC reused by spinco)
+  CCE   = "CCEP",   # new CCE -> Coca-Cola European Partners (2016); Tiingo
+                    # chain reaches the pre-2010 old-CCE line too
+  DLPH  = "APTV",   # Delphi Automotive renamed Aptiv (2017; DLPH reused)
+  HFC   = "DINO",   # HollyFrontier -> HF Sinclair (2022)
+  HRS   = "LHX",    # Harris renamed L3Harris (2019)
+  JEC   = "J",      # Jacobs Engineering ticker change (2019)
+  KFT   = "MDLZ",   # Kraft Foods Inc renamed Mondelez (2012; KRFT spun off)
+  SAI   = "LDOS",   # SAIC Inc renamed Leidos (2013; new SAIC spun off)
+  TSO   = "ANDV",   # Tesoro renamed Andeavor (2017; chain ends 2018)
+  TYC   = "JCI",    # Tyco plc = surviving entity, renamed JCI plc (2016)
+  WPI   = "AGN"     # Watson -> Actavis -> Allergan plc (chain ends 2020)
 )
 
 .provider_symbol <- function(ticker) {
   mapped <- .PROVIDER_SYMBOL_MAP[ticker]
   if (!is.na(mapped)) as.character(mapped) else ticker
 }
+
+# Dead constituents whose symbol Yahoo has REUSED for an unrelated
+# listing: a Yahoo fetch SUCCEEDS with the wrong company's prices (COL
+# served a $0.15 penny stock across Rockwell Collins' membership window).
+# For these, skip Yahoo entirely -- Tiingo keys the true delisted chain
+# under the same symbol. Mirrored in ttm_eps.R .SPLITS_YAHOO_BLOCKLIST.
+.YAHOO_REUSED_BLOCKLIST <- c("COL", "CAM", "PCL", "PCLN", "PCS")
 
 # Tiingo token from env or ~/.Renviron (either case variant).
 .tiingo_token <- function() {
@@ -329,10 +354,12 @@ fetch_ticker_prices <- function(ticker, from = "2009-01-01",
   # (COG -> CTRA: Yahoo purges the old symbol and keys the continuous
   # history under the new one). Yahoo uses dashes for class tickers
   # (BRK-B), while the index roster uses dots (BRK.B); without the
-  # conversion the request 404s.
+  # conversion the request 404s. Reused dead symbols never ask Yahoo --
+  # it would answer with the WRONG company (see .YAHOO_REUSED_BLOCKLIST).
   yahoo_symbol <- gsub("\\.", "-", .provider_symbol(ticker))
   px <- NULL
-  for (attempt in seq_len(retries)) {
+  retries_yahoo <- if (ticker %in% .YAHOO_REUSED_BLOCKLIST) 0L else retries
+  for (attempt in seq_len(retries_yahoo)) {
     px <- tryCatch({
       p <- getSymbols(yahoo_symbol, src = "yahoo", from = from,
                       to = Sys.Date(), auto.assign = FALSE)

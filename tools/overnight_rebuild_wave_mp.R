@@ -18,7 +18,7 @@ args <- commandArgs(trailingOnly = TRUE)
 preflight_only <- "--preflight" %in% args
 
 STATE_FILE <- "cache/.rebuild_state_wave_mp"
-GATED_COMMIT <- "afd2dcc"
+GATED_COMMIT <- "TIER2-SET-AT-COMMIT"  # bump to the Tier 2 gated commit
 
 msg <- function(...) message(sprintf("[%s] %s",
   format(Sys.time(), "%H:%M:%S"), sprintf(...)))
@@ -81,12 +81,19 @@ msg("date grid: %d dates, %s .. %s", length(dates), dates[1], dates[length(dates
 
 # determinism check: re-assemble the most recent GATED golden date into a
 # temp dir and compare against the gated file. Any drift -> stop.
-msg("determinism check: 2024-06-30 (gated golden date)")
+# Tier 2: the baseline is the GATE OUTPUT (cache/gate_tier2/pass2), not
+# the production snapshot -- production predates the Tier 1/2 additions
+# (FOXA/NWSA/WBD at 2024 etc.; see the f876382 note), so comparing
+# against it would flag the gated additions as drift.
+msg("determinism check: 2024-06-30 (Tier 2 gate baseline)")
 tmp_out <- file.path(tempdir(), "det_check")
 dir.create(tmp_out, showWarnings = FALSE)
 det <- assemble_snapshot("2024-06-30", output_dir = tmp_out,
                          prefetch_prices = FALSE)
-gold <- as.data.table(arrow::read_parquet("cache/snapshots/pit_2024-06-30_raw.parquet"))
+BASELINE_2024 <- "cache/gate_tier2/pass2/pit_2024-06-30_raw.parquet"
+if (!file.exists(BASELINE_2024)) stop(
+  "Tier 2 gate baseline missing -- run tools/oldcik_gate_tier2.R (2 passes) first")
+gold <- as.data.table(arrow::read_parquet(BASELINE_2024))
 newf <- as.data.table(arrow::read_parquet(file.path(tmp_out, "pit_2024-06-30_raw.parquet")))
 setkey(gold, ticker); setkey(newf, ticker)
 stopifnot(identical(gold$ticker, newf$ticker))
@@ -191,7 +198,12 @@ for (d in dates) {
   n_gap <- n_gap + length(g)
   if (d == "2024-06-30") gap_2024 <- g
 }
-msg("census: %d gap ticker-dates total (was 1,545 pre-wave); 2024-06-30 residuals: %s",
+# Tier 2 note: the gap census INCREASES vs the post-Wave-M/P ledger BY
+# DESIGN -- ~147 recovered names now carry fundamentals, and the subset
+# with price-unrecoverable windows (KNOWN_LIMITATIONS L4) lands in this
+# audit as fundamentals-present-but-mcap-NA. Those rows previously had
+# no data at all; a larger census here is recovery, not regression.
+msg("census: %d gap ticker-dates total (77 documented pre-Tier-2; L4 adds the price-dark windows); 2024-06-30 residuals: %s",
     n_gap, paste(sort(gap_2024), collapse = ",") )
 
 # truth anchors (rule 2: external facts, band checks)
@@ -217,7 +229,13 @@ a <- c(
   anchor("2024-06-30", "BRK.B", "market_cap", 8.0e11, 10.0e11),
   anchor("2024-06-30", "V",     "market_cap", 4.3e11, 6.0e11),
   anchor("2012-06-30", "K",     "market_cap", 1.5e10, 2.4e10),
-  anchor("2024-06-30", "GDDY",  "pe_trailing", 8, 20)
+  anchor("2024-06-30", "GDDY",  "pe_trailing", 8, 20),
+  # old-CIK wave Tier 2 recovered names (filing-date price basis)
+  anchor("2015-06-30", "AET",   "market_cap", 2.5e10, 5.5e10),
+  anchor("2015-06-30", "ESRX",  "market_cap", 3.5e10, 9.0e10),
+  anchor("2015-06-30", "TWX",   "market_cap", 5.0e10, 9.5e10),
+  anchor("2020-06-30", "FLIR",  "market_cap", 3.0e9,  9.0e9),
+  anchor("2012-06-30", "NWSA",  "market_cap", 3.0e10, 8.0e10)  # old News Corp via TFCFA stitch
 )
 
 # indicator-count pin: exactly 130 indicators in every file
