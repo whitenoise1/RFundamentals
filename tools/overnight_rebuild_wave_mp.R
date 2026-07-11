@@ -18,7 +18,7 @@ args <- commandArgs(trailingOnly = TRUE)
 preflight_only <- "--preflight" %in% args
 
 STATE_FILE <- "cache/.rebuild_state_wave_mp"
-GATED_COMMIT <- "TIER2-SET-AT-COMMIT"  # bump to the Tier 2 gated commit
+GATED_COMMIT <- "015a512"
 
 msg <- function(...) message(sprintf("[%s] %s",
   format(Sys.time(), "%H:%M:%S"), sprintf(...)))
