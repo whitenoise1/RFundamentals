@@ -105,20 +105,23 @@ arrow::write_parquet(
                                      as.Date("2026-07-10"), by = "day")),
              close = 100),
   file.path(ap_dir, "UPTODATE_yahoo_2009-01-01.parquet"))
+ap1 <- .append_ticker_prices("UPTODATE", through_date = as.Date("2026-07-10"),
+                             price_dir = ap_dir)
 test("append: cache already current -> 0 rows, no network",
-     .append_ticker_prices("UPTODATE", through_date = as.Date("2026-07-10"),
-                           price_dir = ap_dir) == 0L)
+     ap1$appended == 0L)
+test("append: no-op reports the cached last date",
+     ap1$last_date == as.Date("2026-07-10"))
 
 arrow::write_parquet(
   data.frame(date = "2020-01-02", close = 5),
   file.path(ap_dir, "DEADCO_tiingo_2009-01-01.parquet"))
 test("append: tiingo-sourced cache skipped",
      .append_ticker_prices("DEADCO", through_date = Sys.Date(),
-                           price_dir = ap_dir) == 0L)
+                           price_dir = ap_dir)$appended == 0L)
 
 test("append: missing cache -> NA",
      is.na(.append_ticker_prices("GHOST", through_date = Sys.Date(),
-                                 price_dir = ap_dir)))
+                                 price_dir = ap_dir)$appended))
 unlink(ap_dir, recursive = TRUE)
 
 

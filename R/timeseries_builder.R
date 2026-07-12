@@ -753,10 +753,17 @@ update_ticker_daily <- function(ticker,
     }
   }
 
-  fb <- is.na(sh_val)
+  # FY-stub fallback, and staleness guard: when the FY stub in effect is
+  # NEWER than the last per-share observation (a stalled per-share
+  # series -- share tags dropped from later vintages), the annual count
+  # is the fresher basis and must win. Without this, one extraction gap
+  # freezes the share count forever.
+  fund_filed <- fund_dt$filed_date[fund_idx]
+  fb <- is.na(sh_val) | (!is.na(fund_filed) & sh_basis < fund_filed &
+                           !is.na(as.numeric(fund_dt$stub_shares[fund_idx])))
   if (any(fb)) {
     sh_val[fb]   <- as.numeric(fund_dt$stub_shares[fund_idx])[fb]
-    sh_basis[fb] <- fund_dt$filed_date[fund_idx][fb]
+    sh_basis[fb] <- fund_filed[fb]
   }
 
   sf_day    <- .split_factor(new_dates, splits)

@@ -237,7 +237,9 @@ load_ticker_splits <- function(tk, split_dir = "cache/splits", fetch = TRUE,
   if (!refresh && !is.null(cached)) return(cached)
   empty <- data.table(ex_date = as.Date(character()), ratio = numeric())
   if (!fetch || !requireNamespace("quantmod", quietly = TRUE)) {
-    return(if (!is.null(cached)) cached else empty)
+    out <- if (!is.null(cached)) cached else empty
+    if (refresh && fetch) attr(out, "refresh_failed") <- TRUE
+    return(out)
   }
   # Renamed chains resolve to the current symbol; Yahoo uses dashes for
   # class tickers (BRK-B), the roster uses dots. Reused dead symbols
@@ -258,8 +260,23 @@ load_ticker_splits <- function(tk, split_dir = "cache/splits", fetch = TRUE,
   # as-traded reconstruction of a split-adjusted Tiingo price cache).
   if (yerr && nrow(s) == 0) {
     ts <- .tiingo_splits(gsub("\\.", "-", sym))
-    if (is.null(ts)) return(if (!is.null(cached)) cached else empty)
+    if (is.null(ts)) {
+      # fetch failed outright: the caller cannot tell "no new split"
+      # from "could not check" without this flag -- the Tier D split
+      # guard must NOT take the append path on a failed check
+      out <- if (!is.null(cached)) cached else empty
+      attr(out, "refresh_failed") <- TRUE
+      return(out)
+    }
     s <- ts
+  }
+  # Never let a clean-EMPTY answer clobber a non-empty cache: split
+  # events do not disappear. Yahoo answers empty for symbols whose
+  # events were derived from Tiingo (Wave P chains) -- overwriting would
+  # flip .splits_hash, trigger a false split-rebuild, and rebuild the
+  # ticker WITHOUT split adjustment (D1 reintroduced).
+  if (refresh && nrow(s) == 0 && !is.null(cached) && nrow(cached) > 0) {
+    return(cached)
   }
   if (!dir.exists(split_dir)) dir.create(split_dir, recursive = TRUE)
   tryCatch(arrow::write_parquet(s, cf), error = function(e) NULL)

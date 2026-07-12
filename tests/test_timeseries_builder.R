@@ -774,6 +774,22 @@ test("D1: eps on the day's basis -> pe continuous (20)",
 test("D1: 10-Q cover refresh picked up from filed date",
      abs(refr$market_cap - 50 * 2.05e9) < 1)
 
+# Stalled per-share series: an obs OLDER than the FY stub in effect
+# must NOT shadow the newer annual count (extraction-gap guard)
+arrow::write_parquet(data.table(
+  filed_date = as.Date("2019-05-01"),      # predates the FY2019 10-K
+  period_end = as.Date("2019-04-25"),
+  shares     = 7e8),
+  file.path(d1_ts, "SPLITCO_pershare.parquet"))
+unlink(file.path(d1_ts, "SPLITCO_daily.parquet"))
+arrow::write_parquet(splitco_split, split_cache)
+d1_stale <- update_ticker_daily("SPLITCO", through_date = as.Date("2020-07-10"),
+                                start_date = as.Date("2020-06-01"),
+                                price_dir = d1_price, ts_dir = d1_ts)
+if (!had_split_cache) unlink(split_cache)
+test("D1: newer FY stub beats a stalled per-share obs",
+     abs(d1_stale[date == as.Date("2020-06-10")]$market_cap - 100e9) < 1)
+
 # FY-stub fallback: same fixture without the pershare layer must still
 # be split-consistent (legacy layers)
 unlink(file.path(d1_ts, c("SPLITCO_daily.parquet", "SPLITCO_pershare.parquet")))

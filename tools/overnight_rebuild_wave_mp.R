@@ -150,16 +150,23 @@ msg("phase 1 complete: %d ok, %d failed (%s)",
 # 24 D2/A names plus the delisted banks need sector-correct masks)
 # =============================================================================
 msg("phase 2: full timeseries layer rebuild")
-if (!file.exists(PHASE2_MARKER)) {
+# The marker is KEYED to the gated commit: a marker left behind by a
+# previous wave (or a bumped GATED_COMMIT) must not suppress the wipe,
+# or the "full rebuild" would silently reuse old-code layers -- the
+# stale-artifact failure mode of the disaster postmortem.
+marker_ok <- file.exists(PHASE2_MARKER) &&
+  identical(readLines(PHASE2_MARKER, warn = FALSE)[1], GATED_COMMIT)
+if (!marker_ok) {
   old_layers <- list.files("cache/timeseries",
                            pattern = "_(fund|daily|pershare)\\.parquet$",
                            full.names = TRUE)
-  msg("wiping %d timeseries layers (marker %s)", length(old_layers),
-      PHASE2_MARKER)
+  msg("wiping %d timeseries layers (marker %s @ %s)", length(old_layers),
+      PHASE2_MARKER, GATED_COMMIT)
   invisible(file.remove(old_layers))
-  file.create(PHASE2_MARKER)
+  writeLines(GATED_COMMIT, PHASE2_MARKER)
 } else {
-  msg("phase 2 wipe already done this run-series (marker present) -- resuming")
+  msg("phase 2 wipe already done for %s (marker present) -- resuming",
+      GATED_COMMIT)
 }
 invisible(build_timeseries(end_date = as.Date("2026-06-30")))
 msg("phase 2 complete")
@@ -280,3 +287,9 @@ msg("  validate failures: %s",
 msg("  anchors: %d/%d", sum(a), length(a))
 msg("  pin: %s", if (length(pin_fail)) "FAIL" else "ok")
 msg("==================================================")
+
+# a CLEAN run retires its resume state so the next wave starts fresh
+if (verdict) {
+  unlink(c(STATE_FILE, PHASE2_MARKER))
+  msg("resume state retired (%s, %s)", STATE_FILE, PHASE2_MARKER)
+}

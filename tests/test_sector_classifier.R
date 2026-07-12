@@ -323,6 +323,37 @@ test("scd merge: legacy prev without valid_from gets floor-stamped", {
   all(m3[ticker == "BBB" & sector == "Financial",
          valid_from] == .SECTOR_VALID_FROM_FLOOR)
 })
+test("scd merge: NA industry gaining a value counts as a change", {
+  prev_na <- data.table(ticker = "EEE", sector = "Financial",
+                        industry = NA_character_, source = "fallback",
+                        valid_from = as.Date("2010-01-01"))
+  cur_na <- data.table(ticker = "EEE", sector = "Financial",
+                       industry = "Banks - Regional", source = "finviz")
+  m4 <- merge_sector_scd(prev_na, cur_na, as_of = as.Date("2026-07-12"))
+  nrow(m4) == 2 &&
+    m4[valid_from == as.Date("2026-07-12"), industry] == "Banks - Regional"
+})
+
+# -- apply_sector_overrides: one data path for all entry points --
+message("\n=== apply_sector_overrides ===")
+
+aso <- data.table(ticker = c("SIVB", "AAPL"),
+                  sector = c("Technology", "Technology"),
+                  industry = c("Wrong Industry", "Consumer Electronics"),
+                  source = "finviz")
+aso2 <- apply_sector_overrides(copy(aso), add_missing = FALSE)
+test("overrides: scraped reused symbol corrected in place",
+     aso2[ticker == "SIVB", sector] == "Financial" &&
+       aso2[ticker == "SIVB", source] == "override")
+test("overrides: non-override ticker untouched",
+     aso2[ticker == "AAPL", sector] == "Technology" &&
+       aso2[ticker == "AAPL", source] == "finviz")
+test("overrides: add_missing = FALSE appends nothing",
+     nrow(aso2) == 2)
+aso3 <- apply_sector_overrides(copy(aso), add_missing = TRUE)
+test("overrides: add_missing = TRUE appends absent override tickers",
+     "KSU" %in% aso3$ticker &&
+       aso3[ticker == "KSU", sector] == "Industrials")
 
 
 # ============================================================================

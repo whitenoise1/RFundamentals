@@ -172,11 +172,19 @@ run_full_build <- function(start_date      = "2010-03-31",
 #' @param date Date or character. Update through this date (default today).
 #' @param force_weekly Logical. Run Tier W regardless of cadence.
 #' @param force_monthly Logical. Run Tier M regardless of cadence.
-#' @param ... Passed to run_incremental_update (paths, refresh flags).
+#' @param master_path,sector_path,fund_dir Legacy names, passed through.
+#' @param price_cache_dir Legacy name for price_dir, mapped.
+#' @param output_dir Legacy name for snapshot_dir, mapped.
+#' @param ... Passed to run_incremental_update (further paths, flags).
 #' @return Invisible list of per-tier stats.
-run_daily_update <- function(date          = Sys.Date(),
-                             force_weekly  = FALSE,
-                             force_monthly = FALSE,
+run_daily_update <- function(date            = Sys.Date(),
+                             force_weekly    = FALSE,
+                             force_monthly   = FALSE,
+                             master_path     = .DEFAULT_MASTER_PATH,
+                             sector_path     = .DEFAULT_SECTOR_PATH,
+                             fund_dir        = .DEFAULT_FUND_DIR,
+                             price_cache_dir = .DEFAULT_PRICE_DIR,
+                             output_dir      = .DEFAULT_SNAPSHOT_DIR,
                              ...) {
 
   if (!exists("run_incremental_update", mode = "function")) {
@@ -185,7 +193,12 @@ run_daily_update <- function(date          = Sys.Date(),
          call. = FALSE)
   }
   run_incremental_update(as_of = date, force_weekly = force_weekly,
-                         force_monthly = force_monthly, ...)
+                         force_monthly = force_monthly,
+                         master_path = master_path,
+                         sector_path = sector_path,
+                         fund_dir = fund_dir,
+                         price_dir = price_cache_dir,
+                         snapshot_dir = output_dir, ...)
 }
 
 
@@ -396,8 +409,17 @@ validate_snapshot <- function(snapshot_date,
   }
 
   # -- Daily-layer integrity (D1 gate; memoized per session) --
+  # The memo key folds in a cheap content fingerprint (file count + max
+  # mtime), so a rebuild or Tier D append in the same session
+  # invalidates the memo instead of replaying a stale verdict.
   if (check_daily) {
-    memo_key <- paste(ts_dir, sector_path, split_dir, sep = "|")
+    dl_files <- list.files(ts_dir, pattern = "_daily\\.parquet$",
+                           full.names = TRUE)
+    fp <- if (length(dl_files) > 0) {
+      sprintf("%d|%.0f", length(dl_files),
+              as.numeric(max(file.mtime(dl_files))))
+    } else "empty"
+    memo_key <- paste(ts_dir, sector_path, split_dir, fp, sep = "|")
     daily_res <- .DAILY_GATE_CACHE[[memo_key]]
     if (is.null(daily_res)) {
       daily_res <- validate_daily_layer(ts_dir = ts_dir,
@@ -593,6 +615,16 @@ validate_daily_layer <- function(ts_dir      = "cache/timeseries",
   checks["split_consistent_market_cap"] <- is.null(jump_dt)
   details$split_jump_failures <- jump_dt
   details$n_split_events_checked <- n_events
+  # zero checked events on a production-sized layer means the splits
+  # cache was unreadable/misplaced -- a vacuous pass here would wave the
+  # exact D1 defect through, so it fails instead. Small synthetic
+  # fixtures (< 100 daily files) are exempt.
+  if (length(daily_files) >= 100) {
+    checks["split_events_checked"] <- n_events > 0
+    if (n_events == 0) {
+      message("  FAIL: 0 split events checked -- splits cache missing/unreadable?")
+    }
+  }
   if (!is.null(jump_dt)) {
     message(sprintf(
       "  FAIL: %d/%d split events with split-inconsistent mc/pe (D1): %s",
@@ -610,7 +642,14 @@ validate_daily_layer <- function(ts_dir      = "cache/timeseries",
                   sum(checks), length(checks),
                   if (all_pass) "PASS" else "FAIL", elapsed))
 
-  list(pass = all_pass, checks = checks, details = details)
+  out <- list(pass = all_pass, checks = checks, details = details)
+  .assert_output(out, "validate_daily_layer", list(
+    "has pass/checks/details" = function(x)
+      all(c("pass", "checks", "details") %in% names(x)),
+    "checks non-empty (no vacuous pass)" = function(x)
+      length(x$checks) > 0
+  ))
+  out
 }
 
 

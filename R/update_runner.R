@@ -69,6 +69,19 @@ suppressPackageStartupMessages({
   invisible(obj)
 }
 
+# Manifest invariants, shared by save_update_manifest and every tier's
+# return (each tier mutates the manifest and is public API).
+.assert_manifest <- function(manifest, fn) {
+  .assert_output_ur(manifest, fn, list(
+    "is data.table"  = is.data.table,
+    "has ticker"     = function(x) "ticker" %in% names(x),
+    "has watermark"  = function(x) .WATERMARK_TK %in% x$ticker,
+    "no dup tickers" = function(x) !anyDuplicated(x$ticker),
+    "valid statuses" = function(x)
+      all(x[ticker != .WATERMARK_TK, status] %in% .MANIFEST_STATUSES)
+  ))
+}
+
 # Deterministic fingerprint of a splits table; a changed hash is the
 # Tier D signal that Yahoo re-based the whole price history.
 .splits_hash <- function(s) {
@@ -112,14 +125,7 @@ load_update_manifest <- function(path = .MANIFEST_PATH) {
 #' @param manifest data.table.
 #' @param path Character. Manifest parquet path.
 save_update_manifest <- function(manifest, path = .MANIFEST_PATH) {
-  .assert_output_ur(manifest, "save_update_manifest", list(
-    "is data.table"    = is.data.table,
-    "has ticker"       = function(x) "ticker" %in% names(x),
-    "has watermark"    = function(x) .WATERMARK_TK %in% x$ticker,
-    "no dup tickers"   = function(x) !anyDuplicated(x$ticker),
-    "valid statuses"   = function(x)
-      all(x[ticker != .WATERMARK_TK, status] %in% .MANIFEST_STATUSES)
-  ))
+  .assert_manifest(manifest, "save_update_manifest")
   dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
   arrow::write_parquet(manifest, path)
   invisible(manifest)
@@ -150,34 +156,44 @@ bootstrap_update_manifest <- function(
   active_tks <- unique(master[status == "ACTIVE", ticker])
   tks <- sort(union(fund_tks, active_tks))
 
-  # newest roster row per ticker (occurrence splits: latest entity)
+  # newest roster row per ticker (occurrence splits: latest entity);
+  # fund_dir listed ONCE -- per-ticker list.files on the Drive mount
+  # would turn the bootstrap into a network-metadata stall
   mm <- master[order(ticker, date_added)][, .SD[.N], by = ticker]
+  cik_by_tk <- setNames(mm$cik, mm$ticker)
+  fund_all  <- list.files(fund_dir, pattern = "\\.parquet$",
+                          full.names = TRUE)
+  fund_base <- basename(fund_all)
 
   rows <- vector("list", length(tks))
   for (i in seq_along(tks)) {
     tk <- tks[i]
-    cik <- mm[ticker == tk, cik]
-    cik <- if (length(cik)) cik[1] else NA_character_
+    cik <- cik_by_tk[[tk]] %||% NA_character_
 
     # fundamentals cache: newest filed + accession (CIK-keyed file with
     # the shared-CIK alias fallback handled by get_fundamentals; here a
-    # cheap prefix glob mirrors it)
+    # cheap prefix match mirrors it)
     fund_file <- NULL
     if (!is.na(cik)) {
-      cand <- list.files(fund_dir, pattern = paste0("^", cik, "_"),
-                         full.names = TRUE)
-      if (length(cand)) fund_file <- cand[1]
+      hit <- fund_all[startsWith(fund_base, paste0(cik, "_"))]
+      if (length(hit)) fund_file <- hit[1]
     }
     if (is.null(fund_file)) {
-      cand <- list.files(fund_dir, pattern = paste0("_", tk, "\\.parquet$"),
-                         full.names = TRUE)
-      if (length(cand)) fund_file <- cand[1]
+      hit <- fund_all[endsWith(fund_base, paste0("_", tk, ".parquet"))]
+      if (length(hit)) fund_file <- hit[1]
     }
     last_filed <- NA; last_accn <- NA_character_; cf_fetch <- NA
     if (!is.null(fund_file)) {
       fd <- tryCatch(as.data.table(arrow::read_parquet(
-        fund_file, col_select = tidyselect::any_of(c("filed", "accession")))),
+        fund_file,
+        col_select = tidyselect::any_of(c("filed", "accession", "form")))),
         error = function(e) NULL)
+      if (!is.null(fd) && nrow(fd)) {
+        # restrict to the same form family the Tier W probe compares
+        # against -- an 8-K comparative filed after the latest 10-Q
+        # would otherwise force a spurious refetch on the first run
+        if ("form" %in% names(fd)) fd <- fd[form %in% .PERSHARE_FORMS]
+      }
       if (!is.null(fd) && nrow(fd)) {
         last_filed <- suppressWarnings(max(as.Date(fd$filed), na.rm = TRUE))
         if ("accession" %in% names(fd)) {
@@ -254,41 +270,50 @@ bootstrap_update_manifest <- function(
 #' @param ticker Character. Roster ticker.
 #' @param through_date Date. Append up to this date.
 #' @param price_dir Character. Price cache directory.
-#' @return Number of rows appended (0L on no-op), or NA_integer_ on
-#'   fetch failure (cache untouched).
+#' @return List: $appended (rows appended; 0L on no-op; NA_integer_ on
+#'   fetch failure, cache untouched) and $last_date (max cached date
+#'   after the call, NA on failure).
 .append_ticker_prices <- function(ticker, through_date = Sys.Date(),
                                   price_dir = "cache/prices") {
+  fail <- list(appended = NA_integer_, last_date = as.Date(NA))
   cache_file <- .price_cache_path(ticker, cache_dir = price_dir)
-  if (!file.exists(cache_file)) return(NA_integer_)
-  if (grepl("_tiingo_", basename(cache_file))) return(0L)
-  if (ticker %in% .YAHOO_REUSED_BLOCKLIST) return(0L)
+  if (!file.exists(cache_file)) return(fail)
 
   old <- tryCatch(as.data.frame(arrow::read_parquet(cache_file)),
                   error = function(e) NULL)
-  if (is.null(old) || nrow(old) == 0) return(NA_integer_)
+  if (is.null(old) || nrow(old) == 0) return(fail)
   last_cached <- max(as.Date(old$date), na.rm = TRUE)
-  if (last_cached >= as.Date(through_date)) return(0L)
+  noop <- list(appended = 0L, last_date = last_cached)
+
+  if (grepl("_tiingo_", basename(cache_file))) return(noop)
+  if (ticker %in% .YAHOO_REUSED_BLOCKLIST) return(noop)
+  if (last_cached >= as.Date(through_date)) return(noop)
 
   yahoo_symbol <- gsub("\\.", "-", .provider_symbol(ticker))
-  px <- tryCatch({
-    p <- quantmod::getSymbols(yahoo_symbol, src = "yahoo",
-                              from = last_cached + 1L,
-                              to = as.Date(through_date) + 1L,
-                              auto.assign = FALSE)
-    if (is.null(p) || nrow(p) == 0) NULL else p
-  }, error = function(e) NULL)
-  if (is.null(px)) return(NA_integer_)
+  px <- NULL
+  for (attempt in 1:2) {
+    px <- tryCatch({
+      p <- quantmod::getSymbols(yahoo_symbol, src = "yahoo",
+                                from = last_cached + 1L,
+                                to = as.Date(through_date) + 1L,
+                                auto.assign = FALSE)
+      if (is.null(p) || nrow(p) == 0) NULL else p
+    }, error = function(e) NULL)
+    if (!is.null(px)) break
+    if (attempt < 2) Sys.sleep(2)
+  }
+  if (is.null(px)) return(fail)
 
   colnames(px) <- sub("^[^.]+\\.",
                       paste0(gsub("\\.", "-", ticker), "."), colnames(px))
   new_df <- data.frame(date = as.character(zoo::index(px)),
                        zoo::coredata(px), check.names = FALSE)
   new_df <- new_df[as.Date(new_df$date) > last_cached, , drop = FALSE]
-  if (nrow(new_df) == 0) return(0L)
-  if (!identical(names(old), names(new_df))) return(NA_integer_)
+  if (nrow(new_df) == 0) return(noop)
+  if (!identical(names(old), names(new_df))) return(fail)
 
   arrow::write_parquet(rbind(old, new_df), cache_file)
-  nrow(new_df)
+  list(appended = nrow(new_df), last_date = max(as.Date(new_df$date)))
 }
 
 
@@ -325,17 +350,27 @@ run_tier_daily <- function(as_of = Sys.Date(),
     res <- tryCatch({
       # -- 1. split guard FIRST --
       split_rebased <- FALSE
+      guard_failed  <- FALSE
       if (refresh_splits) {
         s_new <- load_ticker_splits(tk, split_dir, fetch = TRUE,
                                     refresh = TRUE)
-        h_new <- .splits_hash(s_new)
-        h_old <- manifest[ticker == tk, splits_hash]
-        if (!identical(h_new, h_old)) {
-          split_rebased <- TRUE
-          manifest[ticker == tk, splits_hash := h_new]
+        if (isTRUE(attr(s_new, "refresh_failed"))) {
+          # could not CHECK for a new split: "no change" is unproven,
+          # so the append path (which assumes a stable Yahoo basis) is
+          # not safe this run -- the daily layer still advances on the
+          # existing same-basis cache
+          guard_failed <- TRUE
+        } else {
+          h_new <- .splits_hash(s_new)
+          h_old <- manifest[ticker == tk, splits_hash]
+          if (!identical(h_new, h_old)) {
+            split_rebased <- TRUE
+            manifest[ticker == tk, splits_hash := h_new]
+          }
         }
       }
 
+      new_price_last <- as.Date(NA)
       if (split_rebased) {
         # new true split: the whole Yahoo history re-based -> full price
         # re-fetch + full daily-layer rebuild for this ticker. No append
@@ -345,15 +380,17 @@ run_tier_daily <- function(as_of = Sys.Date(),
                              pattern = sprintf("^%s_(yahoo|tiingo)_",
                                                gsub("\\.", "\\\\.", tk)),
                              full.names = TRUE)) file.remove(f)
-        invisible(fetch_ticker_prices(tk, cache_dir = price_dir))
+        px <- fetch_ticker_prices(tk, cache_dir = price_dir)
+        if (!is.null(px)) new_price_last <- max(as.Date(zoo::index(px)))
         daily_f <- file.path(ts_dir, sprintf("%s_daily.parquet", tk))
         if (file.exists(daily_f)) file.remove(daily_f)
         n_split_rebuilds <- n_split_rebuilds + 1L
-      } else {
-        # -- 2. price append (no-split path) --
-        n_add <- .append_ticker_prices(tk, through_date = as_of,
-                                       price_dir = price_dir)
-        if (is.na(n_add)) n_price_fail <- n_price_fail + 1L
+      } else if (!guard_failed) {
+        # -- 2. price append (no-split path, guard verified) --
+        ap <- .append_ticker_prices(tk, through_date = as_of,
+                                    price_dir = price_dir)
+        if (is.na(ap$appended)) n_price_fail <- n_price_fail + 1L
+        else new_price_last <- ap$last_date
       }
 
       # -- 3. daily-layer append (10-Q per-share stubs, D1-fixed) --
@@ -362,10 +399,10 @@ run_tier_daily <- function(as_of = Sys.Date(),
                                price_dir = price_dir, ts_dir = ts_dir)
       if (!is.null(d) && nrow(d) > 0) {
         new_last <- max(as.Date(d$date))
-        pf <- .price_cache_path(tk, cache_dir = price_dir)
-        manifest[ticker == tk, `:=`(
-          last_daily_date = new_last,
-          last_price_date = as.Date(.parquet_col_max(pf, "date")))]
+        manifest[ticker == tk, last_daily_date := new_last]
+        if (!is.na(new_price_last)) {
+          manifest[ticker == tk, last_price_date := new_price_last]
+        }
         if (is.na(before) || new_last > before || split_rebased) {
           changed_tks <- c(changed_tks, tk)
           n_appended <- n_appended + 1L
@@ -393,6 +430,7 @@ run_tier_daily <- function(as_of = Sys.Date(),
   }
 
   manifest[ticker == .WATERMARK_TK, last_daily_date := as_of]
+  .assert_manifest(manifest, "run_tier_daily")
   stats <- list(n = nrow(work), appended = n_appended,
                 split_rebuilds = n_split_rebuilds,
                 price_failures = n_price_fail,
@@ -424,8 +462,9 @@ run_tier_daily <- function(as_of = Sys.Date(),
   if (is.null(b) || is.null(b$accessionNumber)) return(NULL)
   dt <- data.table(accession = b$accessionNumber, form = b$form,
                    filed = as.Date(b$filingDate))
-  dt <- dt[form %in% c("10-K", "10-K/A", "10-Q", "10-Q/A",
-                       "20-F", "20-F/A", "40-F", "40-F/A")]
+  # same statement-bearing form family the per-share layer keys on --
+  # one shared constant so the two lists cannot drift
+  dt <- dt[form %in% .PERSHARE_FORMS]
   if (nrow(dt) == 0) return(NULL)
   newest <- dt[order(-filed)][1]
   list(accession = newest$accession, form = newest$form,
@@ -473,7 +512,15 @@ run_tier_weekly <- function(as_of = Sys.Date(),
     # next Tier D append picks up the new stubs.
     message(sprintf("  CIK %s (%s): new filing %s %s", ck,
                     paste(tks, collapse = "/"), probe$form, probe$filed))
-    invisible(fetch_and_cache_ticker(tks[1], ck, cache_dir = fund_dir,
+    # refetch under the CANONICAL cache ticker: one file per CIK is a
+    # design invariant (shared-CIK aliasing keys off it); writing
+    # {cik}_{tks[1]} would mint a second, competing cache for filers
+    # whose file uses the sibling/old ticker suffix (WBD -> _DISCA)
+    exist <- list.files(fund_dir, pattern = paste0("^", ck, "_"))
+    canon_tk <- if (length(exist)) {
+      sub("^\\d+_(.+)\\.parquet$", "\\1", exist[1])
+    } else tks[1]
+    invisible(fetch_and_cache_ticker(canon_tk, ck, cache_dir = fund_dir,
                                      force_refresh = TRUE))
     for (tk in tks) {
       sec <- sectors[ticker == tk, sector]
@@ -503,6 +550,7 @@ run_tier_weekly <- function(as_of = Sys.Date(),
   }
 
   manifest[ticker == .WATERMARK_TK, last_filed_date := as_of]
+  .assert_manifest(manifest, "run_tier_weekly")
   stats <- list(n_ciks = length(ciks), refreshed = n_fresh,
                 probe_failures = n_probe_fail,
                 elapsed_min = round(as.numeric(
@@ -529,49 +577,32 @@ update_sector_dimension <- function(as_of = Sys.Date(),
                                     master_path = "cache/lookups/constituent_master.parquet",
                                     sector_path = "cache/lookups/sector_industry.parquet") {
   master <- as.data.table(arrow::read_parquet(master_path))
-  active <- unique(master[is.na(date_removed) |
-                            as.Date(date_removed) > as.Date(as_of), ticker])
-  tmp_cache <- tempfile(fileext = ".parquet")
-  scraped <- fetch_finviz_sectors(active, cache_path = tmp_cache)
-  unlink(tmp_cache)
+  active <- unique(master[status == "ACTIVE", ticker])
+
+  # persistent sidecar checkpoint (never the canonical SCD file): a
+  # mid-scrape failure resumes instead of redoing ~500 rate-limited
+  # requests; dropped only after a successful merge+write
+  scrape_path <- paste0(sector_path, ".scrape_",
+                        format(as.Date(as_of), "%Y%m"))
+  scraped <- fetch_finviz_sectors(active, cache_path = scrape_path)
   if (is.null(scraped) || nrow(scraped) == 0) {
     warning("update_sector_dimension: scrape returned nothing; skipping",
             call. = FALSE)
     return(0L)
   }
 
-  # static overrides always win (reused/dead symbols)
-  for (tk in names(.SECTOR_OVERRIDES)) {
-    ov <- .SECTOR_OVERRIDES[[tk]]
-    if (tk %in% scraped$ticker) {
-      scraped[ticker == tk, `:=`(sector = ov[1], industry = ov[2],
-                                 source = "override")]
-    }
-  }
-  for (ov_csv in .SECTOR_OVERRIDE_CSVS) {
-    if (!file.exists(ov_csv)) next
-    ov_dt <- fread(ov_csv)
-    for (i in seq_len(nrow(ov_dt))) {
-      if (ov_dt$ticker[i] %in% scraped$ticker) {
-        scraped[ticker == ov_dt$ticker[i],
-                `:=`(sector = ov_dt$sector[i], industry = ov_dt$industry[i],
-                     source = "override")]
-      }
-    }
-  }
-
-  bad <- setdiff(unique(scraped$sector), .FINVIZ_SECTORS)
-  if (length(bad)) {
-    warning(sprintf(
-      "update_sector_dimension: non-finviz sector strings dropped: %s",
-      paste(bad, collapse = ", ")), call. = FALSE)
-    scraped <- scraped[sector %in% .FINVIZ_SECTORS]
-  }
+  # static overrides always win (reused/dead symbols); exact-string
+  # validation lives inside the helper (hard stop, never a silent
+  # mask-killing near-miss). Scrape refresh corrects only tickers
+  # actually scraped -- delisted names keep their SCD history via
+  # merge_sector_scd.
+  scraped <- apply_sector_overrides(scraped, add_missing = FALSE)
 
   prev <- as.data.table(arrow::read_parquet(sector_path))
   merged <- merge_sector_scd(prev, scraped, as_of = as_of)
-  n_changed <- nrow(merged) - nrow(prev) + (!"valid_from" %in% names(prev)) * 0L
+  n_changed <- nrow(merged) - nrow(prev)
   arrow::write_parquet(merged, sector_path)
+  unlink(scrape_path)
   message(sprintf("update_sector_dimension: %d dated rows appended",
                   max(n_changed, 0L)))
   max(n_changed, 0L)
@@ -642,7 +673,21 @@ run_tier_monthly <- function(as_of = Sys.Date(),
     }
   }
 
-  # -- 1b. backfill new constituents (full: fundamentals -> layers) --
+  # -- 2. dated sector snapshot (B) -- BEFORE the backfill: a brand-new
+  # roster ticker has no row in the old table, and building its layers
+  # with sector "Unknown" would skip the masked-sector NA stubs (D3)
+  n_sector_rows <- 0L
+  if (scrape_sectors) {
+    n_sector_rows <- tryCatch(
+      update_sector_dimension(as_of, master_path, sector_path),
+      error = function(e) {
+        warning(sprintf("update_sector_dimension failed: %s",
+                        conditionMessage(e)), call. = FALSE)
+        0L
+      })
+  }
+
+  # -- 3. backfill new constituents (full: fundamentals -> layers) --
   todo <- manifest[status == "needs-backfill" & !is.na(cik) &
                      ticker != .WATERMARK_TK]
   sectors_now <- .sector_asof(
@@ -654,13 +699,17 @@ run_tier_monthly <- function(as_of = Sys.Date(),
       invisible(fetch_and_cache_ticker(tk, ck, cache_dir = fund_dir))
       sec <- sectors_now[ticker == tk, sector]
       sec <- if (length(sec)) sec[1] else "Unknown"
+      # splits cache BEFORE any layer build: update_ticker_daily loads
+      # splits with fetch = FALSE, so building first would reconstruct
+      # every pre-split as-traded price with factor 1 -- and the hash
+      # written below would blind the Tier D split guard to it forever
+      splits <- tryCatch(load_ticker_splits(tk, fetch = TRUE),
+                         error = function(e) NULL)
       invisible(build_ticker_fundamentals(tk, ck, sec, fund_dir = fund_dir,
                                           ts_dir = ts_dir))
       d <- update_ticker_daily(tk, through_date = as_of,
                                price_dir = price_dir, ts_dir = ts_dir)
       if (!is.null(d) && nrow(d)) {
-        splits <- tryCatch(load_ticker_splits(tk, fetch = TRUE),
-                           error = function(e) NULL)
         manifest[ticker == tk, `:=`(
           status = "ok",
           last_daily_date = max(as.Date(d$date)),
@@ -675,19 +724,7 @@ run_tier_monthly <- function(as_of = Sys.Date(),
     })
   }
 
-  # -- 2. dated sector snapshot (B) --
-  n_sector_rows <- 0L
-  if (scrape_sectors) {
-    n_sector_rows <- tryCatch(
-      update_sector_dimension(as_of, master_path, sector_path),
-      error = function(e) {
-        warning(sprintf("update_sector_dimension failed: %s",
-                        conditionMessage(e)), call. = FALSE)
-        0L
-      })
-  }
-
-  # -- 3. extend the quarterly pit_* grid --
+  # -- 4. extend the quarterly pit_* grid --
   # quarter-end convention: last calendar day of Mar/Jun/Sep/Dec
   existing <- list_snapshots(snapshot_dir)
   yrs <- 2010:as.integer(format(as_of, "%Y"))
@@ -697,8 +734,13 @@ run_tier_monthly <- function(as_of = Sys.Date(),
   n_snaps <- 0L
   for (d in missing_q) {
     ok <- tryCatch({
+      # prefetch_prices = TRUE: Tier M runs BEFORE Tier D's price
+      # append (structural-first ordering), so filing-date prices near
+      # the new quarter end may not be cached yet -- and missing_q only
+      # builds snapshots that do not exist, so a defective one would
+      # never be reassembled
       r <- assemble_snapshot(d, output_dir = snapshot_dir,
-                             prefetch_prices = FALSE)
+                             prefetch_prices = TRUE)
       !is.null(r)
     }, error = function(e) {
       warning(sprintf("run_tier_monthly: snapshot %s failed -- %s", d,
@@ -717,6 +759,7 @@ run_tier_monthly <- function(as_of = Sys.Date(),
   }
 
   manifest[ticker == .WATERMARK_TK, last_companyfacts_fetch := as_of]
+  .assert_manifest(manifest, "run_tier_monthly")
   stats <- list(new_constituents = n_new, backfilled = n_backfilled,
                 removed = n_removed, sector_rows = n_sector_rows,
                 new_snapshots = n_snaps,
@@ -802,6 +845,19 @@ run_incremental_update <- function(as_of = Sys.Date(),
                       refresh_splits = refresh_splits)
   manifest <- r$manifest; stats$daily <- r$stats
   save_update_manifest(manifest, manifest_path)
+
+  # multi-dimensional feature layer (carried over from the old
+  # run_daily_update body; existence-gated like the pipeline's
+  # build_all_features hook -- feature_standardizer is optional)
+  if (exists("update_features", mode = "function")) {
+    tryCatch(
+      update_features(through_date = as_of, sector_path = sector_path),
+      error = function(e) {
+        warning(sprintf("update_features failed: %s", conditionMessage(e)),
+                call. = FALSE)
+      }
+    )
+  }
 
   elapsed <- round(as.numeric(difftime(Sys.time(), t0, units = "mins")), 1)
   log_row <- data.table(
