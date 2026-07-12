@@ -586,12 +586,19 @@ validate_daily_layer <- function(ts_dir      = "cache/timeseries",
         n_events <- n_events + 1L
         jump <- (a$market_cap / a$price) / (b$market_cap / b$price)
         ok_mc <- abs(log(jump / n_mult)) < .DAILY_GATE_JUMP_TOL
+        # eps leg is SIGNATURE-based, not continuity-based: a missed
+        # eps adjustment makes pe jump by exactly the split multiple.
+        # Raw continuity false-positives on compound events (EXPE 1:2
+        # reverse split + TripAdvisor spinoff same day, ITT triple
+        # spinoff, TMUS/PCS merger) where price legitimately moves by
+        # more than the split factor while mc stays exact.
         ok_pe <- TRUE
         if ("pe_trailing" %in% names(d) &&
             !is.na(b$pe_trailing) && !is.na(a$pe_trailing) &&
             a$pe_trailing > 0 && b$pe_trailing > 0) {
-          ok_pe <- abs(log(b$pe_trailing / a$pe_trailing)) <
-            .DAILY_GATE_JUMP_TOL
+          pe_ratio <- b$pe_trailing / a$pe_trailing
+          ok_pe <- !(abs(log(pe_ratio / n_mult)) < .DAILY_GATE_JUMP_TOL &&
+                       abs(log(n_mult)) >= .DAILY_GATE_SPLIT_BAND)
         }
         if (!ok_mc || !ok_pe) {
           jump_fails[[length(jump_fails) + 1]] <- data.table(
