@@ -1,0 +1,25 @@
+ticker,sector,industry,note
+ABMD,Healthcare,Medical Devices,heart pumps; acquired by J&J 2022-12
+ANSS,Technology,Software - Application,simulation software; acquired by Synopsys 2025
+ATVI,Communication Services,Electronic Gaming & Multimedia,acquired by Microsoft 2023-10; mirrors EA/TTWO
+CERN,Healthcare,Health Information Services,health IT; acquired by Oracle 2022-06
+CMA,Financial,Banks - Regional,Comerica; still trades but absent from last scrape
+CPWR,Technology,Software - Infrastructure,Compuware mainframe/APM software; private 2014-12
+CTLT,Healthcare,Drug Manufacturers - Specialty & Generic,Catalent CDMO; acquired by Novo Holdings 2024
+CTXS,Technology,Software - Application,Citrix; taken private 2022-09
+DFS,Financial,Credit Services,Discover; merged into Capital One 2025; mirrors COF
+DISH,Communication Services,Entertainment,DISH Network satellite TV; EchoStar merger 2023-12
+DRE,Real Estate,REIT - Industrial,Duke Realty; merged into Prologis 2022-10; mirrors PLD
+FBHS,Industrials,"Furnishings, Fixtures & Appliances",Fortune Brands; renamed FBIN 2022; mirrors FBIN
+HBI,Consumer Cyclical,Apparel Manufacturing,Hanesbrands; still trades but absent from last scrape
+HES,Energy,Oil & Gas E&P,Hess; acquired by Chevron 2024
+JNPR,Technology,Communication Equipment,Juniper Networks; acquired by HPE 2025
+KSU,Industrials,Railroads,Kansas City Southern; acquired by Canadian Pacific 2021-12
+MRO,Energy,Oil & Gas E&P,Marathon Oil; acquired by ConocoPhillips 2024-11
+MXIM,Technology,Semiconductors,Maxim Integrated; acquired by Analog Devices 2021-08
+NLSN,Industrials,Consulting Services,Nielsen market research; taken private 2022-10
+PBCT,Financial,Banks - Regional,People's United; merged into M&T Bank 2022-04
+PXD,Energy,Oil & Gas E&P,Pioneer Natural Resources; acquired by ExxonMobil 2024-05
+SIVB,Financial,Banks - Regional,SVB Financial; bank failure 2023-03
+TWTR,Communication Services,Internet Content & Information,Twitter; taken private 2022-10
+XLNX,Technology,Semiconductors,Xilinx FPGAs; acquired by AMD 2022-02

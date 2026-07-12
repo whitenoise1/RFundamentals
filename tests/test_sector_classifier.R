@@ -196,6 +196,60 @@ if (file.exists(pq_path)) {
 
 
 # ============================================================================
+# UNIT TESTS: override CSVs emit exactly the 11 finviz sector strings
+# ============================================================================
+# .SECTOR_NA_INDICATORS keys on the literal finviz sector strings; a
+# near-miss ("Financial Services") silently disables the bank/utility/
+# REIT NA-mask -- the D3 failure mode. Every static assignment must
+# therefore be one of the 11 exact strings (docs/DESIGN_DAILY_UPDATE.md
+# section 3, exact-string requirement).
+message("\n=== sector override CSVs: exact finviz strings ===")
+
+test("exactly 11 finviz sectors defined",
+     length(.FINVIZ_SECTORS) == 11)
+
+suppressMessages(source("R/indicator_compute.R"))
+test("every .SECTOR_NA_INDICATORS key is an exact finviz sector",
+     all(names(.SECTOR_NA_INDICATORS) %in% .FINVIZ_SECTORS))
+
+for (ov_csv in .SECTOR_OVERRIDE_CSVS) {
+  if (!file.exists(ov_csv)) {
+    message(sprintf("  SKIP  %s missing", ov_csv))
+    next
+  }
+  ov <- fread(ov_csv)
+  nm <- basename(ov_csv)
+  test(sprintf("%s: has ticker/sector/industry columns", nm),
+       all(c("ticker", "sector", "industry") %in% names(ov)))
+  test(sprintf("%s: no duplicate tickers", nm),
+       !anyDuplicated(ov$ticker))
+  test(sprintf("%s: every sector is an exact finviz string", nm),
+       all(ov$sector %in% .FINVIZ_SECTORS))
+  test(sprintf("%s: no empty industries", nm),
+       all(!is.na(ov$industry) & nzchar(trimws(ov$industry))))
+}
+
+test("code-literal .SECTOR_OVERRIDES sectors are exact finviz strings",
+     all(vapply(.SECTOR_OVERRIDES, `[`, character(1), 1) %in% .FINVIZ_SECTORS))
+
+# The D2/A measured gap (2026-07-12): every timeseries-universe ticker
+# without a sector row must be covered by the delisted override file.
+ov_delisted <- fread("data/sector_overrides_delisted.csv")
+gap_2026_07 <- c("ABMD", "ANSS", "ATVI", "CERN", "CMA", "CPWR", "CTLT",
+                 "CTXS", "DFS", "DISH", "DRE", "FBHS", "HBI", "HES",
+                 "JNPR", "KSU", "MRO", "MXIM", "NLSN", "PBCT", "PXD",
+                 "SIVB", "TWTR", "XLNX")
+test("delisted overrides cover the measured 24-ticker gap",
+     all(gap_2026_07 %in% ov_delisted$ticker))
+
+# Delisted banks must land in the mask-bearing Financial sector -- the
+# whole point of D2/A is that the NA-mask fires for them again.
+test("SIVB/CMA/PBCT/DFS are Financial",
+     all(ov_delisted[ticker %in% c("SIVB", "CMA", "PBCT", "DFS"), sector]
+         == "Financial"))
+
+
+# ============================================================================
 # UNIT TESTS: .finviz_fetch_one() -- live test (single ticker)
 # ============================================================================
 message("\n=== .finviz_fetch_one() (live, AAPL) ===")
@@ -289,8 +343,10 @@ if (file.exists(pq_path)) {
   # share is measured against scrape-able tickers, not the whole table.
   test("majority from finviz",
        dt[source == "finviz", .N] / nrow(dt) > 0.75)
-  test("override rows are the old-CIK + Tier 1 set (no silent growth)",
-       dt[source == "override", .N] <= 152)
+  # old-CIK + Tier 1 set (<=152) plus the daily-update wave's 24
+  # delisted-name rows (D2/A)
+  test("override rows are the documented static set (no silent growth)",
+       dt[source == "override", .N] <= 176)
 
 } else {
   message("  SKIP  parquet not yet built (run build_sector_industry() first)")

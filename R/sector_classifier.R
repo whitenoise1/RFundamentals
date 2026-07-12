@@ -46,6 +46,25 @@ suppressPackageStartupMessages({
   "AppleWebKit/537.36 (KHTML, like Gecko) ",
   "Chrome/120.0.0.0 Safari/537.36")
 
+# The 11 finviz sectors, verbatim. .SECTOR_NA_INDICATORS keys on these
+# literals ("Financial", NOT "Financial Services"), so every static
+# override and crosswalk output MUST be one of these exact strings -- a
+# near-miss silently disables the bank/utility/REIT NA-mask (the D3
+# failure mode). tests/test_sector_classifier.R asserts this for every
+# override CSV row.
+.FINVIZ_SECTORS <- c(
+  "Basic Materials", "Communication Services", "Consumer Cyclical",
+  "Consumer Defensive", "Energy", "Financial", "Healthcare",
+  "Industrials", "Real Estate", "Technology", "Utilities"
+)
+
+# Static override CSVs applied by build_sector_industry step 4c, in
+# order (later files win on ticker collision).
+.SECTOR_OVERRIDE_CSVS <- c(
+  "data/sector_overrides_oldcik.csv",
+  "data/sector_overrides_delisted.csv"
+)
+
 # =============================================================================
 # PRIVATE HELPERS
 # =============================================================================
@@ -312,13 +331,18 @@ build_sector_industry <- function(
     }
   }
 
-  # Step 4c: Old-CIK wave static assignments (Tier 2, 2026-07). ~145
-  # recovered delisted names are dead on finviz (or their reused symbol
-  # serves an unrelated ETF/company); their era-correct classifications
-  # live in a data file rather than a code literal. Same precedence as
-  # .SECTOR_OVERRIDES: always wins over a scrape of the reused symbol.
-  ov_csv <- "data/sector_overrides_oldcik.csv"
-  if (file.exists(ov_csv)) {
+  # Step 4c: static assignments from data files. Delisted names are dead
+  # on finviz (or their reused symbol serves an unrelated ETF/company);
+  # their era-correct classifications live in data files rather than
+  # code literals. Same precedence as .SECTOR_OVERRIDES: always wins
+  # over a scrape of the reused symbol.
+  #   sector_overrides_oldcik.csv   -- old-CIK wave Tier 2 (2026-07),
+  #                                    ~145 recovered delisted names
+  #   sector_overrides_delisted.csv -- daily-update wave D2/A (2026-07),
+  #                                    2021-24 index removals purged
+  #                                    from finviz after the last scrape
+  for (ov_csv in .SECTOR_OVERRIDE_CSVS) {
+    if (!file.exists(ov_csv)) next
     ov_dt <- fread(ov_csv)
     n_new <- 0L; n_repl <- 0L
     for (i in seq_len(nrow(ov_dt))) {
@@ -335,7 +359,8 @@ build_sector_industry <- function(
         n_new <- n_new + 1L
       }
     }
-    message(sprintf("  old-CIK overrides: %d added, %d replaced", n_new, n_repl))
+    message(sprintf("  %s: %d added, %d replaced",
+                    basename(ov_csv), n_new, n_repl))
   }
 
   # Step 5: Final summary
