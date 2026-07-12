@@ -3,24 +3,33 @@
 # ============================================================================
 # Builds and maintains per-ticker daily time series of fundamental indicators.
 #
-# Architecture (two-layer storage per ticker):
+# Architecture (three-layer storage per ticker):
 #   1. Fundamentals layer ({ticker}_fund.parquet): sparse, one row per fiscal
 #      year. Stores fundamental-only indicators and accounting stubs for
 #      price-sensitive recomputation. Updates only on new filings.
-#   2. Daily layer ({ticker}_daily.parquet): dense, one row per trading day.
+#   2. Per-share layer ({ticker}_pershare.parquet): sparse, one row per
+#      FILING (10-Q cadence). The authoritative as-of-filing share count
+#      (dei cover / Wave M synthetic), stamped by filed date. Fixes D1:
+#      the fund layer is annual-only, so daily market cap was computed
+#      from a share count up to ~1yr stale and never split-adjusted.
+#   3. Daily layer ({ticker}_daily.parquet): dense, one row per trading day.
 #      Stores every canonical indicator (get_indicator_names()) plus the
 #      hidden cross-section ingredient columns. Price-sensitive indicators
-#      recomputed daily from stubs + closing price; fundamental-only
-#      carried forward; cross-section-finalized columns (ms_*, herf,
-#      ww_index, ch_inv_ia) are per-ticker NA/ingredients until a
-#      cross-section reader finalizes them.
+#      recomputed daily from stubs + closing price -- per-share stubs
+#      (shares, eps) mapped onto each day's as-traded split basis via
+#      .split_factor, so mc = price x shares is exact across splits;
+#      fundamental-only carried forward; cross-section-finalized columns
+#      (ms_*, herf, ww_index, ch_inv_ia) are per-ticker NA/ingredients
+#      until a cross-section reader finalizes them.
 #
 # Storage:
 #   cache/timeseries/{ticker}_fund.parquet
+#   cache/timeseries/{ticker}_pershare.parquet
 #   cache/timeseries/{ticker}_daily.parquet
 #
 # Public API:
 #   build_ticker_fundamentals(ticker, cik, sector, ...)
+#   build_ticker_pershare(ticker, cik, ...)
 #   update_ticker_daily(ticker, through_date, ...)
 #   build_timeseries(start_date, end_date, ...)   -- historical build
 #   update_all_daily(through_date, ...)            -- daily incremental
@@ -120,6 +129,54 @@ suppressPackageStartupMessages({
   if (stub %in% names(fund_dt)) {
     as.numeric(fund_dt[[stub]][fund_idx])
   } else NA_real_
+}
+
+
+# Filing forms whose share counts feed the per-share layer. 8-K
+# comparatives and registration statements are excluded: their counts
+# are not the cover-page as-of-filing number.
+.PERSHARE_FORMS <- c("10-Q", "10-Q/A", "10-K", "10-K/A",
+                     "20-F", "20-F/A", "40-F", "40-F/A")
+
+#' Extract the per-filing share-count series from raw XBRL vintages
+#'
+#' One row per filed date: the authoritative as-of-filing outstanding
+#' count. Within a filing, tags rank per .SHARES_TAG_PREF (Wave M
+#' synthetic whole-company count, then the DEI cover instant, then
+#' balance-sheet counts -- indicator_compute.R Section 6b rationale),
+#' and within the winning tag the LATEST period_end wins: a filing's
+#' cover count is dated days before filing, restated comparatives are
+#' dated quarters earlier. Values are as-filed, so their split basis is
+#' the split state at the filed date (same GAAP-restatement convention
+#' as .split_factor documents for EPS).
+#'
+#' @param fund_v data.table. Raw vintage rows (get_fundamentals vintages=TRUE).
+#' @return data.table(filed_date, period_end, shares) ordered by filed_date,
+#'   or NULL when no usable share rows exist.
+.extract_pershare_series <- function(fund_v) {
+  if (is.null(fund_v) || nrow(fund_v) == 0) return(NULL)
+  sh <- fund_v[concept == "shares_outstanding" & !is.na(value) & value > 0 &
+                 !is.na(filed) & !is.na(period_end) &
+                 form %in% .PERSHARE_FORMS]
+  if (nrow(sh) == 0) return(NULL)
+
+  sh <- copy(sh)
+  sh[, filed := as.Date(filed)]
+  sh[, period_end := as.Date(period_end)]
+
+  rows <- vector("list", length(unique(sh$filed)))
+  n <- 0L
+  for (fd in sort(unique(sh$filed))) {
+    grp <- .prefer_share_tag(sh[filed == fd])
+    r <- grp[order(-period_end)][1]
+    n <- n + 1L
+    rows[[n]] <- data.table(filed_date = as.Date(fd, origin = "1970-01-01"),
+                            period_end = r$period_end,
+                            shares     = as.numeric(r$value))
+  }
+  out <- rbindlist(rows[seq_len(n)])
+  setorder(out, filed_date)
+  out
 }
 
 
@@ -374,6 +431,14 @@ build_ticker_fundamentals <- function(ticker, cik, sector,
 
   out_path <- file.path(ts_dir, sprintf("%s_fund.parquet", ticker))
   if (file.exists(out_path) && !force) {
+    # legacy layers predate the per-share layer -- backfill it so the
+    # daily recompute gets 10-Q-cadence share counts without a forced
+    # fund rebuild
+    ps_path <- file.path(ts_dir, sprintf("%s_pershare.parquet", ticker))
+    if (!file.exists(ps_path)) {
+      tryCatch(build_ticker_pershare(ticker, cik, fund_dir, ts_dir),
+               error = function(e) NULL)
+    }
     return(as.data.table(arrow::read_parquet(out_path)))
   }
 
@@ -485,7 +550,63 @@ build_ticker_fundamentals <- function(ticker, cik, sector,
   ))
 
   arrow::write_parquet(dt, out_path)
+
+  # Per-share layer (D1): quarterly-cadence share counts from the same
+  # vintage table, one row per filing. Extraction failure degrades to
+  # the FY-stub fallback in update_ticker_daily, never blocks the build.
+  ps <- tryCatch(.extract_pershare_series(fund_v), error = function(e) NULL)
+  if (!is.null(ps)) {
+    arrow::write_parquet(ps, file.path(ts_dir,
+                                       sprintf("%s_pershare.parquet", ticker)))
+  }
+
   dt
+}
+
+
+# =============================================================================
+# SECTION 3b: build_ticker_pershare()
+# =============================================================================
+#' Build (or rebuild) the per-share layer for a single ticker
+#'
+#' Standalone entry point for layers whose fund parquet already exists
+#' (build_ticker_fundamentals writes the per-share layer inline when it
+#' builds fresh). Reads the cached XBRL vintages only -- no network.
+#'
+#' @param ticker Character. Ticker symbol.
+#' @param cik Character. 10-digit CIK (NULL lets get_fundamentals resolve).
+#' @param fund_dir Character. Fundamentals cache directory.
+#' @param ts_dir Character. Time series output directory.
+#' @param force Logical. Rebuild even if file exists.
+#' @return data.table (the per-share layer), or NULL when no share rows.
+build_ticker_pershare <- function(ticker, cik = NULL,
+                                  fund_dir = "cache/fundamentals",
+                                  ts_dir   = .TS_DIR,
+                                  force    = FALSE) {
+
+  out_path <- file.path(ts_dir, sprintf("%s_pershare.parquet", ticker))
+  if (file.exists(out_path) && !force) {
+    return(as.data.table(arrow::read_parquet(out_path)))
+  }
+
+  fund_v <- tryCatch(
+    get_fundamentals(ticker, cik, cache_dir = fund_dir, vintages = TRUE),
+    error = function(e) NULL
+  )
+  ps <- .extract_pershare_series(fund_v)
+  if (is.null(ps)) return(NULL)
+
+  .assert_output_ts(ps, "build_ticker_pershare", list(
+    "is data.table"   = is.data.table,
+    "has filed_date"  = function(x) "filed_date" %in% names(x),
+    "has shares"      = function(x) "shares" %in% names(x),
+    "positive shares" = function(x) all(x$shares > 0),
+    "sorted by filed" = function(x) !is.unsorted(x$filed_date)
+  ))
+
+  if (!dir.exists(ts_dir)) dir.create(ts_dir, recursive = TRUE)
+  arrow::write_parquet(ps, out_path)
+  ps
 }
 
 
@@ -602,6 +723,49 @@ update_ticker_daily <- function(ticker,
   new_prices <- new_prices[valid]
   fund_idx   <- fund_idx[valid]
 
+  # -- Per-share stubs on the day's split basis (D1 fix) --
+  # Shares: most recent per-share layer observation with filed <= day
+  # (10-Q cadence), falling back to the FY stub for legacy layers. EPS:
+  # the FY stub (pe_trailing is annual-EPS by contract; quarterly
+  # refresh is pe_ttm's job). Both are as-filed values whose split basis
+  # is the split state at their filed date; map them onto each day's
+  # as-traded basis so mc = price x shares and pe = price / eps hold
+  # exactly across splits. .split_factor(t) is the product of ratios of
+  # splits AFTER t, so basis f -> basis d is x S(d)/S(f) for counts and
+  # x S(f)/S(d) for per-share amounts.
+  n_new <- length(new_dates)
+  sh_val   <- rep(NA_real_, n_new)
+  sh_basis <- rep(as.Date(NA), n_new)
+
+  pershare_path <- file.path(ts_dir, sprintf("%s_pershare.parquet", ticker))
+  if (file.exists(pershare_path)) {
+    ps <- tryCatch(as.data.table(arrow::read_parquet(pershare_path)),
+                   error = function(e) NULL)
+    if (!is.null(ps) && nrow(ps) > 0) {
+      ps[, filed_date := as.Date(filed_date)]
+      setorder(ps, -filed_date)
+      for (k in seq_len(nrow(ps))) {
+        elig <- is.na(sh_val) & new_dates >= ps$filed_date[k]
+        if (!any(elig)) next
+        sh_val[elig]   <- ps$shares[k]
+        sh_basis[elig] <- ps$filed_date[k]
+      }
+    }
+  }
+
+  fb <- is.na(sh_val)
+  if (any(fb)) {
+    sh_val[fb]   <- as.numeric(fund_dt$stub_shares[fund_idx])[fb]
+    sh_basis[fb] <- fund_dt$filed_date[fund_idx][fb]
+  }
+
+  sf_day    <- .split_factor(new_dates, splits)
+  shares_adj <- sh_val * sf_day / .split_factor(sh_basis, splits)
+
+  eps_basis <- fund_dt$filed_date[fund_idx]
+  eps_adj   <- as.numeric(fund_dt$stub_eps[fund_idx]) *
+    .split_factor(eps_basis, splits) / sf_day
+
   # -- Build result data.table --
   result_dt <- data.table(
     date        = new_dates,
@@ -621,10 +785,12 @@ update_ticker_daily <- function(ticker,
   }
 
   # -- Vectorized price-sensitive indicator computation --
+  # shares/eps arrive on the day's split basis (see above); every other
+  # stub is an aggregate dollar amount and split-invariant.
   price_dt <- .compute_price_sensitive_vec(
     p       = new_prices,
-    shares  = as.numeric(fund_dt$stub_shares[fund_idx]),
-    eps     = as.numeric(fund_dt$stub_eps[fund_idx]),
+    shares  = shares_adj,
+    eps     = eps_adj,
     equity  = as.numeric(fund_dt$stub_equity[fund_idx]),
     rev     = as.numeric(fund_dt$stub_revenue[fund_idx]),
     fcf_v   = as.numeric(fund_dt$stub_fcf[fund_idx]),

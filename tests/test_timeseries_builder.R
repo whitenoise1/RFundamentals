@@ -19,6 +19,7 @@ source("R/sector_classifier.R")
 source("R/fundamental_fetcher.R")
 source("R/indicator_compute.R")
 source("R/pit_assembler.R")
+source("R/ttm_eps.R")
 source("R/timeseries_builder.R")
 
 # -- Test harness --
@@ -662,6 +663,134 @@ if (!master_exists || !sector_exists) {
     unlink(test_ts_dir, recursive = TRUE)
   }
 }
+
+
+# ============================================================================
+# Unit: per-share layer + split-consistent daily recompute (D1 fix)
+# ============================================================================
+message("\n=== Unit: .extract_pershare_series ===")
+
+fv <- data.table(
+  concept = "shares_outstanding",
+  tag = c("CommonStockSharesOutstanding", "EntityCommonStockSharesOutstanding",
+          "CommonStockSharesOutstanding", "EntityCommonStockSharesOutstanding",
+          "CommonStockSharesOutstanding", "CommonStockSharesOutstanding"),
+  period_end = as.Date(c("2020-03-31", "2020-05-01", "2019-12-31",
+                         "2020-07-28", "2020-06-30", "2020-08-15")),
+  filed = as.Date(c("2020-05-05", "2020-05-05", "2020-05-05",
+                    "2020-08-04", "2020-08-04", "2020-09-01")),
+  form = c("10-Q", "10-Q", "10-Q", "10-Q", "10-Q", "8-K"),
+  value = c(1.00e9, 1.01e9, 0.99e9, 1.02e9, 1.015e9, 7e9)
+)
+ps <- .extract_pershare_series(fv)
+
+test("pershare: one row per filing (8-K excluded)",
+     !is.null(ps) && nrow(ps) == 2)
+
+test("pershare: DEI cover count wins within a filing",
+     abs(ps[filed_date == as.Date("2020-05-05"), shares] - 1.01e9) < 1 &&
+       abs(ps[filed_date == as.Date("2020-08-04"), shares] - 1.02e9) < 1)
+
+test("pershare: sorted by filed_date",
+     !is.unsorted(ps$filed_date))
+
+test("pershare: NULL on empty input",
+     is.null(.extract_pershare_series(fv[0])) &&
+       is.null(.extract_pershare_series(NULL)))
+
+test("pershare: nonpositive values dropped",
+     is.null(.extract_pershare_series(
+       data.table(concept = "shares_outstanding", tag = "x",
+                  period_end = as.Date("2020-01-01"),
+                  filed = as.Date("2020-02-01"), form = "10-K",
+                  value = -5))))
+
+
+message("\n=== Unit: split-consistent daily recompute (D1) ===")
+
+# Synthetic SPLITCO: 2:1 split at 2020-06-15 inside a no-annual-filing
+# window (FY2019 10-K filed 2020-02-15). As-traded price 100 -> 50; the
+# Yahoo cache carries Close on TODAY's basis (constant 50). A 10-Q filed
+# 2020-06-25 refreshes the cover count to 2.05e9 (post-split basis).
+d1_ts    <- file.path(tempdir(), "d1_ts")
+d1_price <- file.path(tempdir(), "d1_prices")
+dir.create(d1_ts, showWarnings = FALSE)
+dir.create(d1_price, showWarnings = FALSE)
+
+d1_dates <- seq(as.Date("2020-06-01"), as.Date("2020-07-10"), by = "day")
+d1_dates <- d1_dates[!format(d1_dates, "%u") %in% c("6", "7")]
+ex <- as.Date("2020-06-15")
+
+arrow::write_parquet(
+  data.table(date = d1_dates, close = 50),
+  file.path(d1_price, "SPLITCO_yahoo_2009-01-01.parquet"))
+
+splitco_split <- data.table(ex_date = ex, ratio = 0.5)
+split_cache <- "cache/splits/SPLITCO.parquet"
+had_split_cache <- file.exists(split_cache)
+arrow::write_parquet(splitco_split, split_cache)
+
+arrow::write_parquet(data.table(
+  fiscal_year = 2019L, filed_date = as.Date("2020-02-15"),
+  period_end = as.Date("2019-12-31"),
+  stub_shares = 1e9, stub_eps = 5,
+  stub_equity = NA_real_, stub_revenue = NA_real_, stub_fcf = NA_real_,
+  stub_ebitda = NA_real_, stub_total_debt = NA_real_,
+  stub_net_debt = NA_real_, stub_cash = NA_real_,
+  stub_dividends = NA_real_, stub_buybacks = NA_real_,
+  stub_equity_issuance = NA_real_),
+  file.path(d1_ts, "SPLITCO_fund.parquet"))
+
+arrow::write_parquet(data.table(
+  filed_date = as.Date(c("2020-02-15", "2020-06-25")),
+  period_end = as.Date(c("2020-02-10", "2020-06-20")),
+  shares     = c(1e9, 2.05e9)),
+  file.path(d1_ts, "SPLITCO_pershare.parquet"))
+
+d1 <- update_ticker_daily("SPLITCO", through_date = as.Date("2020-07-10"),
+                          start_date = as.Date("2020-06-01"),
+                          price_dir = d1_price, ts_dir = d1_ts)
+if (!had_split_cache) unlink(split_cache)
+
+test("D1: daily layer built", !is.null(d1) && nrow(d1) > 0)
+
+pre  <- d1[date == as.Date("2020-06-10")]
+post <- d1[date == as.Date("2020-06-16")]
+refr <- d1[date == as.Date("2020-06-25")]
+
+test("D1: as-traded price halves at the split",
+     abs(pre$price - 100) < 1e-6 && abs(post$price - 50) < 1e-6)
+
+test("D1: market cap continuous across the split (100e9)",
+     abs(pre$market_cap - 100e9) < 1 && abs(post$market_cap - 100e9) < 1)
+
+test("D1: implied shares double at the split",
+     abs(pre$market_cap / pre$price - 1e9) < 1 &&
+       abs(post$market_cap / post$price - 2e9) < 1)
+
+test("D1: eps on the day's basis -> pe continuous (20)",
+     abs(pre$pe_trailing - 20) < 1e-6 && abs(post$pe_trailing - 20) < 1e-6)
+
+test("D1: 10-Q cover refresh picked up from filed date",
+     abs(refr$market_cap - 50 * 2.05e9) < 1)
+
+# FY-stub fallback: same fixture without the pershare layer must still
+# be split-consistent (legacy layers)
+unlink(file.path(d1_ts, c("SPLITCO_daily.parquet", "SPLITCO_pershare.parquet")))
+arrow::write_parquet(splitco_split, split_cache)
+d1_fb <- update_ticker_daily("SPLITCO", through_date = as.Date("2020-07-10"),
+                             start_date = as.Date("2020-06-01"),
+                             price_dir = d1_price, ts_dir = d1_ts)
+if (!had_split_cache) unlink(split_cache)
+
+fb_pre  <- d1_fb[date == as.Date("2020-06-10")]
+fb_post <- d1_fb[date == as.Date("2020-06-16")]
+test("D1 fallback: FY stub split-adjusted without pershare layer",
+     abs(fb_pre$market_cap - 100e9) < 1 &&
+       abs(fb_post$market_cap - 100e9) < 1 &&
+       abs(fb_post$pe_trailing - 20) < 1e-6)
+
+unlink(c(d1_ts, d1_price), recursive = TRUE)
 
 
 # ============================================================================
