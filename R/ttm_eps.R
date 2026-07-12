@@ -225,14 +225,20 @@ build_ttm_eps_series <- function(fund_dt, splits = NULL) {
   ev[, .(ex_date = date, ratio = 1 / splitFactor)]
 }
 
-load_ticker_splits <- function(tk, split_dir = "cache/splits", fetch = TRUE) {
+load_ticker_splits <- function(tk, split_dir = "cache/splits", fetch = TRUE,
+                               refresh = FALSE) {
   cf <- file.path(split_dir, paste0(tk, ".parquet"))
-  if (file.exists(cf)) {
-    s <- tryCatch(as.data.table(arrow::read_parquet(cf)), error = function(e) NULL)
-    if (!is.null(s)) return(s)
-  }
+  cached <- if (file.exists(cf)) {
+    tryCatch(as.data.table(arrow::read_parquet(cf)), error = function(e) NULL)
+  } else NULL
+  # refresh = TRUE (Tier D split guard): bypass the cache read and fetch
+  # fresh; a failed fetch falls back to the cached table rather than
+  # caching a false empty.
+  if (!refresh && !is.null(cached)) return(cached)
   empty <- data.table(ex_date = as.Date(character()), ratio = numeric())
-  if (!fetch || !requireNamespace("quantmod", quietly = TRUE)) return(empty)
+  if (!fetch || !requireNamespace("quantmod", quietly = TRUE)) {
+    return(if (!is.null(cached)) cached else empty)
+  }
   # Renamed chains resolve to the current symbol; Yahoo uses dashes for
   # class tickers (BRK-B), the roster uses dots. Reused dead symbols
   # (mirror of pit_assembler.R .YAHOO_REUSED_BLOCKLIST) never ask Yahoo:
@@ -252,7 +258,7 @@ load_ticker_splits <- function(tk, split_dir = "cache/splits", fetch = TRUE) {
   # as-traded reconstruction of a split-adjusted Tiingo price cache).
   if (yerr && nrow(s) == 0) {
     ts <- .tiingo_splits(gsub("\\.", "-", sym))
-    if (is.null(ts)) return(empty)
+    if (is.null(ts)) return(if (!is.null(cached)) cached else empty)
     s <- ts
   }
   if (!dir.exists(split_dir)) dir.create(split_dir, recursive = TRUE)
@@ -268,8 +274,16 @@ augment_daily_ttm <- function(fund_dir  = "cache/fundamentals",
                               ts_dir    = if (exists(".TS_DIR")) .TS_DIR else "cache/timeseries",
                               split_dir = "cache/splits",
                               fetch_splits = TRUE,
-                              verbose   = TRUE) {
+                              verbose   = TRUE,
+                              tickers   = NULL) {
   daily_files <- list.files(ts_dir, pattern = "_daily\\.parquet$", full.names = TRUE)
+  # per-ticker scope (daily-update wave): the incremental tiers pass only
+  # the tickers whose layers changed, so a daily run rewrites a handful
+  # of parquets instead of all ~750
+  if (!is.null(tickers)) {
+    daily_files <- daily_files[
+      sub("_daily\\.parquet$", "", basename(daily_files)) %in% tickers]
+  }
   fund_files  <- list.files(fund_dir, pattern = "\\.parquet$", full.names = TRUE)
   # ticker -> fundamentals path via a NAMED VECTOR (not a keyed data.table: a
   # keyed join `dt[.(tk), ]` whose lookup variable shares the key column's name

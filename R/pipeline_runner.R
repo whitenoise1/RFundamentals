@@ -161,52 +161,31 @@ run_full_build <- function(start_date      = "2010-03-31",
 # =============================================================================
 # 2. run_daily_update()
 # =============================================================================
-#' Run an incremental update for a single date
+#' Run the incremental update (shell over the cadence tiers)
 #'
-#' Assembles (or reassembles) the snapshot for the given date.
-#' Useful for daily or weekly refreshes of the latest snapshot.
+#' Since the daily-update wave this orchestrates the Tier D/W/M
+#' machinery in update_runner.R (manifest-driven appends) instead of
+#' re-assembling a single quarterly snapshot: the consuming output is
+#' the daily cross-section, and quarterly pit_* extension is Tier M's
+#' job. See docs/DESIGN_DAILY_UPDATE.md section 6.
 #'
-#' @param date Date or character. Snapshot date (default today).
-#' @param master_path Character. Path to constituent_master.parquet.
-#' @param sector_path Character. Path to sector_industry.parquet.
-#' @param fund_dir Character. Fundamentals cache directory.
-#' @param price_cache_dir Character. Price cache directory.
-#' @param output_dir Character. Snapshot output directory.
-#' @return Snapshot result (list with $raw, $zscored, $stats), or NULL.
-run_daily_update <- function(date            = Sys.Date(),
-                             master_path     = .DEFAULT_MASTER_PATH,
-                             sector_path     = .DEFAULT_SECTOR_PATH,
-                             fund_dir        = .DEFAULT_FUND_DIR,
-                             price_cache_dir = .DEFAULT_PRICE_DIR,
-                             output_dir      = .DEFAULT_SNAPSHOT_DIR) {
+#' @param date Date or character. Update through this date (default today).
+#' @param force_weekly Logical. Run Tier W regardless of cadence.
+#' @param force_monthly Logical. Run Tier M regardless of cadence.
+#' @param ... Passed to run_incremental_update (paths, refresh flags).
+#' @return Invisible list of per-tier stats.
+run_daily_update <- function(date          = Sys.Date(),
+                             force_weekly  = FALSE,
+                             force_monthly = FALSE,
+                             ...) {
 
-  message(sprintf("run_daily_update: %s", as.Date(date)))
-  t0 <- Sys.time()
-
-  result <- assemble_snapshot(
-    snapshot_date   = date,
-    master_path     = master_path,
-    sector_path     = sector_path,
-    fund_dir        = fund_dir,
-    price_cache_dir = price_cache_dir,
-    output_dir      = output_dir,
-    prefetch_prices = TRUE
-  )
-
-  # Update multi-dimensional features (if feature_standardizer is loaded)
-  if (exists("update_features", mode = "function")) {
-    tryCatch(
-      update_features(through_date = date, sector_path = sector_path),
-      error = function(e) {
-        warning(sprintf("Feature update failed: %s", e$message), call. = FALSE)
-      }
-    )
+  if (!exists("run_incremental_update", mode = "function")) {
+    stop(paste0("run_daily_update: update_runner.R is not sourced -- it ",
+                "provides the cadence tiers this shell orchestrates"),
+         call. = FALSE)
   }
-
-  elapsed <- round(as.numeric(difftime(Sys.time(), t0, units = "mins")), 1)
-  message(sprintf("run_daily_update: done in %.1f minutes", elapsed))
-
-  invisible(result)
+  run_incremental_update(as_of = date, force_weekly = force_weekly,
+                         force_monthly = force_monthly, ...)
 }
 
 
