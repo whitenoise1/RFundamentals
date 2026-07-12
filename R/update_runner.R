@@ -639,10 +639,18 @@ run_tier_monthly <- function(as_of = Sys.Date(),
 
     new_tks <- setdiff(unique(roster$ticker), known)
     for (tk in new_tks) {
-      ck <- roster[ticker == tk][.N]$cik
+      rrows <- roster[ticker == tk]
+      ck <- rrows[.N]$cik
       ck <- if (length(ck) && !is.na(ck) && nzchar(as.character(ck))) {
         .pad_cik(ck)
       } else NA_character_
+      # a roster ticker whose every occurrence is already removed is a
+      # PAST member the bootstrap skipped because it has no layers --
+      # i.e. one of the documented unrecoverables (FDIC filers,
+      # pre-XBRL, price-dark). Entering it as needs-backfill would
+      # retry a futile fetch every month; it enters frozen instead.
+      gone <- all(!is.na(rrows$date_removed) &
+                    as.Date(rrows$date_removed) <= as_of)
       manifest <- rbind(manifest, data.table(
         cik = ck, ticker = tk,
         last_filing_accession = NA_character_,
@@ -650,7 +658,7 @@ run_tier_monthly <- function(as_of = Sys.Date(),
         last_companyfacts_fetch = as.Date(NA),
         last_price_date = as.Date(NA), last_daily_date = as.Date(NA),
         splits_hash = "0", sic = NA_character_,
-        status = "needs-backfill"))
+        status = if (gone) "removed" else "needs-backfill"))
       n_new <- n_new + 1L
     }
     if (n_new) message(sprintf("  new constituents: %s",
