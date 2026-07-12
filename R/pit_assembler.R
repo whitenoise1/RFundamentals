@@ -103,6 +103,218 @@ get_universe_at_date <- function(snapshot_date, master_dt) {
 # retries everything, so a transient outage cannot poison future runs.
 .PRICE_FETCH_FAILED <- new.env(parent = emptyenv())
 
+# =============================================================================
+# Wave P: provider symbol map + Tiingo fallback for Yahoo-purged names
+# (design: docs/DESIGN_SECOND_PRICE_SOURCE.md)
+# =============================================================================
+
+# Roster ticker -> provider symbol for renamed chains where BOTH Yahoo and
+# Tiingo key the full continuous history under the CURRENT symbol only.
+# Verified against Tiingo 2026-07-08 (first prints line up with the old
+# series). Duplicated in ttm_eps.R for getSplits -- keep in sync.
+.PROVIDER_SYMBOL_MAP <- c(
+  COG   = "CTRA",   # Cabot Oil & Gas -> Coterra (2021)
+  GPS   = "GAP",    # Gap Inc ticker change (2024)
+  FBHS  = "FBIN",   # Fortune Brands Home -> Innovations (2022)
+  DISCA = "WBD",    # Discovery series A -> Warner Bros. Discovery (2022)
+  VIAC  = "PARA",   # Viacom/ViacomCBS -> Paramount (2022)
+  CDAY  = "DAY",    # Ceridian -> Dayforce (2024)
+  # old-CIK wave Tier 2 (2026-07): same-share-line renames whose full
+  # chain both providers key under the CURRENT symbol. Corporate
+  # mechanics verified per name -- conversions with share RATIOS (e.g.
+  # WPX->DVN) must never be mapped.
+  ACE   = "CB",     # ACE Ltd renamed Chubb (2016)
+  ADS   = "BFH",    # Alliance Data renamed Bread Financial (2022)
+  ARNC  = "HWM",    # Arconic Inc renamed Howmet (2020; ARNC reused by spinco)
+  CCE   = "CCEP",   # new CCE -> Coca-Cola European Partners (2016); Tiingo
+                    # chain reaches the pre-2010 old-CCE line too
+  DLPH  = "APTV",   # Delphi Automotive renamed Aptiv (2017; DLPH reused)
+  HFC   = "DINO",   # HollyFrontier -> HF Sinclair (2022)
+  HRS   = "LHX",    # Harris renamed L3Harris (2019)
+  JEC   = "J",      # Jacobs Engineering ticker change (2019)
+  KFT   = "MDLZ",   # Kraft Foods Inc renamed Mondelez (2012; KRFT spun off)
+  SAI   = "LDOS",   # SAIC Inc renamed Leidos (2013; new SAIC spun off)
+  TSO   = "ANDV",   # Tesoro renamed Andeavor (2017; chain ends 2018)
+  TYC   = "JCI",    # Tyco plc = surviving entity, renamed JCI plc (2016)
+  WPI   = "AGN"     # Watson -> Actavis -> Allergan plc (chain ends 2020)
+)
+
+.provider_symbol <- function(ticker) {
+  mapped <- .PROVIDER_SYMBOL_MAP[ticker]
+  if (!is.na(mapped)) as.character(mapped) else ticker
+}
+
+# Dead constituents whose symbol Yahoo has REUSED for an unrelated
+# listing: a Yahoo fetch SUCCEEDS with the wrong company's prices (COL
+# served a $0.15 penny stock across Rockwell Collins' membership window).
+# For these, skip Yahoo entirely -- Tiingo keys the true delisted chain
+# under the same symbol. Mirrored in ttm_eps.R .SPLITS_YAHOO_BLOCKLIST.
+.YAHOO_REUSED_BLOCKLIST <- c("COL", "CAM", "PCL", "PCLN", "PCS")
+
+# Tiingo token from env or ~/.Renviron (either case variant).
+.tiingo_token <- function() {
+  for (nm in c("TIINGO_TOKEN", "tiingo_token")) {
+    v <- Sys.getenv(nm)
+    if (nzchar(v)) return(v)
+  }
+  if (file.exists("~/.Renviron")) {
+    readRenviron("~/.Renviron")
+    for (nm in c("TIINGO_TOKEN", "tiingo_token")) {
+      v <- Sys.getenv(nm)
+      if (nzchar(v)) return(v)
+    }
+  }
+  ""
+}
+
+# Resolve the cache file for a ticker: Yahoo first (primary source), then
+# Tiingo (fallback, honest provenance in the name). Returns the existing
+# file, or the Yahoo path when neither exists (the write target for a
+# fresh fetch).
+.price_cache_path <- function(ticker, from = "2009-01-01",
+                              cache_dir = .PRICE_CACHE_DIR) {
+  for (src in c("yahoo", "tiingo")) {
+    f <- file.path(cache_dir, sprintf("%s_%s_%s.parquet", ticker, src, from))
+    if (file.exists(f)) return(f)
+  }
+  file.path(cache_dir, sprintf("%s_yahoo_%s.parquet", ticker, from))
+}
+
+#' Download daily prices from Tiingo and convert to the Yahoo cache basis
+#'
+#' Tiingo's `close` is the RAW as-traded print with splitFactor/divCash
+#' event columns -- the inverse of Yahoo's split-adjusted Close. The
+#' adapter converts at write time so every existing reader works
+#' unchanged: cached_close = raw_close * .split_factor(date, splits),
+#' and the derived TRUE split events are written to cache/splits/
+#' {ticker}.parquet (quantmod ratio convention, 2:1 -> 0.5).
+#'
+#' splitFactor events with |log(f)| < log(1.25) are NOT splits: spinoffs
+#' and special distributions are encoded there too (K 2023-10-02 carries
+#' splitFactor 1.065 for the WK Kellogg spinoff) and would corrupt the
+#' share-issuance and TTM-EPS split adjustments. Real splits are 3:2 or
+#' coarser. Tiingo adjClose is never used (dividend-rebased -- the same
+#' defect class as Yahoo Adjusted, see the NVDA 2015 P/E postmortem).
+#'
+#' @param ticker Character. ROSTER ticker (provider symbol resolved
+#'   internally via .PROVIDER_SYMBOL_MAP).
+#' @param from Character. Start date.
+#' @param split_dir Character. Splits cache directory.
+#' @param retries Integer. Download attempts.
+#' @return xts with Open/High/Low/Close/Volume on the Yahoo cache basis,
+#'   or NULL on failure / missing token.
+.fetch_prices_tiingo <- function(ticker, from = "2009-01-01",
+                                 split_dir = "cache/splits",
+                                 retries = 3L) {
+
+  token <- .tiingo_token()
+  if (token == "") return(NULL)
+
+  # Tiingo keys class shares with hyphens (brk-b), same as Yahoo
+  sym <- gsub("\\.", "-", .provider_symbol(ticker))
+  url <- sprintf(
+    "https://api.tiingo.com/tiingo/daily/%s/prices?startDate=%s&token=%s",
+    tolower(sym), from, token)
+
+  dat <- NULL
+  for (attempt in seq_len(retries)) {
+    dat <- tryCatch({
+      resp <- httr::GET(url, httr::timeout(30))
+      if (httr::status_code(resp) == 429) { Sys.sleep(5 * attempt); stop("429") }
+      if (httr::status_code(resp) != 200) stop(httr::status_code(resp))
+      d <- as.data.table(jsonlite::fromJSON(
+        httr::content(resp, as = "text", encoding = "UTF-8")))
+      if (nrow(d) == 0) stop("empty")
+      d
+    }, error = function(e) {
+      if (attempt < retries) Sys.sleep(2^attempt)
+      NULL
+    })
+    if (!is.null(dat)) break
+  }
+  if (is.null(dat)) return(NULL)
+
+  dat[, date := as.Date(substr(date, 1, 10))]
+  setorder(dat, date)
+
+  conv <- .tiingo_convert(dat, ticker)
+
+  # Never clobber a NON-EMPTY (Yahoo-derived) splits cache. An EMPTY one
+  # may be a stale artifact of a failed getSplits on this purged symbol
+  # (load_ticker_splits caches empties) -- upgrade it when Tiingo carries
+  # real events, else the cached close (multiplied by real factors) would
+  # be divided by 1 at read time and pre-split as-traded prices come out
+  # wrong.
+  split_file <- file.path(split_dir, paste0(ticker, ".parquet"))
+  existing <- if (file.exists(split_file)) {
+    tryCatch(nrow(arrow::read_parquet(split_file)), error = function(e) 0L)
+  } else -1L
+  if (existing <= 0L) {
+    if (!dir.exists(split_dir)) dir.create(split_dir, recursive = TRUE)
+    tryCatch(arrow::write_parquet(conv$splits, split_file),
+             error = function(e) NULL)
+  }
+
+  conv$px
+}
+
+
+# TRUE split factor test, shared semantics with ttm_eps.R .tiingo_splits
+# (duplicated there for standalone sourcing -- keep in sync). A real
+# split is a clean small-integer ratio (2, 3, 3:2, 6:5, 1:8...) away
+# from 1; spinoffs and special distributions are encoded in splitFactor
+# too but as arbitrary decimals (K 2023-10-02 = 1.065 for the WK Kellogg
+# spinoff) and must NOT become split events -- they would corrupt the
+# share-issuance and TTM-EPS adjustments. Nonpositive factors (dirty
+# data) are rejected before log().
+.is_true_split_factor <- function(f) {
+  vapply(f, function(x) {
+    if (is.na(x) || x <= 0 || x == 1) return(FALSE)
+    if (abs(log(x)) < log(1.15)) return(FALSE)
+    for (q in 1:10) {
+      p <- round(x * q)
+      if (p >= 1 && p != q && abs(x - p / q) / x < 0.002) return(TRUE)
+    }
+    FALSE
+  }, logical(1))
+}
+
+# Pure conversion: Tiingo raw daily rows -> list(px = xts on the Yahoo
+# cache basis, splits = data.table(ex_date, ratio)). Split of the two
+# concerns from the HTTP layer so the basis math is unit-testable.
+.tiingo_convert <- function(dat, ticker) {
+
+  # true split events only; quantmod convention ratio = 1/f
+  splits <- data.table(ex_date = as.Date(character()), ratio = numeric())
+  if ("splitFactor" %in% names(dat)) {
+    ev <- dat[.is_true_split_factor(splitFactor)]
+    if (nrow(ev) > 0) {
+      splits <- ev[, .(ex_date = date, ratio = 1 / splitFactor)]
+    }
+  }
+
+  # raw as-traded -> Yahoo-style split-adjusted cache basis. Adjusted =
+  # Tiingo adjClose passthrough (already split+dividend adjusted to the
+  # current basis, same semantics as Yahoo's column 6) -- kept ONLY for
+  # column-shape parity with Yahoo files (feature_compute_rF expects it);
+  # never a valid level for ratios.
+  fct <- .split_factor(dat$date, splits)
+  out <- data.frame(
+    Open     = dat$open  * fct,
+    High     = dat$high  * fct,
+    Low      = dat$low   * fct,
+    Close    = dat$close * fct,
+    Volume   = dat$volume / fct,
+    Adjusted = if ("adjClose" %in% names(dat)) dat$adjClose else
+      dat$close * fct
+  )
+  colnames(out) <- paste(gsub("\\.", "-", ticker),
+                         c("Open", "High", "Low", "Close", "Volume",
+                           "Adjusted"),
+                         sep = ".")
+  list(px = xts(out, order.by = dat$date), splits = splits)
+}
+
 #' Download OHLCV price data for a single ticker with parquet cache
 #'
 #' Adapted from download_ohlcv() in ref/data_loader.R.
@@ -121,10 +333,8 @@ fetch_ticker_prices <- function(ticker, from = "2009-01-01",
 
   if (!dir.exists(cache_dir)) dir.create(cache_dir, recursive = TRUE)
 
-  cache_file <- file.path(cache_dir,
-                          sprintf("%s_yahoo_%s.parquet", ticker, from))
-
-  # Try cache first
+  # Try cache first (Yahoo primary, Tiingo fallback file)
+  cache_file <- .price_cache_path(ticker, from, cache_dir)
   if (file.exists(cache_file)) {
     cached <- tryCatch({
       df <- as.data.frame(arrow::read_parquet(cache_file))
@@ -133,16 +343,23 @@ fetch_ticker_prices <- function(ticker, from = "2009-01-01",
     if (!is.null(cached) && nrow(cached) > 0) return(cached)
   }
 
-  # Known-dead this session: skip the download entirely
-  memo_key <- sprintf("%s_%s", ticker, from)
+  # Known-dead this session: skip the download entirely. The key encodes
+  # whether a Tiingo token was available: a failure memoized WITHOUT the
+  # token must not block a retry after the user exports one mid-session.
+  memo_key <- sprintf("%s_%s%s", ticker, from,
+                      if (.tiingo_token() == "") "_notoken" else "")
   if (isTRUE(.PRICE_FETCH_FAILED[[memo_key]])) return(NULL)
 
-  # Download from Yahoo. Yahoo uses dashes for class tickers (BRK-B),
-  # while the index roster uses dots (BRK.B); without the conversion the
-  # request 404s and class-share tickers never get price data.
-  yahoo_symbol <- gsub("\\.", "-", ticker)
+  # Download from Yahoo. Renamed chains resolve to the CURRENT symbol
+  # (COG -> CTRA: Yahoo purges the old symbol and keys the continuous
+  # history under the new one). Yahoo uses dashes for class tickers
+  # (BRK-B), while the index roster uses dots (BRK.B); without the
+  # conversion the request 404s. Reused dead symbols never ask Yahoo --
+  # it would answer with the WRONG company (see .YAHOO_REUSED_BLOCKLIST).
+  yahoo_symbol <- gsub("\\.", "-", .provider_symbol(ticker))
   px <- NULL
-  for (attempt in seq_len(retries)) {
+  retries_yahoo <- if (ticker %in% .YAHOO_REUSED_BLOCKLIST) 0L else retries
+  for (attempt in seq_len(retries_yahoo)) {
     px <- tryCatch({
       p <- getSymbols(yahoo_symbol, src = "yahoo", from = from,
                       to = Sys.Date(), auto.assign = FALSE)
@@ -155,12 +372,42 @@ fetch_ticker_prices <- function(ticker, from = "2009-01-01",
     if (!is.null(px)) break
   }
 
+  src <- "yahoo"
+  if (!is.null(px)) {
+    # normalize column prefixes to the ROSTER ticker (dash form): mapped
+    # chains fetch under the current symbol (COG -> CTRA) but consumers
+    # that match columns BY NAME (feature_compute_rF) key on the roster
+    colnames(px) <- sub("^[^.]+\\.",
+                        paste0(gsub("\\.", "-", ticker), "."),
+                        colnames(px))
+  } else {
+    # Tiingo fallback (Wave P): purged delistings. The adapter returns
+    # data already on the Yahoo cache basis; NULL when no token is set
+    # or the symbol is missing there too.
+    if (.tiingo_token() == "") {
+      if (!isTRUE(.PRICE_FETCH_FAILED[["__tiingo_token_warned"]])) {
+        warning("fetch_ticker_prices: no TIINGO_TOKEN -- purged delistings stay NA this run",
+                call. = FALSE)
+        .PRICE_FETCH_FAILED[["__tiingo_token_warned"]] <- TRUE
+      }
+    } else {
+      px <- .fetch_prices_tiingo(ticker, from = from)
+      src <- "tiingo"
+      if (!is.null(px)) {
+        message(sprintf("  fetch_ticker_prices: %s recovered via Tiingo (%d rows)",
+                        ticker, nrow(px)))
+      }
+    }
+  }
+
   if (is.null(px)) {
     .PRICE_FETCH_FAILED[[memo_key]] <- TRUE
     return(NULL)
   }
 
-  # Cache write
+  # Cache write (provenance in the filename)
+  cache_file <- file.path(cache_dir,
+                          sprintf("%s_%s_%s.parquet", ticker, src, from))
   df <- data.frame(date = as.character(index(px)), coredata(px),
                    check.names = FALSE)
   tryCatch(arrow::write_parquet(df, cache_file), error = function(e) NULL)
@@ -327,12 +574,10 @@ get_latest_annual_filing <- function(fund_dt, as_of_date,
 
   if (!dir.exists(cache_dir)) dir.create(cache_dir, recursive = TRUE)
 
-  # Check which tickers need fetching
+  # Check which tickers need fetching (either provider's cache counts)
   need_fetch <- character(0)
   for (tk in tickers) {
-    cache_file <- file.path(cache_dir,
-                            sprintf("%s_yahoo_%s.parquet", tk, from))
-    if (!file.exists(cache_file)) {
+    if (!file.exists(.price_cache_path(tk, from, cache_dir))) {
       need_fetch <- c(need_fetch, tk)
     }
   }

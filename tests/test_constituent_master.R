@@ -38,7 +38,7 @@ message("\n=== load_raw_constituents() ===")
 raw <- load_raw_constituents("data/sp500_constituents_.csv")
 
 test("returns data.table",         is.data.table(raw))
-test("845 rows",                   nrow(raw) == 845)
+test("850 rows",                   nrow(raw) == 850)  # +5 old-CIK Tier 2 occurrence splits
 test("has ticker column",          "ticker" %in% names(raw))
 test("has cik column",             "cik" %in% names(raw))
 test("has occurrence column",      "occurrence" %in% names(raw))
@@ -52,7 +52,7 @@ test("occurrence is integer",      is.integer(raw$occurrence))
 test("no empty tickers",           all(nchar(raw$ticker) > 0))
 test("829 unique tickers",         uniqueN(raw$ticker) == 829)
 test("occurrence range [1,2]",     all(raw$occurrence %in% c(1L, 2L)))
-test("505 have CIK in CSV",        sum(!is.na(raw$cik)) == 505)
+test("657 have CIK in CSV",        sum(!is.na(raw$cik)) == 657)  # +147 Tier 2 resolutions, +5 splits
 
 
 # ============================================================================
@@ -70,7 +70,8 @@ test("3 distinct values (incl NA)",
 # Category A tickers
 cat_a <- c("AMD", "CEG", "DOW", "DD", "EQT", "FSLR", "JBL",
            "MXIM", "PCG", "TER", "DELL")
-cat_b <- c("GAS", "OI", "CBE", "Q", "AGN")
+cat_b <- c("GAS", "OI", "CBE", "Q", "AGN",
+           "NWSA", "FOXA", "FOX", "CCE", "ESRX")  # old-CIK Tier 2 splits
 
 test("all Cat A classified SAME_COMPANY",
      all(dt_dup[ticker %in% cat_a & occurrence == 2, duplicate_class] == "SAME_COMPANY"))
@@ -83,7 +84,7 @@ test("Cat B occurrence 1 also classified",
 
 # Every ticker with occurrence > 1 must be classified
 dup_tickers <- dt_dup[occurrence > 1, unique(ticker)]
-test("16 duplicate tickers exist",  length(dup_tickers) == 16)
+test("21 duplicate tickers exist",  length(dup_tickers) == 21)  # 16 + 5 Tier 2 splits
 test("all dup tickers classified",
      all(dt_dup[ticker %in% dup_tickers, !is.na(duplicate_class)]))
 
@@ -141,7 +142,7 @@ test("parquet file exists", file.exists(pq_path))
 
 dt <- as.data.table(arrow::read_parquet(pq_path))
 
-test("845 rows in parquet",       nrow(dt) == 845)
+test("850 rows in parquet",       nrow(dt) == 850)
 test("9 columns in parquet",      ncol(dt) == 9)
 test("correct column names",
      setequal(names(dt),
@@ -156,7 +157,7 @@ test("no empty-string CIKs in current", all(nchar(current$cik) == 10))
 
 # Gate 2: All 16 duplicate tickers classified
 dup_tks <- dt[occurrence > 1, unique(ticker)]
-test("16 duplicate tickers",            length(dup_tks) == 16)
+test("21 duplicate tickers",            length(dup_tks) == 21)
 test("all dup rows have class",
      all(!is.na(dt[ticker %in% dup_tks, duplicate_class])))
 
@@ -170,8 +171,8 @@ test("CIKs are 10-char zero-padded",
      all(nchar(resolved$cik) == 10) && all(grepl("^[0-9]{10}$", resolved$cik)))
 
 # Gate 5: Status coverage
-test("342 removed constituents",
-     dt[status != "ACTIVE", .N] == 342)
+test("347 removed constituents",
+     dt[status != "ACTIVE", .N] == 347)  # +5 old-entity occurrence-1 rows
 test("all removed have a REMOVED_ status",
      all(grepl("^REMOVED_", dt[status != "ACTIVE", status])))
 

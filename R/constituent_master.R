@@ -248,8 +248,13 @@ classify_duplicates <- function(dt) {
   cat_a <- c("AMD", "CEG", "DOW", "DD", "EQT", "FSLR", "JBL",
              "MXIM", "PCG", "TER", "DELL")
 
-  # Category B: different company, same ticker (split by date range)
-  cat_b <- c("GAS", "OI", "CBE", "Q", "AGN")
+  # Category B: different company, same ticker (split by date range).
+  # NWSA/FOXA/FOX/CCE/ESRX (old-CIK wave Tier 2): the ticker's constituent
+  # changed FILER mid-history (News Corp 2013 split, 21CF/Disney 2019,
+  # old CCE -> CCE International 2010, Express Scripts holdco 2012) --
+  # occurrence 1 carries the old entity's CIK, occurrence 2 the current.
+  cat_b <- c("GAS", "OI", "CBE", "Q", "AGN",
+             "NWSA", "FOXA", "FOX", "CCE", "ESRX")
 
   dt[ticker %in% cat_a & occurrence > 0, duplicate_class := "SAME_COMPANY"]
   dt[ticker %in% cat_b & occurrence > 0, duplicate_class := "DIFFERENT_COMPANY"]
