@@ -872,9 +872,12 @@ build_timeseries <- function(start_date  = "2010-01-04",
             call. = FALSE)
   }
 
-  # Load lookups
+  # Load lookups. Sectors resolve to the build-time view (SCD date-join,
+  # D2/B): fund layers are built once with one sector, so the latest
+  # classification as of the build horizon is the correct label.
   master  <- as.data.table(arrow::read_parquet(master_path))
-  sectors <- as.data.table(arrow::read_parquet(sector_path))
+  sectors <- .sector_asof(as.data.table(arrow::read_parquet(sector_path)),
+                          as.Date(end_date))
 
   # Determine tickers to process: every roster ticker whose CIK has a
   # fundamentals cache file. The filename ticker suffix alone misses
@@ -1121,9 +1124,11 @@ load_daily_cross_section <- function(target_date,
 
   cs <- rbindlist(rows[seq_len(n_ok)], fill = TRUE)
 
-  # Add sector/industry metadata
+  # Add sector/industry metadata, resolved as of the target date (SCD
+  # date-join, fix D2/B)
   if (file.exists(sector_path)) {
-    sec_dt <- as.data.table(arrow::read_parquet(sector_path))
+    sec_dt <- .sector_asof(as.data.table(arrow::read_parquet(sector_path)),
+                           target_date)
     cs <- merge(cs, sec_dt[, .(ticker, sector, industry)],
                 by = "ticker", all.x = TRUE)
     cs[is.na(sector), sector := "Unknown"]

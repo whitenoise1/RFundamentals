@@ -32,16 +32,25 @@ for (ov_csv in .SECTOR_OVERRIDE_CSVS) {
         n_repl <- n_repl + 1L
       }
     } else {
-      sec <- rbind(sec, data.table(ticker = tk, sector = ov$sector[i],
-                                   industry = ov$industry[i],
-                                   source = "override"), fill = TRUE)
+      new_row <- data.table(ticker = tk, sector = ov$sector[i],
+                            industry = ov$industry[i], source = "override")
+      # dated dimension (D2/B): static overrides are era-correct
+      # classifications, applied back to the start of history
+      if ("valid_from" %in% names(sec)) {
+        new_row[, valid_from := .SECTOR_VALID_FROM_FLOOR]
+      }
+      sec <- rbind(sec, new_row, fill = TRUE)
       n_new <- n_new + 1L
     }
   }
   message(sprintf("%s: %d added, %d replaced", basename(ov_csv), n_new, n_repl))
 }
 
-stopifnot(!anyDuplicated(sec$ticker))
+if ("valid_from" %in% names(sec)) {
+  stopifnot(!anyDuplicated(sec[, .(ticker, valid_from)]))
+} else {
+  stopifnot(!anyDuplicated(sec$ticker))
+}
 stopifnot(all(sec$sector %in% .FINVIZ_SECTORS))
 write_parquet(sec, path)
 message(sprintf("wrote %s: %d rows (was %d)", path, nrow(sec), n0))

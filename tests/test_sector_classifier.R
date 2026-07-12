@@ -250,6 +250,82 @@ test("SIVB/CMA/PBCT/DFS are Financial",
 
 
 # ============================================================================
+# UNIT TESTS: .sector_asof() / merge_sector_scd() (SCD Type-2, D2/B)
+# ============================================================================
+message("\n=== .sector_asof / merge_sector_scd ===")
+
+scd <- data.table(
+  ticker     = c("AAA", "AAA", "BBB", "CCC"),
+  sector     = c("Technology", "Communication Services", "Financial",
+                 "Energy"),
+  industry   = c("Software - Application", "Entertainment",
+                 "Banks - Regional", "Oil & Gas E&P"),
+  source     = "finviz",
+  valid_from = as.Date(c("2010-01-01", "2020-06-01", "2010-01-01",
+                         "2024-03-01"))
+)
+
+asof_2015 <- .sector_asof(scd, "2015-06-30")
+test("asof: one row per ticker",
+     nrow(asof_2015) == 3 && !anyDuplicated(asof_2015$ticker))
+test("asof: pre-change date sees the old value",
+     asof_2015[ticker == "AAA", sector] == "Technology")
+test("asof: post-change date sees the new value",
+     .sector_asof(scd, "2020-06-01")[ticker == "AAA", sector] ==
+       "Communication Services")
+test("asof: first-seen-later ticker backfills from earliest row",
+     asof_2015[ticker == "CCC", sector] == "Energy")
+test("asof: legacy table without valid_from passes through",
+     identical(.sector_asof(scd[, !"valid_from"], "2015-06-30"),
+               scd[, !"valid_from"]))
+test("asof: floor-stamped table reproduces the flat view on any date", {
+  flat <- data.table(ticker = c("X", "Y"), sector = "Technology",
+                     industry = "Semiconductors", source = "finviz")
+  dated <- copy(flat)[, valid_from := as.Date("2010-01-01")]
+  v <- .sector_asof(dated, "2012-01-01")[, .(ticker, sector, industry, source)]
+  identical(v, flat)
+})
+
+cur <- data.table(
+  ticker   = c("AAA", "BBB", "DDD"),
+  sector   = c("Communication Services", "Real Estate", "Utilities"),
+  industry = c("Entertainment", "REIT - Industrial",
+               "Utilities - Regulated Electric"),
+  source   = "finviz"
+)
+merged <- merge_sector_scd(scd, cur, as_of = as.Date("2026-07-12"))
+
+test("scd merge: unchanged ticker keeps history untouched",
+     nrow(merged[ticker == "AAA"]) == 2)
+test("scd merge: changed ticker appends a dated row",
+     nrow(merged[ticker == "BBB"]) == 2 &&
+       merged[ticker == "BBB" & valid_from == as.Date("2026-07-12"),
+              sector] == "Real Estate")
+test("scd merge: new ticker appended at as_of",
+     merged[ticker == "DDD", valid_from] == as.Date("2026-07-12"))
+test("scd merge: history-only ticker preserved",
+     nrow(merged[ticker == "CCC"]) == 1)
+test("scd merge: no duplicate (ticker, valid_from)",
+     !anyDuplicated(merged[, .(ticker, valid_from)]))
+test("scd merge: same-day rerun replaces, not stacks", {
+  cur2 <- copy(cur)[ticker == "BBB", industry := "REIT - Office"]
+  m2 <- merge_sector_scd(merged, cur2, as_of = as.Date("2026-07-12"))
+  nrow(m2[ticker == "BBB"]) == 2 &&
+    m2[ticker == "BBB" & valid_from == as.Date("2026-07-12"),
+       industry] == "REIT - Office"
+})
+test("scd merge: bootstrap from NULL stamps the floor",
+     all(merge_sector_scd(NULL, cur)$valid_from == .SECTOR_VALID_FROM_FLOOR))
+test("scd merge: legacy prev without valid_from gets floor-stamped", {
+  m3 <- merge_sector_scd(scd[valid_from == as.Date("2010-01-01"),
+                             !"valid_from"], cur,
+                         as_of = as.Date("2026-07-12"))
+  all(m3[ticker == "BBB" & sector == "Financial",
+         valid_from] == .SECTOR_VALID_FROM_FLOOR)
+})
+
+
+# ============================================================================
 # UNIT TESTS: .finviz_fetch_one() -- live test (single ticker)
 # ============================================================================
 message("\n=== .finviz_fetch_one() (live, AAPL) ===")
@@ -278,9 +354,13 @@ if (file.exists(pq_path)) {
   dt <- as.data.table(arrow::read_parquet(pq_path))
 
   test("parquet is data.table",          is.data.table(dt))
-  test("has 4 columns",                  ncol(dt) == 4)
+  test("has 5 columns (SCD schema, D2/B)", ncol(dt) == 5)
   test("correct column names",
-       setequal(names(dt), c("ticker", "sector", "industry", "source")))
+       setequal(names(dt), c("ticker", "sector", "industry", "source",
+                             "valid_from")))
+  test("valid_from populated",           all(!is.na(dt$valid_from)))
+  # collapse to the current view for the per-ticker gates below
+  dt <- .sector_asof(dt, Sys.Date())
 
   # Gate 1: Coverage -- 100% of active tickers
   master <- as.data.table(arrow::read_parquet("cache/lookups/constituent_master.parquet"))

@@ -495,8 +495,12 @@ validate_daily_layer <- function(ts_dir      = "cache/timeseries",
                   length(fund_files)))
 
   # -- 1. sector coverage over the timeseries universe --
+  # current view: layers are built with the current classification, so
+  # the on-disk mask is judged against it (SCD table resolved via
+  # .sector_asof; legacy tables pass through)
   sec_dt <- if (file.exists(sector_path)) {
-    tryCatch(as.data.table(arrow::read_parquet(sector_path)),
+    tryCatch(.sector_asof(as.data.table(arrow::read_parquet(sector_path)),
+                          Sys.Date()),
              error = function(e) NULL)
   } else NULL
 

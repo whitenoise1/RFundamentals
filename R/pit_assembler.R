@@ -696,8 +696,11 @@ assemble_snapshot <- function(snapshot_date,
   universe <- get_universe_at_date(snapshot_date, master)
   message(sprintf("  universe: %d tickers", nrow(universe)))
 
-  # Merge sector/industry
-  universe <- merge(universe, sectors[, .(ticker, sector, industry)],
+  # Merge sector/industry, resolved as of the snapshot date (SCD date-
+  # join, fix D2/B; on a floor-stamped table this reproduces the old
+  # ticker-only join exactly)
+  sec_asof <- .sector_asof(sectors, snapshot_date)
+  universe <- merge(universe, sec_asof[, .(ticker, sector, industry)],
                     by = "ticker", all.x = TRUE)
 
   # -- Prefetch prices --
