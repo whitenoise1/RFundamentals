@@ -21,7 +21,7 @@ preflight_only <- "--preflight" %in% args
 
 STATE_FILE <- "cache/.rebuild_state_daily_update"
 PHASE2_MARKER <- "cache/.rebuild_daily_update_phase2_wiped"
-GATED_COMMIT <- "c521f27"
+GATED_COMMIT <- "092d42b"
 
 msg <- function(...) message(sprintf("[%s] %s",
   format(Sys.time(), "%H:%M:%S"), sprintf(...)))
