@@ -76,6 +76,17 @@ for (col in ind_names) {
   raw_dt[na_idx, (col) := NA_real_]
 }
 
+# A well-formed snapshot honors the sector NA-mask: masked indicators are
+# NA for every member of a masked sector (validate_snapshot asserts this
+# since the daily-update wave).
+for (sec in names(.SECTOR_NA_INDICATORS)) {
+  cols <- intersect(.SECTOR_NA_INDICATORS[[sec]], names(raw_dt))
+  idx <- which(raw_dt$sector == sec)
+  if (length(idx) && length(cols)) {
+    for (cn in cols) raw_dt[idx, (cn) := NA_real_]
+  }
+}
+
 # Synthetic z-scored snapshot: use the pipeline's own .robust_zscore so
 # the fixture satisfies the median/MAD invariants validate_snapshot asserts.
 zsc_dt <- copy(raw_dt)
@@ -99,7 +110,11 @@ message(sprintf("  wrote synthetic snapshot: %d tickers, %d indicators",
 # ============================================================================
 message("\n=== validate_snapshot ===")
 
-val <- validate_snapshot(snapshot_date, output_dir = test_dir)
+# check_daily = FALSE throughout the fixture tests: the synthetic
+# snapshots have no timeseries layer (the daily-layer gate is exercised
+# separately in TEST 6).
+val <- validate_snapshot(snapshot_date, output_dir = test_dir,
+                         check_daily = FALSE)
 
 test("validate returns list",
      is.list(val))
@@ -148,18 +163,57 @@ test("validate: z-score median exactly zero (median/MAD invariant)",
 test("validate: z-score MAD exactly one (median/MAD invariant)",
      val$checks["zscore_mad_one"])
 
+test("validate: no Unknown sectors in clean fixture",
+     val$checks["no_unknown_sector"])
+
+test("validate: mask fires for Financial in clean fixture",
+     val$checks["mask_fires_financial"])
+
 # Test with missing file
-val_missing <- validate_snapshot("1999-01-01", output_dir = test_dir)
+val_missing <- validate_snapshot("1999-01-01", output_dir = test_dir,
+                                 check_daily = FALSE)
 test("validate: missing file returns pass=FALSE",
      !val_missing$pass)
 
 # Test with corrupt file
 corrupt_path <- file.path(test_dir, "pit_2000-01-01_raw.parquet")
 writeLines("not a parquet file", corrupt_path)
-val_corrupt <- validate_snapshot("2000-01-01", output_dir = test_dir)
+val_corrupt <- validate_snapshot("2000-01-01", output_dir = test_dir,
+                                 check_daily = FALSE)
 test("validate: corrupt file returns pass=FALSE",
      !val_corrupt$pass)
 unlink(corrupt_path)
+
+# -- D3 gate: Unknown sector bucket must fail --
+unk_dt <- copy(raw_dt)
+unk_dt[1:3, sector := "Unknown"]
+arrow::write_parquet(unk_dt,
+                     file.path(test_dir, "pit_2023-12-31_raw.parquet"))
+arrow::write_parquet(zsc_dt,
+                     file.path(test_dir, "pit_2023-12-31_zscore.parquet"))
+val_unk <- validate_snapshot("2023-12-31", output_dir = test_dir,
+                             check_daily = FALSE)
+test("validate: Unknown sector bucket fails no_unknown_sector",
+     !val_unk$checks["no_unknown_sector"])
+test("validate: Unknown sector tickers reported in details",
+     length(val_unk$details$unknown_sector_tickers) == 3)
+test("validate: Unknown sector bucket fails overall",
+     !val_unk$pass)
+
+# -- Mask-fires gate: a Financial member with a masked value must fail --
+leak_dt <- copy(raw_dt)
+fin_idx <- which(leak_dt$sector == "Financial")[1]
+leak_dt[fin_idx, gpa := 0.42]
+arrow::write_parquet(leak_dt,
+                     file.path(test_dir, "pit_2024-03-31_raw.parquet"))
+arrow::write_parquet(zsc_dt,
+                     file.path(test_dir, "pit_2024-03-31_zscore.parquet"))
+val_leak <- validate_snapshot("2024-03-31", output_dir = test_dir,
+                              check_daily = FALSE)
+test("validate: unmasked Financial gpa fails mask_fires_financial",
+     !val_leak$checks["mask_fires_financial"])
+test("validate: mask leak fails overall",
+     !val_leak$pass)
 
 
 # ============================================================================
@@ -278,6 +332,14 @@ for (col in ind_names) {
   }
 }
 
+for (sec in names(.SECTOR_NA_INDICATORS)) {
+  cols <- intersect(.SECTOR_NA_INDICATORS[[sec]], names(large_raw))
+  idx <- which(large_raw$sector == sec)
+  if (length(idx) && length(cols)) {
+    for (cn in cols) large_raw[idx, (cn) := NA_real_]
+  }
+}
+
 large_zsc <- copy(large_raw)
 for (col in ind_names) {
   large_zsc[, (col) := .robust_zscore(large_zsc[[col]])]
@@ -288,7 +350,8 @@ arrow::write_parquet(large_raw,
 arrow::write_parquet(large_zsc,
                      file.path(test_dir, "pit_2023-09-30_zscore.parquet"))
 
-val_large <- validate_snapshot("2023-09-30", output_dir = test_dir)
+val_large <- validate_snapshot("2023-09-30", output_dir = test_dir,
+                               check_daily = FALSE)
 
 test("validate: 450 tickers is plausible",
      val_large$checks["ticker_count_plausible"])
@@ -298,6 +361,119 @@ test("validate: no 99% NA indicators (full synthetic data)",
 
 test("validate: all checks pass for well-formed snapshot",
      val_large$pass)
+
+
+# ============================================================================
+# TEST 6: validate_daily_layer (D1 gate + sector coverage + on-disk mask)
+# ============================================================================
+message("\n=== validate_daily_layer ===")
+
+dl_ts    <- file.path(tempdir(), "test_ts");     dir.create(dl_ts, showWarnings = FALSE)
+dl_split <- file.path(tempdir(), "test_splits"); dir.create(dl_split, showWarnings = FALSE)
+dl_sec   <- file.path(tempdir(), "test_sector.parquet")
+
+# Sector lookup: GOODCO/BADCO Technology, FINCO Financial; NOSEC absent.
+arrow::write_parquet(data.table(
+  ticker   = c("GOODCO", "BADCO", "FINCO"),
+  sector   = c("Technology", "Technology", "Financial"),
+  industry = c("Software", "Software", "Banks - Regional"),
+  source   = "finviz"), dl_sec)
+
+# 40 trading days around a 2:1 split at day 21 (ratio 0.5, multiple 2).
+dl_dates <- as.Date("2020-06-01") + 0:39
+ex_date  <- dl_dates[21]
+pre      <- dl_dates <  ex_date
+price    <- ifelse(pre, 100, 50)          # as-traded price halves
+
+# GOODCO: split-consistent (shares double at the split; pe continuous)
+arrow::write_parquet(data.table(
+  date = dl_dates, price = price,
+  market_cap  = ifelse(pre, 100 * 1e9, 50 * 2e9),
+  pe_trailing = 20,
+  gpa = NA_real_), file.path(dl_ts, "GOODCO_daily.parquet"))
+
+# BADCO: the D1 defect (stub shares never adjust; pe halves at the split)
+arrow::write_parquet(data.table(
+  date = dl_dates, price = price,
+  market_cap  = price * 1e9,
+  pe_trailing = ifelse(pre, 20, 10),
+  gpa = NA_real_), file.path(dl_ts, "BADCO_daily.parquet"))
+
+# FINCO: no split, but a masked indicator carries values on disk
+arrow::write_parquet(data.table(
+  date = dl_dates, price = 30, market_cap = 30 * 5e8,
+  pe_trailing = 12,
+  gpa = 0.3, net_debt_price = 0.5),
+  file.path(dl_ts, "FINCO_daily.parquet"))
+
+# NOSEC: fund layer only, no sector row -> coverage failure
+arrow::write_parquet(data.table(fiscal_year = 2020L,
+                                filed_date = as.Date("2021-02-01")),
+                     file.path(dl_ts, "NOSEC_fund.parquet"))
+
+# Splits caches: same true split for GOODCO and BADCO; none for FINCO.
+for (tk in c("GOODCO", "BADCO")) {
+  arrow::write_parquet(data.table(ex_date = ex_date, ratio = 0.5),
+                       file.path(dl_split, paste0(tk, ".parquet")))
+}
+
+dl <- validate_daily_layer(ts_dir = dl_ts, sector_path = dl_sec,
+                           split_dir = dl_split)
+
+test("daily layer: returns list with pass/checks/details",
+     is.list(dl) && all(c("pass", "checks", "details") %in% names(dl)))
+
+test("daily layer: missing sector row fails coverage",
+     !dl$checks["sector_coverage_complete"])
+
+test("daily layer: NOSEC reported in details",
+     identical(dl$details$no_sector_tickers, "NOSEC"))
+
+test("daily layer: on-disk mask leak detected (FINCO)",
+     !dl$checks["mask_fires_on_disk"] &&
+       grepl("^FINCO:", dl$details$mask_leaks[1]))
+
+test("daily layer: split-inconsistent market cap detected (BADCO)",
+     !dl$checks["split_consistent_market_cap"] &&
+       identical(dl$details$split_jump_failures$ticker, "BADCO"))
+
+test("daily layer: split-consistent GOODCO not flagged",
+     !"GOODCO" %in% dl$details$split_jump_failures$ticker)
+
+test("daily layer: overall fail on bad fixture",
+     !dl$pass)
+
+# Clean fixture: fix FINCO + BADCO, give NOSEC a sector
+arrow::write_parquet(data.table(
+  ticker   = c("GOODCO", "BADCO", "FINCO", "NOSEC"),
+  sector   = c("Technology", "Technology", "Financial", "Energy"),
+  industry = c("Software", "Software", "Banks - Regional", "Oil & Gas"),
+  source   = "finviz"), dl_sec)
+arrow::write_parquet(data.table(
+  date = dl_dates, price = price,
+  market_cap  = ifelse(pre, 100 * 1e9, 50 * 2e9),
+  pe_trailing = 20,
+  gpa = NA_real_), file.path(dl_ts, "BADCO_daily.parquet"))
+arrow::write_parquet(data.table(
+  date = dl_dates, price = 30, market_cap = 30 * 5e8,
+  pe_trailing = 12,
+  gpa = NA_real_, net_debt_price = NA_real_),
+  file.path(dl_ts, "FINCO_daily.parquet"))
+
+dl2 <- validate_daily_layer(ts_dir = dl_ts, sector_path = dl_sec,
+                            split_dir = dl_split)
+
+test("daily layer: clean fixture passes coverage",
+     dl2$checks["sector_coverage_complete"])
+test("daily layer: clean fixture passes mask check",
+     dl2$checks["mask_fires_on_disk"])
+test("daily layer: clean fixture passes split consistency",
+     dl2$checks["split_consistent_market_cap"])
+test("daily layer: file-count plausibility still fails on 3 files",
+     !dl2$checks["daily_files_present"])
+
+unlink(c(dl_ts, dl_split), recursive = TRUE)
+unlink(dl_sec)
 
 
 # ============================================================================

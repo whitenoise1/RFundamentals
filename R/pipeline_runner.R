@@ -7,7 +7,8 @@
 # Public API:
 #   run_full_build(start_date, end_date, ...)
 #   run_daily_update(date, ...)
-#   validate_snapshot(snapshot_date, output_dir)
+#   validate_snapshot(snapshot_date, output_dir, ...)
+#   validate_daily_layer(ts_dir, sector_path, split_dir)
 #   summarize_coverage(snapshot_date, output_dir)
 #
 # Dependencies: data.table, arrow
@@ -39,6 +40,22 @@ suppressPackageStartupMessages({
   "fcf_stability", "composite_debt_issuance", "share_iss_5y",
   "grcapx3y", "rd_cap", "ms_roa_vol", "ms_rev_vol", "ms_score"
 )
+
+# Session-level memo for validate_daily_layer. The daily layer is one
+# shared artifact -- validating it once per session is enough even when
+# validate_snapshot runs over 66 dates. Keyed by ts_dir; assign NULL (or
+# restart R) after rebuilding the timeseries layers to force a re-check.
+.DAILY_GATE_CACHE <- new.env(parent = emptyenv())
+
+# Split events smaller than this band are spinoff/dividend artifacts, not
+# true splits (same band as the Wave P Tiingo filter in pit_assembler.R).
+.DAILY_GATE_SPLIT_BAND <- log(1.25)
+
+# Tolerance for the implied-shares jump across a split event and for
+# pe_trailing continuity. Organic share drift (buybacks/issuance) inside
+# the +/-14 day event window is a few percent at most; a missed split
+# adjustment is off by the full ratio (>= 1.25 by the band above).
+.DAILY_GATE_JUMP_TOL <- log(1.2)
 
 
 # =============================================================================
@@ -144,52 +161,44 @@ run_full_build <- function(start_date      = "2010-03-31",
 # =============================================================================
 # 2. run_daily_update()
 # =============================================================================
-#' Run an incremental update for a single date
+#' Run the incremental update (shell over the cadence tiers)
 #'
-#' Assembles (or reassembles) the snapshot for the given date.
-#' Useful for daily or weekly refreshes of the latest snapshot.
+#' Since the daily-update wave this orchestrates the Tier D/W/M
+#' machinery in update_runner.R (manifest-driven appends) instead of
+#' re-assembling a single quarterly snapshot: the consuming output is
+#' the daily cross-section, and quarterly pit_* extension is Tier M's
+#' job. See docs/DESIGN_DAILY_UPDATE.md section 6.
 #'
-#' @param date Date or character. Snapshot date (default today).
-#' @param master_path Character. Path to constituent_master.parquet.
-#' @param sector_path Character. Path to sector_industry.parquet.
-#' @param fund_dir Character. Fundamentals cache directory.
-#' @param price_cache_dir Character. Price cache directory.
-#' @param output_dir Character. Snapshot output directory.
-#' @return Snapshot result (list with $raw, $zscored, $stats), or NULL.
+#' @param date Date or character. Update through this date (default today).
+#' @param force_weekly Logical. Run Tier W regardless of cadence.
+#' @param force_monthly Logical. Run Tier M regardless of cadence.
+#' @param master_path,sector_path,fund_dir Legacy names, passed through.
+#' @param price_cache_dir Legacy name for price_dir, mapped.
+#' @param output_dir Legacy name for snapshot_dir, mapped.
+#' @param ... Passed to run_incremental_update (further paths, flags).
+#' @return Invisible list of per-tier stats.
 run_daily_update <- function(date            = Sys.Date(),
+                             force_weekly    = FALSE,
+                             force_monthly   = FALSE,
                              master_path     = .DEFAULT_MASTER_PATH,
                              sector_path     = .DEFAULT_SECTOR_PATH,
                              fund_dir        = .DEFAULT_FUND_DIR,
                              price_cache_dir = .DEFAULT_PRICE_DIR,
-                             output_dir      = .DEFAULT_SNAPSHOT_DIR) {
+                             output_dir      = .DEFAULT_SNAPSHOT_DIR,
+                             ...) {
 
-  message(sprintf("run_daily_update: %s", as.Date(date)))
-  t0 <- Sys.time()
-
-  result <- assemble_snapshot(
-    snapshot_date   = date,
-    master_path     = master_path,
-    sector_path     = sector_path,
-    fund_dir        = fund_dir,
-    price_cache_dir = price_cache_dir,
-    output_dir      = output_dir,
-    prefetch_prices = TRUE
-  )
-
-  # Update multi-dimensional features (if feature_standardizer is loaded)
-  if (exists("update_features", mode = "function")) {
-    tryCatch(
-      update_features(through_date = date, sector_path = sector_path),
-      error = function(e) {
-        warning(sprintf("Feature update failed: %s", e$message), call. = FALSE)
-      }
-    )
+  if (!exists("run_incremental_update", mode = "function")) {
+    stop(paste0("run_daily_update: update_runner.R is not sourced -- it ",
+                "provides the cadence tiers this shell orchestrates"),
+         call. = FALSE)
   }
-
-  elapsed <- round(as.numeric(difftime(Sys.time(), t0, units = "mins")), 1)
-  message(sprintf("run_daily_update: done in %.1f minutes", elapsed))
-
-  invisible(result)
+  run_incremental_update(as_of = date, force_weekly = force_weekly,
+                         force_monthly = force_monthly,
+                         master_path = master_path,
+                         sector_path = sector_path,
+                         fund_dir = fund_dir,
+                         price_dir = price_cache_dir,
+                         snapshot_dir = output_dir, ...)
 }
 
 
@@ -200,18 +209,34 @@ run_daily_update <- function(date            = Sys.Date(),
 #'
 #' Checks:
 #'   1. Ticker count is plausible (~400-505 for S&P 500)
-#'   2. Z-scores have mean near 0 and SD near 1
+#'   2. Z-scores have median 0 and MAD 1 (construction invariants)
 #'   3. No indicator is >99% NA
 #'   4. Key metadata columns present
 #'   5. No duplicate tickers
 #'   6. Piotroski F-Score is 0-9
+#'   7. Zero tickers with sector "Unknown"/NA (D3 gate: an Unknown bucket
+#'      silently disables the sector NA-mask)
+#'   8. For every sector in .SECTOR_NA_INDICATORS, its masked indicators
+#'      are NA for all its members (mask-fires gate)
+#'   9. Daily-layer integrity via validate_daily_layer() (sector coverage,
+#'      on-disk mask, split-consistent market cap -- the D1 gate). Heavy,
+#'      so memoized per session; disable with check_daily = FALSE only in
+#'      unit tests that fabricate snapshots without a timeseries layer.
 #'
 #' @param snapshot_date Date or character.
 #' @param output_dir Character. Snapshot directory.
+#' @param check_daily Logical. Run the daily-layer check (default TRUE).
+#' @param ts_dir Character. Timeseries directory for the daily-layer check.
+#' @param sector_path Character. Sector lookup for the daily-layer check.
+#' @param split_dir Character. Splits cache for the daily-layer check.
 #' @return List with $pass (logical), $checks (named logical vector),
 #'   $details (list of diagnostic info).
 validate_snapshot <- function(snapshot_date,
-                              output_dir = .DEFAULT_SNAPSHOT_DIR) {
+                              output_dir  = .DEFAULT_SNAPSHOT_DIR,
+                              check_daily = TRUE,
+                              ts_dir      = "cache/timeseries",
+                              sector_path = .DEFAULT_SECTOR_PATH,
+                              split_dir   = "cache/splits") {
 
   snapshot_date <- as.Date(snapshot_date)
   message(sprintf("validate_snapshot: %s", snapshot_date))
@@ -339,6 +364,75 @@ validate_snapshot <- function(snapshot_date,
     for (j in seq_len(nrow(sector_dist))) {
       message(sprintf("    %s: %d", sector_dist$sector[j], sector_dist$N[j]))
     }
+
+    # -- Zero Unknown sectors (D3 gate) --
+    # "Unknown" is not a key in .SECTOR_NA_INDICATORS, so the sector
+    # NA-mask silently does not fire for that bucket: delisted banks kept
+    # non-NA net_debt_price in production (measured 2026-07-09). Any
+    # Unknown-sector ticker is therefore a hard failure, not a warning.
+    unk <- raw[is.na(sector) | sector == "Unknown", ticker]
+    checks["no_unknown_sector"] <- length(unk) == 0
+    details$unknown_sector_tickers <- unk
+    if (length(unk) > 0) {
+      message(sprintf("  FAIL: %d Unknown-sector tickers: %s",
+                      length(unk), paste(sort(unk), collapse = ", ")))
+    }
+
+    # -- Mask fires for every masked sector --
+    # For each sector in .SECTOR_NA_INDICATORS, every masked indicator
+    # must be NA across all its members. A single non-NA cell means the
+    # mask did not fire at compute/stub time and a nonsensical value
+    # reached the cross-section.
+    for (sec in names(.SECTOR_NA_INDICATORS)) {
+      key <- paste0("mask_fires_", gsub("[^a-z]+", "_", tolower(sec)))
+      masked_cols <- intersect(.SECTOR_NA_INDICATORS[[sec]], names(raw))
+      members <- raw[sector == sec]
+      if (nrow(members) == 0 || length(masked_cols) == 0) {
+        checks[key] <- TRUE
+        next
+      }
+      leaks <- masked_cols[vapply(masked_cols, function(cn) {
+        any(!is.na(members[[cn]]))
+      }, logical(1))]
+      checks[key] <- length(leaks) == 0
+      if (length(leaks) > 0) {
+        leak_tks <- unique(unlist(lapply(leaks, function(cn) {
+          members[!is.na(get(cn)), ticker]
+        })))
+        details[[paste0("mask_leaks_", sec)]] <-
+          list(indicators = leaks, tickers = leak_tks)
+        message(sprintf("  FAIL: %s mask not firing for %s (tickers: %s)",
+                        sec, paste(leaks, collapse = ", "),
+                        paste(head(sort(leak_tks), 10), collapse = ", ")))
+      }
+    }
+  }
+
+  # -- Daily-layer integrity (D1 gate; memoized per session) --
+  # The memo key folds in a cheap content fingerprint (file count + max
+  # mtime), so a rebuild or Tier D append in the same session
+  # invalidates the memo instead of replaying a stale verdict.
+  if (check_daily) {
+    dl_files <- list.files(ts_dir, pattern = "_daily\\.parquet$",
+                           full.names = TRUE)
+    fp <- if (length(dl_files) > 0) {
+      sprintf("%d|%.0f", length(dl_files),
+              as.numeric(max(file.mtime(dl_files))))
+    } else "empty"
+    memo_key <- paste(ts_dir, sector_path, split_dir, fp, sep = "|")
+    daily_res <- .DAILY_GATE_CACHE[[memo_key]]
+    if (is.null(daily_res)) {
+      daily_res <- validate_daily_layer(ts_dir = ts_dir,
+                                        sector_path = sector_path,
+                                        split_dir = split_dir)
+      .DAILY_GATE_CACHE[[memo_key]] <- daily_res
+    } else {
+      message("  daily layer: using memoized result (once per session)")
+    }
+    checks["daily_layer_valid"] <- isTRUE(daily_res$pass)
+    details$daily_layer <- daily_res
+    message(sprintf("  daily layer: %s",
+                    if (isTRUE(daily_res$pass)) "[ok]" else "FAIL"))
   }
 
   # -- Overall pass --
@@ -348,6 +442,221 @@ validate_snapshot <- function(snapshot_date,
                   if (all_pass) "PASS" else "FAIL"))
 
   list(pass = all_pass, checks = checks, details = details)
+}
+
+
+# =============================================================================
+# 3b. validate_daily_layer()
+# =============================================================================
+#' Validate the daily timeseries layer (whole-history, all tickers)
+#'
+#' The daily layer is one shared artifact spanning all dates, so this runs
+#' per layer, not per snapshot date. Three check families:
+#'
+#'   1. Sector coverage: every ticker with a timeseries layer (_fund or
+#'      _daily) has a known, non-"Unknown" sector row. Fund layers are
+#'      built WITH the sector (the .MASKED_STUB_OF stub NA-ing), so a
+#'      missing sector at build time is the D3 root cause.
+#'   2. On-disk mask: for tickers in masked sectors, every masked
+#'      indicator column in their _daily parquet is all-NA. Catches
+#'      layers built before the ticker's sector resolved.
+#'   3. Split-consistent market cap (the D1 gate): across every true
+#'      split event, implied shares (market_cap / price) must jump by
+#'      the split multiple, and pe_trailing must be continuous. A daily
+#'      layer that pairs the as-traded price with unadjusted per-share
+#'      stubs shows a jump of 1 and a P/E discontinuity of the split
+#'      ratio -- the exact D1 signature.
+#'
+#' Reads are column-pruned; only masked-sector members and split tickers
+#' are opened. No network access.
+#'
+#' @param ts_dir Character. Timeseries directory.
+#' @param sector_path Character. Path to sector_industry.parquet.
+#' @param split_dir Character. Splits cache directory.
+#' @return List with $pass, $checks (named logical), $details.
+validate_daily_layer <- function(ts_dir      = "cache/timeseries",
+                                 sector_path = .DEFAULT_SECTOR_PATH,
+                                 split_dir   = "cache/splits") {
+
+  t0 <- Sys.time()
+  message(sprintf("validate_daily_layer: %s", ts_dir))
+  checks  <- c()
+  details <- list()
+
+  daily_files <- list.files(ts_dir, pattern = "_daily\\.parquet$",
+                            full.names = TRUE)
+  fund_files  <- list.files(ts_dir, pattern = "_fund\\.parquet$",
+                            full.names = TRUE)
+  daily_tks <- gsub("_daily\\.parquet$", "", basename(daily_files))
+  ts_tks    <- union(daily_tks,
+                     gsub("_fund\\.parquet$", "", basename(fund_files)))
+
+  checks["daily_files_present"] <- length(daily_files) >= 100
+  message(sprintf("  layers: %d daily, %d fund", length(daily_files),
+                  length(fund_files)))
+
+  # -- 1. sector coverage over the timeseries universe --
+  # current view: layers are built with the current classification, so
+  # the on-disk mask is judged against it (SCD table resolved via
+  # .sector_asof; legacy tables pass through)
+  sec_dt <- if (file.exists(sector_path)) {
+    tryCatch(.sector_asof(as.data.table(arrow::read_parquet(sector_path)),
+                          Sys.Date()),
+             error = function(e) NULL)
+  } else NULL
+
+  checks["sector_lookup_exists"] <- !is.null(sec_dt)
+  if (!is.null(sec_dt)) {
+    known <- sec_dt[!is.na(sector) & sector != "Unknown", ticker]
+    no_sec <- sort(setdiff(ts_tks, known))
+    checks["sector_coverage_complete"] <- length(no_sec) == 0
+    details$no_sector_tickers <- no_sec
+    if (length(no_sec) > 0) {
+      message(sprintf("  FAIL: %d timeseries tickers lack a sector: %s",
+                      length(no_sec), paste(no_sec, collapse = ", ")))
+    }
+  }
+
+  # -- Plan column-pruned reads: masked cols + split-check cols per ticker --
+  need_cols <- list()
+  if (!is.null(sec_dt)) {
+    masked_secs <- sec_dt[sector %in% names(.SECTOR_NA_INDICATORS) &
+                            ticker %in% daily_tks]
+    for (j in seq_len(nrow(masked_secs))) {
+      tk <- masked_secs$ticker[j]
+      need_cols[[tk]] <- .SECTOR_NA_INDICATORS[[masked_secs$sector[j]]]
+    }
+  }
+
+  split_events <- list()
+  for (tk in daily_tks) {
+    sf <- file.path(split_dir, paste0(tk, ".parquet"))
+    if (!file.exists(sf)) next
+    s <- tryCatch(as.data.table(arrow::read_parquet(sf)),
+                  error = function(e) NULL)
+    if (is.null(s) || nrow(s) == 0) next
+    s <- s[!is.na(ratio) & ratio > 0 &
+             abs(log(1 / ratio)) >= .DAILY_GATE_SPLIT_BAND]
+    if (nrow(s) == 0) next
+    split_events[[tk]] <- s
+    need_cols[[tk]] <- c(need_cols[[tk]],
+                         "price", "market_cap", "pe_trailing")
+  }
+
+  # -- 2 + 3. one pruned read per flagged ticker --
+  mask_leaks  <- character(0)
+  jump_fails  <- list()
+  n_events    <- 0L
+
+  for (tk in names(need_cols)) {
+    f <- file.path(ts_dir, sprintf("%s_daily.parquet", tk))
+    if (!file.exists(f)) next
+    cols <- unique(c("date", need_cols[[tk]]))
+    d <- tryCatch(
+      as.data.table(arrow::read_parquet(
+        f, col_select = tidyselect::any_of(cols))),
+      error = function(e) NULL
+    )
+    if (is.null(d) || nrow(d) == 0 || !"date" %in% names(d)) next
+    d[, date := as.Date(date)]
+
+    # on-disk mask
+    mcols <- intersect(setdiff(need_cols[[tk]],
+                               c("price", "market_cap", "pe_trailing")),
+                       names(d))
+    leaked <- mcols[vapply(mcols, function(cn) any(!is.na(d[[cn]])),
+                           logical(1))]
+    if (length(leaked) > 0) {
+      mask_leaks <- c(mask_leaks,
+                      sprintf("%s:%s", tk, paste(leaked, collapse = "+")))
+    }
+
+    # split-consistency
+    ev <- split_events[[tk]]
+    if (!is.null(ev) && all(c("price", "market_cap") %in% names(d))) {
+      for (j in seq_len(nrow(ev))) {
+        ex <- as.Date(ev$ex_date[j])
+        n_mult <- 1 / ev$ratio[j]
+        b <- d[date >= ex - 14 & date < ex &
+                 !is.na(market_cap) & !is.na(price)]
+        a <- d[date >= ex & date <= ex + 14 &
+                 !is.na(market_cap) & !is.na(price)]
+        if (nrow(b) == 0 || nrow(a) == 0) next
+        b <- b[.N]; a <- a[1]
+        n_events <- n_events + 1L
+        jump <- (a$market_cap / a$price) / (b$market_cap / b$price)
+        ok_mc <- abs(log(jump / n_mult)) < .DAILY_GATE_JUMP_TOL
+        # eps leg is SIGNATURE-based, not continuity-based: a missed
+        # eps adjustment makes pe jump by exactly the split multiple.
+        # Raw continuity false-positives on compound events (EXPE 1:2
+        # reverse split + TripAdvisor spinoff same day, ITT triple
+        # spinoff, TMUS/PCS merger) where price legitimately moves by
+        # more than the split factor while mc stays exact.
+        ok_pe <- TRUE
+        if ("pe_trailing" %in% names(d) &&
+            !is.na(b$pe_trailing) && !is.na(a$pe_trailing) &&
+            a$pe_trailing > 0 && b$pe_trailing > 0) {
+          pe_ratio <- b$pe_trailing / a$pe_trailing
+          ok_pe <- !(abs(log(pe_ratio / n_mult)) < .DAILY_GATE_JUMP_TOL &&
+                       abs(log(n_mult)) >= .DAILY_GATE_SPLIT_BAND)
+        }
+        if (!ok_mc || !ok_pe) {
+          jump_fails[[length(jump_fails) + 1]] <- data.table(
+            ticker = tk, ex_date = ex, split_mult = n_mult,
+            shares_jump = jump,
+            pe_before = b$pe_trailing, pe_after = a$pe_trailing)
+        }
+      }
+    }
+  }
+
+  checks["mask_fires_on_disk"] <- length(mask_leaks) == 0
+  details$mask_leaks <- mask_leaks
+  if (length(mask_leaks) > 0) {
+    message(sprintf("  FAIL: on-disk mask leaks for %d tickers: %s",
+                    length(mask_leaks),
+                    paste(head(mask_leaks, 10), collapse = ", ")))
+  }
+
+  jump_dt <- if (length(jump_fails) > 0) rbindlist(jump_fails) else NULL
+  checks["split_consistent_market_cap"] <- is.null(jump_dt)
+  details$split_jump_failures <- jump_dt
+  details$n_split_events_checked <- n_events
+  # zero checked events on a production-sized layer means the splits
+  # cache was unreadable/misplaced -- a vacuous pass here would wave the
+  # exact D1 defect through, so it fails instead. Small synthetic
+  # fixtures (< 100 daily files) are exempt.
+  if (length(daily_files) >= 100) {
+    checks["split_events_checked"] <- n_events > 0
+    if (n_events == 0) {
+      message("  FAIL: 0 split events checked -- splits cache missing/unreadable?")
+    }
+  }
+  if (!is.null(jump_dt)) {
+    message(sprintf(
+      "  FAIL: %d/%d split events with split-inconsistent mc/pe (D1): %s",
+      nrow(jump_dt), n_events,
+      paste(head(sprintf("%s@%s x%.3g jump %.3g", jump_dt$ticker,
+                         jump_dt$ex_date, jump_dt$split_mult,
+                         jump_dt$shares_jump), 8), collapse = "; ")))
+  } else {
+    message(sprintf("  split events checked: %d, all consistent", n_events))
+  }
+
+  all_pass <- all(checks)
+  elapsed <- round(as.numeric(difftime(Sys.time(), t0, units = "secs")), 1)
+  message(sprintf("  result: %d/%d checks passed -- %s (%.1fs)",
+                  sum(checks), length(checks),
+                  if (all_pass) "PASS" else "FAIL", elapsed))
+
+  out <- list(pass = all_pass, checks = checks, details = details)
+  .assert_output(out, "validate_daily_layer", list(
+    "has pass/checks/details" = function(x)
+      all(c("pass", "checks", "details") %in% names(x)),
+    "checks non-empty (no vacuous pass)" = function(x)
+      length(x$checks) > 0
+  ))
+  out
 }
 
 

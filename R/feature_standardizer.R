@@ -26,7 +26,8 @@
 #   get_feature_names()
 #
 # Dependencies: data.table, arrow, zoo
-# Requires: indicator_compute.R, timeseries_builder.R (already sourced)
+# Requires: indicator_compute.R, sector_classifier.R, timeseries_builder.R
+#           (already sourced)
 # ============================================================================
 
 suppressPackageStartupMessages({
@@ -237,7 +238,9 @@ suppressPackageStartupMessages({
   # Load sector lookup
   sec_dt <- NULL
   if (file.exists(sector_path)) {
-    sec_dt <- as.data.table(arrow::read_parquet(sector_path))
+    # current view of the dated sector table (SCD, D2/B)
+    sec_dt <- .sector_asof(as.data.table(arrow::read_parquet(sector_path)),
+                           Sys.Date())
   }
 
   result <- vector("list", length(daily_files))
@@ -931,7 +934,9 @@ build_all_features <- function(from_date   = "2010-01-04",
   # Get sector mapping
   sec_dt <- NULL
   if (file.exists(sector_path)) {
-    sec_dt <- as.data.table(arrow::read_parquet(sector_path))
+    # current view of the dated sector table (SCD, D2/B)
+    sec_dt <- .sector_asof(as.data.table(arrow::read_parquet(sector_path)),
+                           Sys.Date())
   }
   get_sector <- function(tk) {
     if (!is.null(sec_dt) && tk %in% sec_dt$ticker) {
@@ -1131,7 +1136,9 @@ update_features <- function(through_date = Sys.Date(),
   # Load sector lookup
   sec_dt <- NULL
   if (file.exists(sector_path)) {
-    sec_dt <- as.data.table(arrow::read_parquet(sector_path))
+    # current view of the dated sector table (SCD, D2/B)
+    sec_dt <- .sector_asof(as.data.table(arrow::read_parquet(sector_path)),
+                           Sys.Date())
   }
 
   n_updated <- 0L

@@ -29,6 +29,13 @@ sector that was current *at that time*. The approximation is therefore
 **frozen in extent** -- it covers only dates prior to the dating cutover and
 never grows.
 
+**Cutover happened 2026-07-12 (daily-update wave):** `sector_industry.parquet`
+carries `valid_from` (SCD Type-2; all pre-existing rows floor-stamped
+2010-01-01), readers date-join via `.sector_asof()`, and Tier M of the update
+machinery appends a dated row on every observed change
+(`merge_sector_scd`). The approximation now covers exactly the floor-stamped
+history and nothing after.
+
 ### Why (rationale)
 
 Strict PIT sector requires a *dated* classification history that also covers
@@ -97,6 +104,12 @@ We do not currently know the reclassification rate. Two cheap probes bound it:
 
 Neither probe requires a rebuild. Probe 1 should run before the single full
 rebuild; probe 2 reports annually.
+
+**Probe 2 hook (armed 2026-07-12):** D2/B is live, so the measurement is now
+a one-liner against the dated table --
+`sec[, .N, by = year(valid_from)]` on rows with `valid_from >` the floor
+counts appended changes per year (Tier M appends one row per observed
+change). First meaningful reading after ~1yr of Tier M runs; record it here.
 
 **Probe 1 result (2026-07-11, `tools/probe_sic_vs_finviz.R`):** across 495
 mapped current constituents, SIC-derived sector agrees with finviz for 374

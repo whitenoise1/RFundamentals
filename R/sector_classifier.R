@@ -6,11 +6,16 @@
 # Fallback: static CSV at data/sector_industry_fallback.csv.
 # Output: cache/lookups/sector_industry.parquet
 #
-# Output schema:
-#   ticker    chr   Ticker symbol
-#   sector    chr   Finviz sector (11 sectors)
-#   industry  chr   Finviz industry (~150 industries)
-#   source    chr   "finviz" | "fallback"
+# Output schema (SCD Type-2 since the daily-update wave, fix D2/B):
+#   ticker     chr   Ticker symbol
+#   sector     chr   Finviz sector (11 sectors)
+#   industry   chr   Finviz industry (~150 industries)
+#   source     chr   "finviz" | "fallback" | "override"
+#   valid_from date  Row valid from this date. Migration floor-stamped
+#                    all pre-existing rows (best current estimate applied
+#                    backward, docs/KNOWN_LIMITATIONS.md L1); the update
+#                    tiers append a new-dated row only when a ticker's
+#                    value changes. Readers resolve via .sector_asof().
 #
 # Dependencies: data.table, arrow, httr
 # ============================================================================
@@ -45,6 +50,30 @@ suppressPackageStartupMessages({
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ",
   "AppleWebKit/537.36 (KHTML, like Gecko) ",
   "Chrome/120.0.0.0 Safari/537.36")
+
+# The 11 finviz sectors, verbatim. .SECTOR_NA_INDICATORS keys on these
+# literals ("Financial", NOT "Financial Services"), so every static
+# override and crosswalk output MUST be one of these exact strings -- a
+# near-miss silently disables the bank/utility/REIT NA-mask (the D3
+# failure mode). tests/test_sector_classifier.R asserts this for every
+# override CSV row.
+.FINVIZ_SECTORS <- c(
+  "Basic Materials", "Communication Services", "Consumer Cyclical",
+  "Consumer Defensive", "Energy", "Financial", "Healthcare",
+  "Industrials", "Real Estate", "Technology", "Utilities"
+)
+
+# Static override CSVs applied by build_sector_industry step 4c, in
+# order (later files win on ticker collision).
+.SECTOR_OVERRIDE_CSVS <- c(
+  "data/sector_overrides_oldcik.csv",
+  "data/sector_overrides_delisted.csv"
+)
+
+# valid_from stamp for rows that predate the dated dimension: the best
+# current estimate applied back to the start of history (2010 grid).
+# Documented approximation, KNOWN_LIMITATIONS.md L1.
+.SECTOR_VALID_FROM_FLOOR <- as.Date("2010-01-01")
 
 # =============================================================================
 # PRIVATE HELPERS
@@ -155,6 +184,163 @@ load_cached_sectors <- function(cache_path = "cache/lookups/sector_industry.parq
 
 
 # =============================================================================
+# 2b. .sector_asof()  --  SCD Type-2 reader (fix D2/B)
+# =============================================================================
+#' Resolve the sector table to one row per ticker as of a date
+#'
+#' SCD semantics: for each ticker, the row with the largest valid_from
+#' <= as_of. Tickers whose earliest row postdates as_of resolve to that
+#' earliest row -- the best estimate applied backward, the same
+#' documented approximation as the migration floor-stamp (a missing row
+#' would put the ticker in the Unknown bucket and kill the NA-mask,
+#' which is strictly worse). Legacy tables without valid_from (and rows
+#' checkpointed mid-scrape with NA valid_from) pass through as current.
+#'
+#' @param sec_dt data.table. Sector table (any vintage of the schema).
+#' @param as_of Date or character. Resolution date (default today).
+#' @return data.table, one row per ticker.
+.sector_asof <- function(sec_dt, as_of = Sys.Date()) {
+  if (is.null(sec_dt) || nrow(sec_dt) == 0) return(sec_dt)
+  if (!"valid_from" %in% names(sec_dt)) return(sec_dt)
+
+  d <- as.Date(as_of)
+  x <- copy(sec_dt)
+  x[, valid_from := as.Date(valid_from)]
+  x[is.na(valid_from), valid_from := .SECTOR_VALID_FROM_FLOOR]
+  setorder(x, ticker, valid_from)
+
+  live <- x[valid_from <= d, .SD[.N], by = ticker]
+  first_seen_later <- x[!ticker %in% live$ticker, .SD[1], by = ticker]
+  out <- rbind(live, first_seen_later)
+  setorder(out, ticker)
+  out
+}
+
+
+# =============================================================================
+# 2c. merge_sector_scd()  --  SCD Type-2 writer (fix D2/B)
+# =============================================================================
+#' Merge freshly-resolved current values into the dated sector table
+#'
+#' For each ticker in `current`: no history -> append with valid_from =
+#' as_of (readers backfill pre-dates via the earliest-row rule); value
+#' unchanged vs the latest historical row -> keep history untouched;
+#' value changed -> append a new row dated as_of. Tickers present only
+#' in history are preserved (a delisted name keeps its classification).
+#' Re-running the same day replaces that day's row instead of stacking.
+#'
+#' @param prev data.table or NULL. Existing table (legacy or dated).
+#' @param current data.table. Fresh current view: ticker/sector/industry/source.
+#' @param as_of Date. Stamp for appended rows (default today).
+#' @param floor Date. Stamp for a bootstrap from scratch.
+#' @return data.table with valid_from, one row per (ticker, valid_from).
+merge_sector_scd <- function(prev, current, as_of = Sys.Date(),
+                             floor = .SECTOR_VALID_FROM_FLOOR) {
+  cur <- copy(as.data.table(current))[, .(ticker, sector, industry, source)]
+  as_of <- as.Date(as_of)
+
+  if (is.null(prev) || nrow(prev) == 0) {
+    cur[, valid_from := as.Date(floor)]
+    return(cur)
+  }
+
+  hist <- copy(as.data.table(prev))
+  if (!"valid_from" %in% names(hist)) hist[, valid_from := as.Date(floor)]
+  hist[, valid_from := as.Date(valid_from)]
+  hist[is.na(valid_from), valid_from := as.Date(floor)]
+  hist <- hist[, .(ticker, sector, industry, source, valid_from)]
+  setorder(hist, ticker, valid_from)
+
+  latest <- hist[, .SD[.N], by = ticker]
+  cmp <- merge(cur, latest[, .(ticker, old_sector = sector,
+                               old_industry = industry)],
+               by = "ticker", all.x = TRUE)
+  # NA-safe inequality: a value appearing, disappearing, or changing all
+  # count as a change (plain != yields NA when either side is NA, and
+  # data.table drops NA rows in i -- the change would be silently lost)
+  neq <- function(a, b) (is.na(a) != is.na(b)) |
+    (!is.na(a) & !is.na(b) & a != b)
+  add <- cmp[is.na(old_sector) & is.na(old_industry) |
+               neq(sector, old_sector) | neq(industry, old_industry),
+             .(ticker, sector, industry, source)]
+  if (nrow(add) > 0) {
+    add[, valid_from := as_of]
+    out <- rbind(hist, add)
+    # same-day re-run: the newer resolution replaces that day's row
+    out <- out[!duplicated(out[, .(ticker, valid_from)], fromLast = TRUE)]
+  } else {
+    out <- hist
+  }
+  setorder(out, ticker, valid_from)
+
+  .assert_output(out, "merge_sector_scd", list(
+    "is data.table"  = is.data.table,
+    "has valid_from" = function(x) "valid_from" %in% names(x),
+    "no duplicate (ticker, valid_from)" =
+      function(x) !anyDuplicated(x[, .(ticker, valid_from)]),
+    "no history lost" = function(x) all(hist$ticker %in% x$ticker)
+  ))
+  out
+}
+
+
+# =============================================================================
+# 2d. apply_sector_overrides()  --  single override data path
+# =============================================================================
+#' Apply the static sector overrides to a current-view table
+#'
+#' One implementation for every entry point (build_sector_industry,
+#' update_sector_dimension, tools/patch_sector_overrides.R): the
+#' .SECTOR_OVERRIDES code literal, then the override CSVs in
+#' .SECTOR_OVERRIDE_CSVS order. Overrides always win over a scrape of a
+#' reused/dead symbol. Every override sector is validated against the 11
+#' exact finviz strings -- a near-miss silently disables the NA-mask
+#' (the D3 failure mode), so a bad string is a hard stop, never a
+#' silent pass-through.
+#'
+#' @param dt data.table. Current view (ticker/sector/industry/source).
+#' @param add_missing Logical. Append override tickers absent from dt
+#'   (TRUE for full builds/patches; FALSE for scrape refreshes that only
+#'   correct tickers actually scraped).
+#' @return The modified data.table (also modified by reference).
+apply_sector_overrides <- function(dt, add_missing = TRUE) {
+  ov_all <- rbindlist(c(
+    list(data.table(
+      ticker   = names(.SECTOR_OVERRIDES),
+      sector   = vapply(.SECTOR_OVERRIDES, `[`, character(1), 1),
+      industry = vapply(.SECTOR_OVERRIDES, `[`, character(1), 2))),
+    lapply(Filter(file.exists, .SECTOR_OVERRIDE_CSVS), function(f) {
+      fread(f)[, .(ticker, sector, industry)]
+    })
+  ))
+  # later sources win on collision
+  ov_all <- ov_all[!duplicated(ticker, fromLast = TRUE)]
+
+  bad <- setdiff(unique(ov_all$sector), .FINVIZ_SECTORS)
+  if (length(bad) > 0) {
+    stop(sprintf("apply_sector_overrides: non-finviz sector strings: %s",
+                 paste(bad, collapse = ", ")), call. = FALSE)
+  }
+
+  n_repl <- dt[ticker %in% ov_all$ticker, .N]
+  dt[ov_all, on = "ticker",
+     `:=`(sector = i.sector, industry = i.industry, source = "override")]
+  if (add_missing) {
+    new_rows <- ov_all[!ticker %in% dt$ticker]
+    if (nrow(new_rows) > 0) {
+      new_rows[, source := "override"]
+      dt <- rbind(dt, new_rows, fill = TRUE)
+    }
+    message(sprintf("  sector overrides: %d added, %d replaced",
+                    nrow(new_rows), n_repl))
+  } else {
+    message(sprintf("  sector overrides: %d replaced", n_repl))
+  }
+  dt
+}
+
+
+# =============================================================================
 # 3. fetch_finviz_sectors()
 # =============================================================================
 #' Fetch sector/industry from finviz for a vector of tickers
@@ -216,10 +402,13 @@ fetch_finviz_sectors <- function(tickers,
       n_fail <- n_fail + 1L
     }
 
-    # Checkpoint: save cache every batch_size tickers
+    # Checkpoint: save cache every batch_size tickers. fill = TRUE: the
+    # resumed cache may carry the SCD valid_from column (D2/B) while
+    # fresh scrape rows do not -- without fill the rbind errors on the
+    # first checkpoint of any post-migration rescrape.
     if (length(new_rows) > 0 && (i %% batch_size == 0 || i == length(remaining))) {
       batch_dt <- rbindlist(new_rows)
-      cached <- rbind(cached, batch_dt)
+      cached <- rbind(cached, batch_dt, fill = TRUE)
       .write_sector_cache(cached, cache_path)
       new_rows <- list()
     }
@@ -264,6 +453,17 @@ build_sector_industry <- function(
 
   message("build_sector_industry: starting...")
 
+  # Step 0: The output file is stateful SCD history since D2/B -- the
+  # scrape must NEVER checkpoint into it (a crash mid-scrape would
+  # destroy the dated dimension and every delisted ticker's row on
+  # disk). Scrape into a sidecar checkpoint seeded from the existing
+  # table, and write the merged result to output_path only at the end.
+  prev <- load_cached_sectors(output_path)
+  scrape_path <- paste0(output_path, ".scrape")
+  if (!file.exists(scrape_path) && !is.null(prev)) {
+    .write_sector_cache(prev, scrape_path)
+  }
+
   # Step 1: Load constituent master
   if (!file.exists(master_path)) {
     stop("build_sector_industry: constituent_master.parquet not found. Run Session A first.")
@@ -272,8 +472,14 @@ build_sector_industry <- function(
   tickers <- unique(master$ticker)
   message(sprintf("  %d unique tickers from constituent master", length(tickers)))
 
-  # Step 2: Fetch from finviz
-  result <- fetch_finviz_sectors(tickers, cache_path = output_path)
+  # Step 2: Fetch from finviz (resumable via the sidecar checkpoint)
+  result <- fetch_finviz_sectors(tickers, cache_path = scrape_path)
+
+  # Steps 3-4 operate on the CURRENT view (one row per ticker); a cache
+  # resume may have returned dated history -- collapse it first. The
+  # history is re-attached from `prev` at write time (step 6b).
+  result <- .sector_asof(result, Sys.Date())
+  if ("valid_from" %in% names(result)) result[, valid_from := NULL]
 
   # Step 3: Fill gaps from fallback
   covered <- result$ticker
@@ -296,47 +502,14 @@ build_sector_industry <- function(
   result <- result[order(ticker, source != "finviz")]
   result <- result[!duplicated(ticker)]
 
-  # Step 4b: Manual overrides. Finviz serves the CURRENT listing at a
-  # ticker; when a symbol is reused (or redirected) after a constituent
-  # delists, the scraped sector describes the wrong company. Override
-  # only data-bearing cases (constituent has fundamentals in its era).
-  # Precedent: resolve_all_ciks pass-3 manual CIK overrides.
-  for (tk in names(.SECTOR_OVERRIDES)) {
-    ov <- .SECTOR_OVERRIDES[[tk]]
-    if (tk %in% result$ticker) {
-      result[ticker == tk, `:=`(sector = ov[1], industry = ov[2],
-                                source = "override")]
-    } else {
-      result <- rbind(result, data.table(
-        ticker = tk, sector = ov[1], industry = ov[2], source = "override"))
-    }
-  }
-
-  # Step 4c: Old-CIK wave static assignments (Tier 2, 2026-07). ~145
-  # recovered delisted names are dead on finviz (or their reused symbol
-  # serves an unrelated ETF/company); their era-correct classifications
-  # live in a data file rather than a code literal. Same precedence as
-  # .SECTOR_OVERRIDES: always wins over a scrape of the reused symbol.
-  ov_csv <- "data/sector_overrides_oldcik.csv"
-  if (file.exists(ov_csv)) {
-    ov_dt <- fread(ov_csv)
-    n_new <- 0L; n_repl <- 0L
-    for (i in seq_len(nrow(ov_dt))) {
-      tk <- ov_dt$ticker[i]
-      if (tk %in% result$ticker) {
-        result[ticker == tk, `:=`(sector = ov_dt$sector[i],
-                                  industry = ov_dt$industry[i],
-                                  source = "override")]
-        n_repl <- n_repl + 1L
-      } else {
-        result <- rbind(result, data.table(
-          ticker = tk, sector = ov_dt$sector[i],
-          industry = ov_dt$industry[i], source = "override"))
-        n_new <- n_new + 1L
-      }
-    }
-    message(sprintf("  old-CIK overrides: %d added, %d replaced", n_new, n_repl))
-  }
+  # Step 4b/4c: static overrides -- one data path for the code-literal
+  # .SECTOR_OVERRIDES (reused/redirected symbols serving the wrong
+  # company) and the override CSVs (delisted names dead on finviz:
+  # sector_overrides_oldcik.csv from old-CIK Tier 2,
+  # sector_overrides_delisted.csv from D2/A). Overrides always win over
+  # a scrape of the reused symbol; sectors validated against the 11
+  # exact finviz strings inside the helper.
+  result <- apply_sector_overrides(result, add_missing = TRUE)
 
   # Step 5: Final summary
   still_missing <- setdiff(tickers, result$ticker)
@@ -346,7 +519,7 @@ build_sector_industry <- function(
                     paste(head(still_missing, 20), collapse = ", ")))
   }
 
-  # Step 6: Validate
+  # Step 6: Validate the current view
   .assert_output(result, "build_sector_industry", list(
     "is data.table" = is.data.table,
     "has 4 columns" = function(x) ncol(x) == 4,
@@ -356,16 +529,32 @@ build_sector_industry <- function(
     "no duplicate tickers" = function(x) !anyDuplicated(x$ticker)
   ))
 
-  # Step 7: Write final parquet
-  .write_sector_cache(result, output_path)
+  # Step 6b: Re-attach the dated dimension (D2/B). Unchanged tickers
+  # keep their history; changed values append a row dated today.
+  dated <- merge_sector_scd(prev, result)
+  .assert_output(dated, "build_sector_industry", list(
+    "has valid_from" = function(x) "valid_from" %in% names(x),
+    "no duplicate (ticker, valid_from)" =
+      function(x) !anyDuplicated(x[, .(ticker, valid_from)]),
+    "current view intact" = function(x) {
+      now <- .sector_asof(x, Sys.Date())
+      nrow(now) >= nrow(result) &&
+        all(result$ticker %in% now$ticker)
+    }
+  ))
+
+  # Step 7: Write final parquet; drop the scrape checkpoint only after
+  # the canonical file is safely written
+  .write_sector_cache(dated, output_path)
+  if (file.exists(scrape_path)) unlink(scrape_path)
 
   n_finviz   <- result[source == "finviz", .N]
   n_fallback <- result[source == "fallback", .N]
   message(sprintf(
-    "build_sector_industry: wrote %d rows (%d finviz, %d fallback) to %s",
-    nrow(result), n_finviz, n_fallback, output_path))
+    "build_sector_industry: wrote %d rows / %d tickers (%d finviz, %d fallback) to %s",
+    nrow(dated), uniqueN(dated$ticker), n_finviz, n_fallback, output_path))
 
-  # Sector distribution
+  # Sector distribution (current view)
   if (nrow(result) > 0) {
     sector_counts <- result[, .N, by = sector][order(-N)]
     message("  Sector distribution:")
@@ -374,7 +563,7 @@ build_sector_industry <- function(
     }
   }
 
-  invisible(result)
+  invisible(dated)
 }
 
 
@@ -383,17 +572,26 @@ build_sector_industry <- function(
 # =============================================================================
 #' Load the sector/industry lookup table
 #'
+#' Returns the one-row-per-ticker view as of a date (the pre-D2/B
+#' contract every join-by-ticker consumer assumes). Pass as_of = NULL
+#' to get the raw dated SCD table.
+#'
 #' @param cache_path Character. Path to cached parquet.
-#' @return data.table with ticker, sector, industry, source.
-get_sector_lookup <- function(cache_path = "cache/lookups/sector_industry.parquet") {
+#' @param as_of Date or NULL. Resolution date (default today).
+#' @return data.table with ticker, sector, industry, source (+ valid_from).
+get_sector_lookup <- function(cache_path = "cache/lookups/sector_industry.parquet",
+                              as_of = Sys.Date()) {
   if (!file.exists(cache_path)) {
     stop("get_sector_lookup: sector_industry.parquet not found. Run build_sector_industry() first.")
   }
   dt <- as.data.table(arrow::read_parquet(cache_path))
+  if (!is.null(as_of)) dt <- .sector_asof(dt, as_of)
   .assert_output(dt, "get_sector_lookup", list(
     "is data.table" = is.data.table,
     "has ticker col" = function(x) "ticker" %in% names(x),
-    "has sector col" = function(x) "sector" %in% names(x)
+    "has sector col" = function(x) "sector" %in% names(x),
+    "one row per ticker unless raw requested" = function(x)
+      is.null(as_of) || !anyDuplicated(x$ticker)
   ))
   dt
 }

@@ -196,6 +196,167 @@ if (file.exists(pq_path)) {
 
 
 # ============================================================================
+# UNIT TESTS: override CSVs emit exactly the 11 finviz sector strings
+# ============================================================================
+# .SECTOR_NA_INDICATORS keys on the literal finviz sector strings; a
+# near-miss ("Financial Services") silently disables the bank/utility/
+# REIT NA-mask -- the D3 failure mode. Every static assignment must
+# therefore be one of the 11 exact strings (docs/DESIGN_DAILY_UPDATE.md
+# section 3, exact-string requirement).
+message("\n=== sector override CSVs: exact finviz strings ===")
+
+test("exactly 11 finviz sectors defined",
+     length(.FINVIZ_SECTORS) == 11)
+
+suppressMessages(source("R/indicator_compute.R"))
+test("every .SECTOR_NA_INDICATORS key is an exact finviz sector",
+     all(names(.SECTOR_NA_INDICATORS) %in% .FINVIZ_SECTORS))
+
+for (ov_csv in .SECTOR_OVERRIDE_CSVS) {
+  if (!file.exists(ov_csv)) {
+    message(sprintf("  SKIP  %s missing", ov_csv))
+    next
+  }
+  ov <- fread(ov_csv)
+  nm <- basename(ov_csv)
+  test(sprintf("%s: has ticker/sector/industry columns", nm),
+       all(c("ticker", "sector", "industry") %in% names(ov)))
+  test(sprintf("%s: no duplicate tickers", nm),
+       !anyDuplicated(ov$ticker))
+  test(sprintf("%s: every sector is an exact finviz string", nm),
+       all(ov$sector %in% .FINVIZ_SECTORS))
+  test(sprintf("%s: no empty industries", nm),
+       all(!is.na(ov$industry) & nzchar(trimws(ov$industry))))
+}
+
+test("code-literal .SECTOR_OVERRIDES sectors are exact finviz strings",
+     all(vapply(.SECTOR_OVERRIDES, `[`, character(1), 1) %in% .FINVIZ_SECTORS))
+
+# The D2/A measured gap (2026-07-12): every timeseries-universe ticker
+# without a sector row must be covered by the delisted override file.
+ov_delisted <- fread("data/sector_overrides_delisted.csv")
+gap_2026_07 <- c("ABMD", "ANSS", "ATVI", "CERN", "CMA", "CPWR", "CTLT",
+                 "CTXS", "DFS", "DISH", "DRE", "FBHS", "HBI", "HES",
+                 "JNPR", "KSU", "MRO", "MXIM", "NLSN", "PBCT", "PXD",
+                 "SIVB", "TWTR", "XLNX")
+test("delisted overrides cover the measured 24-ticker gap",
+     all(gap_2026_07 %in% ov_delisted$ticker))
+
+# Delisted banks must land in the mask-bearing Financial sector -- the
+# whole point of D2/A is that the NA-mask fires for them again.
+test("SIVB/CMA/PBCT/DFS are Financial",
+     all(ov_delisted[ticker %in% c("SIVB", "CMA", "PBCT", "DFS"), sector]
+         == "Financial"))
+
+
+# ============================================================================
+# UNIT TESTS: .sector_asof() / merge_sector_scd() (SCD Type-2, D2/B)
+# ============================================================================
+message("\n=== .sector_asof / merge_sector_scd ===")
+
+scd <- data.table(
+  ticker     = c("AAA", "AAA", "BBB", "CCC"),
+  sector     = c("Technology", "Communication Services", "Financial",
+                 "Energy"),
+  industry   = c("Software - Application", "Entertainment",
+                 "Banks - Regional", "Oil & Gas E&P"),
+  source     = "finviz",
+  valid_from = as.Date(c("2010-01-01", "2020-06-01", "2010-01-01",
+                         "2024-03-01"))
+)
+
+asof_2015 <- .sector_asof(scd, "2015-06-30")
+test("asof: one row per ticker",
+     nrow(asof_2015) == 3 && !anyDuplicated(asof_2015$ticker))
+test("asof: pre-change date sees the old value",
+     asof_2015[ticker == "AAA", sector] == "Technology")
+test("asof: post-change date sees the new value",
+     .sector_asof(scd, "2020-06-01")[ticker == "AAA", sector] ==
+       "Communication Services")
+test("asof: first-seen-later ticker backfills from earliest row",
+     asof_2015[ticker == "CCC", sector] == "Energy")
+test("asof: legacy table without valid_from passes through",
+     identical(.sector_asof(scd[, !"valid_from"], "2015-06-30"),
+               scd[, !"valid_from"]))
+test("asof: floor-stamped table reproduces the flat view on any date", {
+  flat <- data.table(ticker = c("X", "Y"), sector = "Technology",
+                     industry = "Semiconductors", source = "finviz")
+  dated <- copy(flat)[, valid_from := as.Date("2010-01-01")]
+  v <- .sector_asof(dated, "2012-01-01")[, .(ticker, sector, industry, source)]
+  identical(v, flat)
+})
+
+cur <- data.table(
+  ticker   = c("AAA", "BBB", "DDD"),
+  sector   = c("Communication Services", "Real Estate", "Utilities"),
+  industry = c("Entertainment", "REIT - Industrial",
+               "Utilities - Regulated Electric"),
+  source   = "finviz"
+)
+merged <- merge_sector_scd(scd, cur, as_of = as.Date("2026-07-12"))
+
+test("scd merge: unchanged ticker keeps history untouched",
+     nrow(merged[ticker == "AAA"]) == 2)
+test("scd merge: changed ticker appends a dated row",
+     nrow(merged[ticker == "BBB"]) == 2 &&
+       merged[ticker == "BBB" & valid_from == as.Date("2026-07-12"),
+              sector] == "Real Estate")
+test("scd merge: new ticker appended at as_of",
+     merged[ticker == "DDD", valid_from] == as.Date("2026-07-12"))
+test("scd merge: history-only ticker preserved",
+     nrow(merged[ticker == "CCC"]) == 1)
+test("scd merge: no duplicate (ticker, valid_from)",
+     !anyDuplicated(merged[, .(ticker, valid_from)]))
+test("scd merge: same-day rerun replaces, not stacks", {
+  cur2 <- copy(cur)[ticker == "BBB", industry := "REIT - Office"]
+  m2 <- merge_sector_scd(merged, cur2, as_of = as.Date("2026-07-12"))
+  nrow(m2[ticker == "BBB"]) == 2 &&
+    m2[ticker == "BBB" & valid_from == as.Date("2026-07-12"),
+       industry] == "REIT - Office"
+})
+test("scd merge: bootstrap from NULL stamps the floor",
+     all(merge_sector_scd(NULL, cur)$valid_from == .SECTOR_VALID_FROM_FLOOR))
+test("scd merge: legacy prev without valid_from gets floor-stamped", {
+  m3 <- merge_sector_scd(scd[valid_from == as.Date("2010-01-01"),
+                             !"valid_from"], cur,
+                         as_of = as.Date("2026-07-12"))
+  all(m3[ticker == "BBB" & sector == "Financial",
+         valid_from] == .SECTOR_VALID_FROM_FLOOR)
+})
+test("scd merge: NA industry gaining a value counts as a change", {
+  prev_na <- data.table(ticker = "EEE", sector = "Financial",
+                        industry = NA_character_, source = "fallback",
+                        valid_from = as.Date("2010-01-01"))
+  cur_na <- data.table(ticker = "EEE", sector = "Financial",
+                       industry = "Banks - Regional", source = "finviz")
+  m4 <- merge_sector_scd(prev_na, cur_na, as_of = as.Date("2026-07-12"))
+  nrow(m4) == 2 &&
+    m4[valid_from == as.Date("2026-07-12"), industry] == "Banks - Regional"
+})
+
+# -- apply_sector_overrides: one data path for all entry points --
+message("\n=== apply_sector_overrides ===")
+
+aso <- data.table(ticker = c("SIVB", "AAPL"),
+                  sector = c("Technology", "Technology"),
+                  industry = c("Wrong Industry", "Consumer Electronics"),
+                  source = "finviz")
+aso2 <- apply_sector_overrides(copy(aso), add_missing = FALSE)
+test("overrides: scraped reused symbol corrected in place",
+     aso2[ticker == "SIVB", sector] == "Financial" &&
+       aso2[ticker == "SIVB", source] == "override")
+test("overrides: non-override ticker untouched",
+     aso2[ticker == "AAPL", sector] == "Technology" &&
+       aso2[ticker == "AAPL", source] == "finviz")
+test("overrides: add_missing = FALSE appends nothing",
+     nrow(aso2) == 2)
+aso3 <- apply_sector_overrides(copy(aso), add_missing = TRUE)
+test("overrides: add_missing = TRUE appends absent override tickers",
+     "KSU" %in% aso3$ticker &&
+       aso3[ticker == "KSU", sector] == "Industrials")
+
+
+# ============================================================================
 # UNIT TESTS: .finviz_fetch_one() -- live test (single ticker)
 # ============================================================================
 message("\n=== .finviz_fetch_one() (live, AAPL) ===")
@@ -224,9 +385,13 @@ if (file.exists(pq_path)) {
   dt <- as.data.table(arrow::read_parquet(pq_path))
 
   test("parquet is data.table",          is.data.table(dt))
-  test("has 4 columns",                  ncol(dt) == 4)
+  test("has 5 columns (SCD schema, D2/B)", ncol(dt) == 5)
   test("correct column names",
-       setequal(names(dt), c("ticker", "sector", "industry", "source")))
+       setequal(names(dt), c("ticker", "sector", "industry", "source",
+                             "valid_from")))
+  test("valid_from populated",           all(!is.na(dt$valid_from)))
+  # collapse to the current view for the per-ticker gates below
+  dt <- .sector_asof(dt, Sys.Date())
 
   # Gate 1: Coverage -- 100% of active tickers
   master <- as.data.table(arrow::read_parquet("cache/lookups/constituent_master.parquet"))
@@ -289,8 +454,10 @@ if (file.exists(pq_path)) {
   # share is measured against scrape-able tickers, not the whole table.
   test("majority from finviz",
        dt[source == "finviz", .N] / nrow(dt) > 0.75)
-  test("override rows are the old-CIK + Tier 1 set (no silent growth)",
-       dt[source == "override", .N] <= 152)
+  # old-CIK + Tier 1 set (<=152) plus the daily-update wave's 24
+  # delisted-name rows (D2/A)
+  test("override rows are the documented static set (no silent growth)",
+       dt[source == "override", .N] <= 176)
 
 } else {
   message("  SKIP  parquet not yet built (run build_sector_industry() first)")

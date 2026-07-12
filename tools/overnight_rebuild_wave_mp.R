@@ -1,5 +1,7 @@
-# Overnight terminal rebuild after Waves M (multi-class shares/EPS) and
-# P (Tiingo price fallback). Designed against every failure mode in
+# Overnight terminal rebuild. Current wave: daily-update PIT fixes
+# (D1 per-share stubs, D2/A sector coverage, D2/B dated dimension, D3
+# Unknown-bucket kill) -- previously Waves M/P + old-CIK Tiers 1/2.
+# Designed against every failure mode in
 # docs/THE_DISASTER_REBUILD_LESSON.md:
 #   - hard preflight (no exists() degradation, no stale module trees)
 #   - golden-date determinism check before touching anything
@@ -8,17 +10,18 @@
 #   - built-in phase-4 verification with a final verdict block
 #
 # Usage:
-#   caffeinate -i Rscript tools/overnight_rebuild_wave_mp.R [--preflight]
+#   nohup caffeinate -i Rscript tools/overnight_rebuild_wave_mp.R > rebuild.log 2>&1 &
+#   (nohup-DETACHED: a plain background wrapper was killed mid-run once)
 # Resume after interruption: rerun the same command; completed dates are
-# skipped via the state file (delete tools/../cache/.rebuild_state to
-# force a fresh pass).
+# skipped via the state file (delete it to force a fresh pass).
 
 t_run0 <- Sys.time()
 args <- commandArgs(trailingOnly = TRUE)
 preflight_only <- "--preflight" %in% args
 
-STATE_FILE <- "cache/.rebuild_state_wave_mp"
-GATED_COMMIT <- "015a512"
+STATE_FILE <- "cache/.rebuild_state_daily_update"
+PHASE2_MARKER <- "cache/.rebuild_daily_update_phase2_wiped"
+GATED_COMMIT <- "092d42b"
 
 msg <- function(...) message(sprintf("[%s] %s",
   format(Sys.time(), "%H:%M:%S"), sprintf(...)))
@@ -60,7 +63,10 @@ required_fns <- c("load_ticker_splits", ".split_factor", ".merge_multiclass",
                   ".provider_symbol", ".price_cache_path",
                   "compute_ticker_indicators", "assemble_snapshot",
                   "build_timeseries", "augment_daily_ttm",
-                  "validate_snapshot", "pit_dedup")
+                  "validate_snapshot", "pit_dedup",
+                  # daily-update wave
+                  "build_ticker_pershare", ".extract_pershare_series",
+                  "validate_daily_layer", ".sector_asof")
 missing <- required_fns[!vapply(required_fns, exists, logical(1))]
 if (length(missing)) stop("missing functions: ", paste(missing, collapse = ", "))
 
@@ -81,18 +87,18 @@ msg("date grid: %d dates, %s .. %s", length(dates), dates[1], dates[length(dates
 
 # determinism check: re-assemble the most recent GATED golden date into a
 # temp dir and compare against the gated file. Any drift -> stop.
-# Tier 2: the baseline is the GATE OUTPUT (cache/gate_tier2/pass2), not
-# the production snapshot -- production predates the Tier 1/2 additions
-# (FOXA/NWSA/WBD at 2024 etc.; see the f876382 note), so comparing
-# against it would flag the gated additions as drift.
-msg("determinism check: 2024-06-30 (Tier 2 gate baseline)")
+# Daily-update wave: the baseline is the GATE OUTPUT
+# (cache/gate_daily/pass2), not the production snapshot -- production
+# predates the D2/A sector fixes and the mask changes, so comparing
+# against it would flag the gated deltas as drift.
+msg("determinism check: 2024-06-30 (daily-update gate baseline)")
 tmp_out <- file.path(tempdir(), "det_check")
 dir.create(tmp_out, showWarnings = FALSE)
 det <- assemble_snapshot("2024-06-30", output_dir = tmp_out,
                          prefetch_prices = FALSE)
-BASELINE_2024 <- "cache/gate_tier2/pass2/pit_2024-06-30_raw.parquet"
+BASELINE_2024 <- "cache/gate_daily/pass2/pit_2024-06-30_raw.parquet"
 if (!file.exists(BASELINE_2024)) stop(
-  "Tier 2 gate baseline missing -- run tools/oldcik_gate_tier2.R (2 passes) first")
+  "daily-update gate baseline missing -- run tools/gate_daily_update.R (2 passes) first")
 gold <- as.data.table(arrow::read_parquet(BASELINE_2024))
 newf <- as.data.table(arrow::read_parquet(file.path(tmp_out, "pit_2024-06-30_raw.parquet")))
 setkey(gold, ticker); setkey(newf, ticker)
@@ -139,33 +145,30 @@ msg("phase 1 complete: %d ok, %d failed (%s)",
     paste(failed_dates, collapse = ","))
 
 # =============================================================================
-# Phase 2: timeseries layers for AFFECTED tickers only
+# Phase 2: timeseries layers -- ALL tickers (D1 touches every fund layer:
+# per-share layers are new, daily recompute is split-consistent, and the
+# 24 D2/A names plus the delisted banks need sector-correct masks)
 # =============================================================================
-msg("phase 2: affected timeseries layers")
-registry_tks <- vapply(.MULTICLASS_REGISTRY, `[[`, character(1), "ticker")
-tiingo_tks <- unique(sub("_tiingo_.*", "", list.files("cache/prices",
-                                                      pattern = "_tiingo_")))
-mapped_tks <- names(.PROVIDER_SYMBOL_MAP)
-# bonus: any price cache written since the waves started (2026-07-08)
-fresh <- list.files("cache/prices", pattern = "_yahoo_", full.names = TRUE)
-fresh_tks <- sub("_yahoo_.*", "", basename(
-  fresh[file.mtime(fresh) >= as.POSIXct("2026-07-08 00:00:00")]))
-affected <- sort(unique(c(registry_tks, "MKC", tiingo_tks, mapped_tks,
-                          fresh_tks)))
-# only tickers that actually have a fundamentals cache get layers
-have_fund <- gsub("^\\d+_(.+)\\.parquet$", "\\1",
-                  list.files("cache/fundamentals", pattern = "\\.parquet$"))
-affected <- intersect(affected, have_fund)
-msg("affected tickers: %d (%s...)", length(affected),
-    paste(head(affected, 8), collapse = ","))
-
-for (tk in affected) {
-  for (sfx in c("_fund.parquet", "_daily.parquet")) {
-    f <- file.path("cache/timeseries", paste0(tk, sfx))
-    if (file.exists(f)) file.remove(f)
-  }
+msg("phase 2: full timeseries layer rebuild")
+# The marker is KEYED to the gated commit: a marker left behind by a
+# previous wave (or a bumped GATED_COMMIT) must not suppress the wipe,
+# or the "full rebuild" would silently reuse old-code layers -- the
+# stale-artifact failure mode of the disaster postmortem.
+marker_ok <- file.exists(PHASE2_MARKER) &&
+  identical(readLines(PHASE2_MARKER, warn = FALSE)[1], GATED_COMMIT)
+if (!marker_ok) {
+  old_layers <- list.files("cache/timeseries",
+                           pattern = "_(fund|daily|pershare)\\.parquet$",
+                           full.names = TRUE)
+  msg("wiping %d timeseries layers (marker %s @ %s)", length(old_layers),
+      PHASE2_MARKER, GATED_COMMIT)
+  invisible(file.remove(old_layers))
+  writeLines(GATED_COMMIT, PHASE2_MARKER)
+} else {
+  msg("phase 2 wipe already done for %s (marker present) -- resuming",
+      GATED_COMMIT)
 }
-invisible(build_timeseries(tickers = affected, end_date = as.Date("2026-06-30")))
+invisible(build_timeseries(end_date = as.Date("2026-06-30")))
 msg("phase 2 complete")
 
 # =============================================================================
@@ -238,6 +241,27 @@ a <- c(
   anchor("2012-06-30", "NWSA",  "market_cap", 3.0e10, 8.0e10)  # old News Corp via TFCFA stitch
 )
 
+# D1 anchors: the REBUILT daily layers must carry split-consistent
+# market caps inside the no-annual-filing split windows
+d1_anchor <- function(tk, d, col, lo, hi) {
+  f <- file.path("cache/timeseries", sprintf("%s_daily.parquet", tk))
+  v <- tryCatch({
+    dt <- as.data.table(arrow::read_parquet(f))
+    dt[as.Date(date) == as.Date(d)][[col]]
+  }, error = function(e) NA_real_)
+  ok <- length(v) == 1 && !is.na(v) && v >= lo && v <= hi
+  msg("D1 anchor %-5s %s %s = %s [%g, %g] %s", tk, d, col,
+      if (length(v) == 1 && !is.na(v)) signif(v, 4) else "NA/ABSENT",
+      lo, hi, if (ok) "PASS" else "FAIL")
+  ok
+}
+a <- c(a,
+  d1_anchor("AAPL", "2020-09-15", "market_cap", 1.7e12, 2.2e12),
+  d1_anchor("AAPL", "2014-07-15", "market_cap", 5.0e11, 6.5e11),
+  d1_anchor("NVDA", "2024-06-28", "market_cap", 2.7e12, 3.4e12),
+  d1_anchor("NVDA", "2024-06-28", "pe_trailing", 80, 130)
+)
+
 # indicator-count pin: exactly 130 indicators in every file
 pin_fail <- character(0)
 for (d in dates) {
@@ -263,3 +287,9 @@ msg("  validate failures: %s",
 msg("  anchors: %d/%d", sum(a), length(a))
 msg("  pin: %s", if (length(pin_fail)) "FAIL" else "ok")
 msg("==================================================")
+
+# a CLEAN run retires its resume state so the next wave starts fresh
+if (verdict) {
+  unlink(c(STATE_FILE, PHASE2_MARKER))
+  msg("resume state retired (%s, %s)", STATE_FILE, PHASE2_MARKER)
+}
