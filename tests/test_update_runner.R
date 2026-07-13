@@ -196,10 +196,10 @@ file.create(file.path(tm_snap, "pit_2010-03-31_raw.parquet"))
 
 tm_roster <- file.path(tempdir(), "tm_roster.csv")
 fwrite(data.table(
-  ticker = c("FIXCO", "GONECO", "NEWCO"),
-  cik = c("0000000001", "0000000002", ""),
-  date_added = c("2010-01-01", "2010-01-01", "2010-03-15"),
-  date_removed = c(NA, "2010-03-01", NA)), tm_roster)
+  ticker = c("FIXCO", "GONECO", "NEWCO", "OLDGONE"),
+  cik = c("0000000001", "0000000002", "", "0000000003"),
+  date_added = c("2010-01-01", "2010-01-01", "2010-03-15", "2010-01-01"),
+  date_removed = c(NA, "2010-03-01", NA, "2010-02-01")), tm_roster)
 
 tm_manifest <- rbind(
   data.table(cik = c("0000000001", "0000000002"),
@@ -225,6 +225,8 @@ r3 <- run_tier_monthly(as_of = as.Date("2010-04-01"), manifest = tm_manifest,
 test("tier M: new roster ticker added as needs-backfill (no CIK)",
      r3$manifest[ticker == "NEWCO", status] == "needs-backfill" &&
        is.na(r3$manifest[ticker == "NEWCO", cik]))
+test("tier M: fully-removed unknown ticker enters frozen, not backfill",
+     r3$manifest[ticker == "OLDGONE", status] == "removed")
 test("tier M: removal flipped to removed",
      r3$manifest[ticker == "GONECO", status] == "removed")
 test("tier M: active ticker untouched",

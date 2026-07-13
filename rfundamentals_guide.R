@@ -39,7 +39,15 @@ source("R/timeseries_builder.R")
 #
 # BUILD (run once, then forget):
 #   build_timeseries()          Build full historical database
-#   update_all_daily()          Append today's data to all tickers
+#
+# STAY CURRENT (cron-able; sources R/update_runner.R):
+#   run_incremental_update()    Manifest-driven tiers: daily split-guarded
+#                               price/layer appends, weekly EDGAR freshness
+#                               probe, monthly roster/sector/snapshot
+#                               maintenance. Canonical:
+#                               Rscript tools/run_incremental_update.R
+#   update_all_daily()          Low-level layer append (no split guard,
+#                               no manifest) for ad-hoc use
 #
 # READ (this is what you use daily):
 #   load_ticker_timeseries()    One ticker, all dates -> data.table
@@ -313,7 +321,15 @@ rbind(tail(aapl_recent, 1)[, .(ticker = "AAPL", pe_trailing, roe, revenue_growth
 # Initial historical build: all tickers, 2010 to today (~5 min, resumable)
 # build_timeseries()
 
-# Daily update: refresh prices, append new rows (~1-2 min)
+# Stay current (canonical): manifest-driven tiers -- daily split-guarded
+# price + layer appends, weekly EDGAR freshness probe, monthly roster/
+# sector/snapshot maintenance. ~90 min for ~500 tickers, cron-able.
+# Requires source("R/update_runner.R"); first run bootstraps the manifest.
+# run_incremental_update()
+# ... or from the shell:  Rscript tools/run_incremental_update.R
+
+# Low-level daily layer append (no split guard, no manifest; a split
+# between runs mis-bases that ticker until its splits cache refreshes)
 # update_all_daily()
 
 # Single ticker: build or update just one name
@@ -362,8 +378,14 @@ rbind(tail(aapl_recent, 1)[, .(ticker = "AAPL", pe_trailing, roe, revenue_growth
 #
 # pipeline_runner.R:
 #   .assert_output, .check_prerequisite
-#   run_full_build, run_daily_update, validate_snapshot,
+#   run_full_build, run_daily_update (shell over run_incremental_update),
+#   validate_snapshot, validate_daily_layer,
 #   summarize_coverage, list_snapshots
+#
+# update_runner.R:
+#   run_incremental_update, run_tier_daily, run_tier_weekly,
+#   run_tier_monthly, bootstrap_update_manifest, load/save_update_manifest,
+#   update_sector_dimension
 #
 # timeseries_builder.R:
 #   .assert_output_ts, .extract_stubs, .compute_price_sensitive_vec

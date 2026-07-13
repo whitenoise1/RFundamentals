@@ -8,7 +8,8 @@ Point-in-time fundamental database for S&P 500 constituents. Builds a daily-freq
 - Computes 130 fundamental indicators per ticker per trading day (valuation, profitability, growth, leverage, efficiency, cash flow quality, shareholder return, size, plus 71 academic anomaly factors from the Chen-Zimmermann open asset pricing catalog: accrual decompositions, external financing, seasonal surprises, level ratios, investment, and composite scores)
 - Maintains a two-layer storage system: sparse fundamentals (one row per fiscal year) and dense daily series (one row per trading day, price-sensitive ratios updated with market close)
 - Produces cross-sectional snapshots with raw values and z-scores, ready for factor model consumption
-- All data is stamped by SEC filing date (not period end) to prevent look-ahead bias
+- All data is stamped by SEC filing date (not period end) to prevent look-ahead bias; daily market cap and P/E pair the as-traded price with split-consistent, 10-Q-fresh share counts, and sector/industry is a dated dimension resolved as of each date
+- Stays current via a manifest-driven incremental updater (daily price/layer appends, weekly EDGAR freshness probe, monthly roster/sector/snapshot maintenance) -- no history reprocessing
 
 ## Quick start
 
@@ -36,13 +37,16 @@ source("R/sector_classifier.R")    # fetch sector/industry from Finviz
 source("R/fundamental_fetcher.R")  # download XBRL data from EDGAR
 source("R/indicator_compute.R")
 source("R/pit_assembler.R")
+source("R/ttm_eps.R")              # split events + TTM EPS augment
 source("R/pipeline_runner.R")
 source("R/timeseries_builder.R")
+source("R/update_runner.R")        # incremental update tiers
 
 build_constituent_master()         # writes cache/lookups/constituent_master.parquet
-build_sector_industry()            # writes cache/lookups/sector_industry.parquet
+build_sector_industry()            # writes cache/lookups/sector_industry.parquet (dated SCD)
 build_fundamentals()               # writes cache/fundamentals/{CIK}_{ticker}.parquet
 build_timeseries()                 # writes cache/timeseries/{ticker}_fund.parquet
+                                   #        cache/timeseries/{ticker}_pershare.parquet
                                    #        cache/timeseries/{ticker}_daily.parquet
 ```
 
@@ -52,19 +56,33 @@ Or from the command line:
 Rscript run_timeseries.R build
 ```
 
-### Daily update
+### Staying current
 
-Append the latest trading day to all tickers (~1-2 min):
+The manifest-driven incremental updater is the canonical way to keep the
+database current (cron-able; ~90 min for ~500 tickers, dominated by
+rate-limited network calls):
+
+```
+Rscript tools/run_incremental_update.R
+```
+
+Per run it always executes **Tier D** (per ticker: split guard first --
+a new split forces a full price re-fetch + daily-layer rebuild for that
+ticker, since Yahoo re-bases history; otherwise price append + daily-layer
+append + TTM re-augment), plus **Tier W** weekly (EDGAR submissions
+freshness probe; refetch + fund/per-share layer rebuild only for CIKs
+with a new 10-K/10-Q) and **Tier M** monthly (roster diff with full
+backfill of new constituents, dated sector refresh, quarterly snapshot
+grid extension). State lives in `cache/lookups/update_manifest.parquet`;
+the first run bootstraps it from cache state. Equivalent in R:
 
 ```r
-update_all_daily()
+run_incremental_update()                      # tiers on their own cadence
+run_incremental_update(force_monthly = TRUE)  # force a tier
 ```
 
-Or:
-
-```
-Rscript run_timeseries.R update
-```
+`update_all_daily()` / `Rscript run_timeseries.R update` remain as the
+low-level layer-append path (no split guard, no manifest) for ad-hoc use.
 
 ## Usage
 
@@ -130,7 +148,8 @@ sector_profile <- model_input[, lapply(.SD, median, na.rm = TRUE),
 | `list_timeseries_tickers()` | character vector | Available tickers |
 | `get_indicator_names()` | character vector | 130 indicator names |
 | `build_timeseries()` | (side effect) | Historical build, all tickers |
-| `update_all_daily()` | (side effect) | Daily incremental update |
+| `run_incremental_update()` | (side effect) | Keep everything current (tiers D/W/M) |
+| `update_all_daily()` | (side effect) | Low-level daily layer append |
 
 ## Indicators
 
@@ -168,19 +187,20 @@ R/
   sector_classifier.R      Finviz sector/industry lookup
   indicator_compute.R      Pure computation, 130 indicators
   pit_assembler.R          Point-in-time cross-sectional snapshots
-  pipeline_runner.R        Orchestration, validation
-  timeseries_builder.R     Daily time series builder
-  ttm_eps.R                Split-adjusted trailing-TTM EPS augment
+  pipeline_runner.R        Orchestration, validation (incl. daily-layer gate)
+  timeseries_builder.R     Daily time series builder (fund/pershare/daily layers)
+  update_runner.R          Incremental updates: manifest + Tier D/W/M cadence
+  ttm_eps.R                Split events + split-adjusted trailing-TTM EPS augment
   feature_standardizer.R   Causal rolling / cross-sectional features
   feature_compute_rF.R     r_F factor-model feature pipeline
   company_info.R           Company metadata helpers
 
 cache/                     (generated, not in repo)
   fundamentals/            EDGAR XBRL per ticker (filing vintages)
-  prices/                  Yahoo OHLCV per ticker
+  prices/                  Yahoo/Tiingo OHLCV per ticker
   splits/                  split events per ticker
-  lookups/                 constituent master, sector map
-  timeseries/              two-layer daily time series
+  lookups/                 constituent master, dated sector map, update manifest
+  timeseries/              three-layer daily time series (fund/pershare/daily)
   snapshots/               PIT cross-sections (raw + z-score per date)
 ```
 
@@ -189,8 +209,9 @@ cache/                     (generated, not in repo)
 | Source | What | Access |
 |--------|------|--------|
 | SEC EDGAR | XBRL financial statements (45 concepts / 101 tag aliases, 10-K/10-Q) | `data.sec.gov/api/xbrl/companyfacts/` (free, rate-limited) |
-| Yahoo Finance | Daily OHLCV prices | `quantmod::getSymbols()` (free) |
-| Finviz | Sector/industry classification | Web scrape with CSV fallback |
+| Yahoo Finance | Daily OHLCV prices, split events | `quantmod::getSymbols()` (free) |
+| Tiingo | Price/split fallback for delisted names Yahoo purged | REST API (free token, optional -- `tiingo_token` in `~/.Renviron`) |
+| Finviz | Sector/industry classification (dated SCD + static overrides for delisted names) | Web scrape with CSV fallback |
 
 ## License
 
