@@ -305,3 +305,75 @@ append -> incremental `augment_daily_ttm` -> `run_incremental_update` + D/W/M ti
 
 **Phase 5 -- Optional:** per-date cross-section cache; scheduling; annual L1
 drift report.
+
+---
+
+## 9. Implementation record (2026-07-12)
+
+Implemented in one session on `feat/daily-update-pit-fixes`, merged to
+main via PR #6 (d263b9c); first-live-run follow-ups on PR #7. The
+rollout followed section 8 exactly. Decisions made during
+implementation, beyond this design:
+
+- **Measured D2/A gap was 24 tickers, not ~36** (ABMD ANSS ATVI CERN CMA
+  CPWR CTLT CTXS DFS DISH DRE FBHS HBI HES JNPR KSU MRO MXIM NLSN PBCT
+  PXD SIVB TWTR XLNX) -> `data/sector_overrides_delisted.csv`, applied
+  through one consolidated data path (`apply_sector_overrides()`, which
+  also hard-stops on any non-finviz sector string).
+- **Daily-layer gate is whole-history, not per-date**: the daily layer is
+  one shared artifact, so `validate_daily_layer()` runs once per session
+  (content-fingerprint memo) and `validate_snapshot` folds its verdict in.
+  The D1 detector is the implied-shares jump across each true split
+  event; the eps leg is SIGNATURE-based (fails only when pe jumps by
+  exactly the split multiple = missed eps adjustment) because raw pe
+  continuity false-positives on compound events -- EXPE 2011 (1:2 reverse
+  split + TripAdvisor spinoff, same day), ITT 2011 (triple spinoff),
+  TMUS/PCS 2013, NVLS 2017 -- where market cap is exact but real value
+  left the company.
+- **D1 eps semantics**: `pe_trailing` keeps its annual-EPS contract; the
+  10-Q refresh applies to the share count (DEI cover, `.SHARES_TAG_PREF`
+  ranking), while eps gets the split-basis mapping only. Quarterly-refresh
+  earnings semantics remain `pe_ttm`'s job. Per-share stubs live in a
+  third layer, `{ticker}_pershare.parquet` (one row per filing).
+- **FY-stub staleness guard**: a stalled per-share series (share tags
+  dropped from later vintages) never shadows a NEWER annual stub -- the
+  fresher basis wins per day.
+- **Split guard failure semantics (Tier D)**: a FAILED splits refresh is
+  distinguishable (`refresh_failed` attr) from "no new split", and the
+  price append is skipped that run -- appending on an unverified basis is
+  the mixed-basis failure mode. A clean-empty Yahoo answer never
+  overwrites a non-empty (Tiingo-derived) splits cache.
+- **One cache file per CIK is enforced in Tier W**: refetches go to the
+  canonical `{cik}_{ticker}` file (shared-CIK aliasing keys off it).
+- **Sector SCD writers are crash-safe**: scrapes checkpoint into a
+  sidecar, never the canonical dated parquet; `merge_sector_scd` is
+  NA-safe on change detection and asserts its output.
+- **Tier M order**: sector refresh runs BEFORE constituent backfill (a
+  new financial would otherwise build layers as "Unknown" = D3), splits
+  are fetched BEFORE any layer build, and quarter-end snapshots assemble
+  with `prefetch_prices = TRUE` (Tier M runs before Tier D's append).
+  Fully-removed roster tickers unknown to the manifest enter frozen
+  (`removed`), not `needs-backfill` -- the 41 documented unrecoverables
+  would otherwise retry a futile fetch monthly.
+- **Rebuild hygiene**: the phase-2 wipe marker is keyed to GATED_COMMIT
+  and retired on a CLEAN verdict, so a later wave can never silently
+  reuse old-code layers.
+
+**Terminal rebuild (gated commit c521f27, 3.21h):** 66/66 snapshots,
+17/17 anchors incl. D1 daily anchors (NVDA 2024-06-28 mc $3.039T --
+pre-wave ~$304B; AAPL 2020-09-15 $1.976T -- pre-wave ~$494B), census at
+the documented WRK-only 2024 residual, 130-pin, 228/228 split events
+mc-consistent. `tools/gate_phase1_validator.R`: **66/66 PASS** (the same
+gate failed 66/66 pre-wave).
+
+**First live `run_incremental_update()` (2026-07-12, 104.1 min,
+`tools/run_incremental_update.R`):** bootstrap 0.4 min (788 tickers);
+Tier M 8.2 min (sector SCD no-op vs live scrape -- value-neutrality
+confirmed live; grid current); Tier W 5.1 min (6 CIKs with genuinely new
+filings refreshed -- C, CAH, DAL, DASH +2 -- zero spurious refetches);
+Tier D 90.3 min (495/503 layers advanced to 2026-07-10, 0 split
+rebuilds, 0 price failures). Post-run `validate_daily_layer` PASS.
+Steady-state daily cadence is ~90 min, dominated by the per-ticker
+splits-guard + price-append network calls; the section-5 flagged
+optimizations (per-date cross-section cache, screener-based sector
+scrape) remain the levers if that needs to shrink.

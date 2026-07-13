@@ -8,6 +8,7 @@
 #   dt <- demo_ticker("AAPL", families = c("valuation", "growth"))
 
 source("R/fundamental_fetcher.R")
+source("R/sector_classifier.R")
 source("R/indicator_compute.R")
 
 suppressPackageStartupMessages({ library(data.table); library(arrow); library(xts) })
@@ -17,9 +18,10 @@ demo_ticker <- function(ticker, from = "2010-01-01", families = NULL) {
 
   from <- as.Date(from)
 
-  # -- Lookups --
+  # -- Lookups (sector table is a dated SCD since D2/B; get_sector_lookup
+  # returns the current one-row-per-ticker view) --
   master  <- as.data.table(read_parquet("cache/lookups/constituent_master.parquet"))
-  sectors <- as.data.table(read_parquet("cache/lookups/sector_industry.parquet"))
+  sectors <- get_sector_lookup()
   tk <- ticker
   cik    <- master[ticker == tk]$cik[1]
   sector <- sectors[ticker == tk]$sector[1]
