@@ -659,16 +659,59 @@ test_dt <- data.table(
 )
 arrow::write_parquet(test_dt, file.path(test_cache_dir2, "0000000001_TEST.parquet"))
 
-loaded <- get_fundamentals("TEST", cik = "0000000001", cache_dir = test_cache_dir2)
+loaded <- get_fundamentals("TEST", cik = "0000000001", cache_dir = test_cache_dir2,
+                           allow_restated = TRUE)
 test("get_fundamentals with CIK loads",    !is.null(loaded))
 test("get_fundamentals data correct",       loaded[1, value] == 1000000)
 
-loaded2 <- get_fundamentals("TEST", cache_dir = test_cache_dir2)
+loaded2 <- get_fundamentals("TEST", cache_dir = test_cache_dir2, allow_restated = TRUE)
 test("get_fundamentals without CIK loads",  !is.null(loaded2))
 
-loaded3 <- get_fundamentals("NONEXISTENT", cache_dir = test_cache_dir2)
+loaded3 <- get_fundamentals("NONEXISTENT", cache_dir = test_cache_dir2,
+                            allow_restated = TRUE)
 test("get_fundamentals returns NULL for missing", is.null(loaded3))
 
+# -- RF-2: as_of guard (fail-closed on the look-ahead-contaminated view) --
+# Positive control: a known restatement must differ between the as_of view
+# and the latest-restated view; and the as_of = NULL default must error.
+restate_dir <- file.path(tempdir(), "test_fundamentals_restate")
+if (dir.exists(restate_dir)) unlink(restate_dir, recursive = TRUE)
+dir.create(restate_dir, recursive = TRUE)
+restate_dt <- rbind(
+  # original 10-K for FY2023, filed 2024-02-15, value 1,000,000
+  data.table(ticker = "RSTA", cik = "0000000002", concept = "revenue",
+             tag = "Revenues", value = 1000000, period_end = as.Date("2023-12-31"),
+             period_start = as.Date("2023-01-01"), filed = as.Date("2024-02-15"),
+             form = "10-K", accession = "0002-24-000001", fiscal_year = 2023L,
+             fiscal_qtr = "FY", unit = "USD"),
+  # restated 10-K/A for the SAME FY2023, filed 2024-08-01, value 1,200,000
+  data.table(ticker = "RSTA", cik = "0000000002", concept = "revenue",
+             tag = "Revenues", value = 1200000, period_end = as.Date("2023-12-31"),
+             period_start = as.Date("2023-01-01"), filed = as.Date("2024-08-01"),
+             form = "10-K/A", accession = "0002-24-000002", fiscal_year = 2023L,
+             fiscal_qtr = "FY", unit = "USD")
+)
+arrow::write_parquet(restate_dt, file.path(restate_dir, "0000000002_RSTA.parquet"))
+
+rev_early <- get_fundamentals("RSTA", cik = "0000000002", cache_dir = restate_dir,
+                              as_of = "2024-03-31")[concept == "revenue", value]
+rev_latest <- get_fundamentals("RSTA", cik = "0000000002", cache_dir = restate_dir,
+                               allow_restated = TRUE)[concept == "revenue", value]
+test("RF-2 positive control: as_of view sees pre-restatement value",
+     length(rev_early) == 1L && rev_early == 1000000)
+test("RF-2 positive control: latest view sees restated value",
+     length(rev_latest) == 1L && rev_latest == 1200000)
+test("RF-2 positive control: the two views actually differ",
+     rev_early != rev_latest)
+
+err <- tryCatch({
+  get_fundamentals("RSTA", cik = "0000000002", cache_dir = restate_dir)
+  NULL
+}, error = function(e) conditionMessage(e))
+test("RF-2 guard: as_of = NULL without opt-in errors",
+     !is.null(err) && grepl("as_of is required", err))
+
+unlink(restate_dir, recursive = TRUE)
 unlink(test_cache_dir2, recursive = TRUE)
 
 

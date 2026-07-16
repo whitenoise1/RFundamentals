@@ -31,6 +31,16 @@ suppressPackageStartupMessages({
   library(arrow)
 })
 
+# Google Drive sync conflict-copy guard (RF-3). Guarded so co-sourcing with
+# fundamental_fetcher.R (which also defines it) is a no-op. Drops "foo (1).parquet"
+# copies that broad "\\.parquet$" globs would otherwise read as real data.
+if (!exists(".drop_drive_conflict_paths", mode = "function")) {
+  .drop_drive_conflict_paths <- function(paths) {
+    if (!length(paths)) return(paths)
+    paths[!grepl(" \\([0-9]{1,3}\\)\\.[^.]+$", basename(paths))]
+  }
+}
+
 # Cumulative split-adjustment factor that maps an as-filed per-share value onto
 # the CURRENT split basis. GAAP restates EPS for splits across every period a
 # filing presents, so an as-filed value's split basis is the split state at its
@@ -301,7 +311,8 @@ augment_daily_ttm <- function(fund_dir  = "cache/fundamentals",
     daily_files <- daily_files[
       sub("_daily\\.parquet$", "", basename(daily_files)) %in% tickers]
   }
-  fund_files  <- list.files(fund_dir, pattern = "\\.parquet$", full.names = TRUE)
+  fund_files  <- .drop_drive_conflict_paths(
+    list.files(fund_dir, pattern = "\\.parquet$", full.names = TRUE))
   # ticker -> fundamentals path via a NAMED VECTOR (not a keyed data.table: a
   # keyed join `dt[.(tk), ]` whose lookup variable shares the key column's name
   # `tk` silently resolves `.(tk)` to the whole column, returning row 1 for all).

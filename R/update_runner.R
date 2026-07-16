@@ -44,6 +44,17 @@ suppressPackageStartupMessages({
 })
 
 
+# Google Drive sync conflict-copy guard (RF-3). Guarded so co-sourcing with
+# fundamental_fetcher.R (which also defines it) is a no-op. Drops "foo (1).parquet"
+# copies that broad "\\.parquet$" / CIK-prefix globs would read as real data.
+if (!exists(".drop_drive_conflict_paths", mode = "function")) {
+  .drop_drive_conflict_paths <- function(paths) {
+    if (!length(paths)) return(paths)
+    paths[!grepl(" \\([0-9]{1,3}\\)\\.[^.]+$", basename(paths))]
+  }
+}
+
+
 # =============================================================================
 # SECTION 1: CONSTANTS AND HELPERS
 # =============================================================================
@@ -161,8 +172,8 @@ bootstrap_update_manifest <- function(
   # would turn the bootstrap into a network-metadata stall
   mm <- master[order(ticker, date_added)][, .SD[.N], by = ticker]
   cik_by_tk <- setNames(mm$cik, mm$ticker)
-  fund_all  <- list.files(fund_dir, pattern = "\\.parquet$",
-                          full.names = TRUE)
+  fund_all  <- .drop_drive_conflict_paths(
+    list.files(fund_dir, pattern = "\\.parquet$", full.names = TRUE))
   fund_base <- basename(fund_all)
 
   rows <- vector("list", length(tks))
@@ -516,7 +527,8 @@ run_tier_weekly <- function(as_of = Sys.Date(),
     # design invariant (shared-CIK aliasing keys off it); writing
     # {cik}_{tks[1]} would mint a second, competing cache for filers
     # whose file uses the sibling/old ticker suffix (WBD -> _DISCA)
-    exist <- list.files(fund_dir, pattern = paste0("^", ck, "_"))
+    exist <- .drop_drive_conflict_paths(
+      list.files(fund_dir, pattern = paste0("^", ck, "_")))
     canon_tk <- if (length(exist)) {
       sub("^\\d+_(.+)\\.parquet$", "\\1", exist[1])
     } else tks[1]

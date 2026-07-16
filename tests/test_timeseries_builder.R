@@ -555,7 +555,7 @@ if (!master_exists || !sector_exists) {
 
   if (fund_exists) {
 
-    fund_dt_raw <- get_fundamentals("AAPL", aapl_cik)
+    fund_dt_raw <- get_fundamentals("AAPL", aapl_cik, allow_restated = TRUE)
     test_price <- 200.0
     test_fy <- max(fund_dt_raw[!is.na(fiscal_year) & period_type == "FY"]$fiscal_year,
                    na.rm = TRUE)

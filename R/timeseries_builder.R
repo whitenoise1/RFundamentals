@@ -50,6 +50,17 @@ suppressPackageStartupMessages({
 })
 
 
+# Google Drive sync conflict-copy guard (RF-3). Guarded so co-sourcing with
+# fundamental_fetcher.R (which also defines it) is a no-op. Drops "foo (1).parquet"
+# copies that broad "\\.parquet$" globs would otherwise read as real data.
+if (!exists(".drop_drive_conflict_paths", mode = "function")) {
+  .drop_drive_conflict_paths <- function(paths) {
+    if (!length(paths)) return(paths)
+    paths[!grepl(" \\([0-9]{1,3}\\)\\.[^.]+$", basename(paths))]
+  }
+}
+
+
 # =============================================================================
 # SECTION 1: CONSTANTS
 # =============================================================================
@@ -891,7 +902,8 @@ build_timeseries <- function(start_date  = "2010-01-04",
   # shared-CIK listings (the fetch dedups by CIK, so 0001437107_DISCA
   # also serves DISCK and WBD; get_fundamentals resolves the alias).
   if (is.null(tickers)) {
-    fund_files <- list.files(fund_dir, pattern = "\\.parquet$")
+    fund_files <- .drop_drive_conflict_paths(
+      list.files(fund_dir, pattern = "\\.parquet$"))
     file_tks   <- gsub("^\\d+_(.+)\\.parquet$", "\\1", fund_files)
     file_ciks  <- gsub("^(\\d+)_.+\\.parquet$", "\\1", fund_files)
     tickers <- union(file_tks, master[cik %in% file_ciks, ticker])

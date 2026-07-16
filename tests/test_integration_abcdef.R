@@ -130,7 +130,9 @@ if (is.null(result)) {
     ind <- universe$industry[i]
 
     fund_dt <- tryCatch(
-      get_fundamentals(tk, cik, cache_dir = fund_dir),
+      # allow_restated: this test applies its own filed <= test_date PIT
+      # filter below on the raw rows, so the latest-restated view is fine here.
+      get_fundamentals(tk, cik, cache_dir = fund_dir, allow_restated = TRUE),
       error = function(e) NULL
     )
     if (is.null(fund_dt) || nrow(fund_dt) == 0) next
@@ -349,7 +351,8 @@ spot_tickers <- intersect(c("AAPL", "MSFT", "JPM"), raw$ticker)
 
 for (tk in spot_tickers) {
   fund_dt <- tryCatch(
-    get_fundamentals(tk, cache_dir = fund_dir),
+    # allow_restated: PIT filter (filed <= test_date) is applied below.
+    get_fundamentals(tk, cache_dir = fund_dir, allow_restated = TRUE),
     error = function(e) NULL
   )
   if (is.null(fund_dt)) next

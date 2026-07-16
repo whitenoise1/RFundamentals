@@ -114,13 +114,16 @@ source("R/timeseries_builder.R")
 #              Default "cache/fundamentals".
 #   as_of      Date or NULL. Point-in-time view: rows filed after this date
 #              are dropped before collapsing, so each period resolves to the
-#              value that was public on that date. NULL (default) = latest.
+#              value that was public on that date. NULL requires
+#              allow_restated = TRUE (returns the latest restated view).
 #   vintages   Logical. TRUE returns the raw vintage table. Default FALSE.
+#   allow_restated  Logical. Opt in to the as_of = NULL latest-restated
+#              (non-PIT) view. Default FALSE: as_of = NULL errors (RF-2).
 #
 # Examples:
-#   get_fundamentals("ORCL")                        # latest view
-#   get_fundamentals("ORCL", as_of = "2026-03-31")  # as known on that date
-#   get_fundamentals("ORCL", vintages = TRUE)       # every filing vintage
+#   get_fundamentals("ORCL", as_of = "2026-03-31")   # PIT: as known that date
+#   get_fundamentals("ORCL", allow_restated = TRUE)  # latest restated (opt-in)
+#   get_fundamentals("ORCL", vintages = TRUE)        # every filing vintage
 
 
 # --- list_timeseries_tickers() ----------------------------------------------
@@ -209,13 +212,13 @@ source("R/timeseries_builder.R")
 # character vector of ~500 ticker symbols with daily data
 list_timeseries_tickers()
 
-# character vector of 57 indicator names
+# character vector of 130 indicator names
 get_indicator_names()
 
 
 # --- Single-stock time series -----------------------------------------------
 
-# AAPL daily data.table: date, price, pe_trailing, roe, ... (57 indicators)
+# AAPL daily data.table: date, price, pe_trailing, roe, ... (130 indicators)
 aapl <- load_ticker_timeseries("AAPL")
 
 # Same, filtered to 2024 onward
@@ -240,7 +243,7 @@ aapl[format(date, "%m-%d") == "01-02", .(date, roe, revenue_growth_yoy)]
 #cs <- load_daily_cross_section("2024-06-28")
 cs <- load_daily_cross_section("2026-03-31")
 
-# The raw factor matrix: one row per ticker, 57 indicator columns
+# The raw factor matrix: one row per ticker, 130 indicator columns
 cs$raw
 
 # The z-scored version: cross-sectional z-scores, ready for a factor model
@@ -294,8 +297,9 @@ View(industry_profile)
 
 # --- Raw SEC filings --------------------------------------------------------
 
-# Long-format XBRL data for one ticker (before any indicator computation)
-aapl_sec <- get_fundamentals("AAPL")
+# Long-format XBRL data for one ticker (before any indicator computation).
+# allow_restated: latest restated view (RF-2 opt-in); use as_of for PIT.
+aapl_sec <- get_fundamentals("AAPL", allow_restated = TRUE)
 
 # What concepts are reported?
 unique(aapl_sec$concept)

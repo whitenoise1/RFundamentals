@@ -15,7 +15,7 @@
 #   ticker     chr     Ticker symbol
 #   industry   chr     Finviz industry
 #   sector     chr     Finviz sector
-#   [57 indicator columns]  num  Raw or z-scored values
+#   [130 indicator columns] num  Raw or z-scored values
 #
 # Public API:
 #   get_universe_at_date(snapshot_date, master_dt)

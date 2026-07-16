@@ -29,7 +29,9 @@ demo_ticker <- function(ticker, from = "2010-01-01", families = NULL) {
   if (is.na(sector)) sector <- "Unknown"
 
   # -- Fundamentals: compute per-FY indicators + extract stubs --
-  fund_dt <- get_fundamentals(ticker, cik)
+  # allow_restated: this demo shows the latest restated view (RF-2 opt-in);
+  # per-FY indicator computation applies its own as-of filing filter downstream.
+  fund_dt <- get_fundamentals(ticker, cik, allow_restated = TRUE)
   if (is.null(fund_dt) || nrow(fund_dt) == 0) {
     message("  fetching from EDGAR...")
     fund_dt <- fetch_and_cache_ticker(ticker, cik)

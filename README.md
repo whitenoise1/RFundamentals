@@ -144,7 +144,7 @@ sector_profile <- model_input[, lapply(.SD, median, na.rm = TRUE),
 |----------|---------|---------|
 | `load_ticker_timeseries(ticker, from, to)` | data.table | One ticker, all dates |
 | `load_daily_cross_section(date, zscore)` | list ($raw, $zscored) | All tickers, one date |
-| `get_fundamentals(ticker)` | data.table | Raw SEC filings (long format) |
+| `get_fundamentals(ticker, as_of)` | data.table | Raw SEC filings (long format); as_of required for PIT |
 | `list_timeseries_tickers()` | character vector | Available tickers |
 | `get_indicator_names()` | character vector | 130 indicator names |
 | `build_timeseries()` | (side effect) | Historical build, all tickers |

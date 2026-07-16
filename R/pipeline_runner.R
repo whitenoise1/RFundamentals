@@ -21,6 +21,17 @@ suppressPackageStartupMessages({
 })
 
 
+# Google Drive sync conflict-copy guard (RF-3). Guarded so co-sourcing with
+# fundamental_fetcher.R (which also defines it) is a no-op. Drops "foo (1).parquet"
+# copies that broad "\\.parquet$" globs would otherwise read as real data.
+if (!exists(".drop_drive_conflict_paths", mode = "function")) {
+  .drop_drive_conflict_paths <- function(paths) {
+    if (!length(paths)) return(paths)
+    paths[!grepl(" \\([0-9]{1,3}\\)\\.[^.]+$", basename(paths))]
+  }
+}
+
+
 # =============================================================================
 # CONSTANTS
 # =============================================================================
@@ -116,7 +127,8 @@ run_full_build <- function(start_date      = "2010-03-31",
   .check_prerequisite(sector_path, "sector_industry.parquet")
 
   # Check fundamentals cache has files
-  fund_files <- list.files(fund_dir, pattern = "\\.parquet$")
+  fund_files <- .drop_drive_conflict_paths(
+    list.files(fund_dir, pattern = "\\.parquet$"))
   if (length(fund_files) == 0) {
     stop("run_full_build: no fundamentals cached. Run Sessions C+D first.",
          call. = FALSE)

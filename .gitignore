@@ -20,6 +20,13 @@ sources/
 load_snapshot_example.R
 run_snapshot.R
 
+# Google Drive sync conflict copies (RF-3): Drive renames a file to
+# "foo (1).ext" on a sync conflict. Never track these; loaders also skip
+# them at runtime via .drop_drive_conflict_paths().
+* ([0-9]).*
+* ([0-9][0-9]).*
+* ([0-9][0-9][0-9]).*
+
 # R / OS artifacts
 .Rhistory
 .RData

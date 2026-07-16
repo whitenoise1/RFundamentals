@@ -33,6 +33,21 @@ suppressPackageStartupMessages({
 
 
 # =============================================================================
+# PRIVATE HELPER -- Google Drive sync conflict-copy guard (RF-3)
+# =============================================================================
+# Drive sync creates "foo (1).parquet" conflict copies. The " (N)" is inserted
+# before the extension, so suffix-anchored globs (e.g. "_daily\\.parquet$") are
+# already immune; this drops such copies from the broad "\\.parquet$" and
+# CIK-prefix globs so loaders never read a stale duplicate as real data.
+if (!exists(".drop_drive_conflict_paths", mode = "function")) {
+  .drop_drive_conflict_paths <- function(paths) {
+    if (!length(paths)) return(paths)
+    paths[!grepl(" \\([0-9]{1,3}\\)\\.[^.]+$", basename(paths))]
+  }
+}
+
+
+# =============================================================================
 # CONSTANTS
 # =============================================================================
 
@@ -1997,7 +2012,8 @@ validate_fundamentals_build <- function(
     message("validate_fundamentals_build: no parquet files found")
     return(invisible(NULL))
   }
-  files <- list.files(cache_dir, pattern = "[.]parquet$", full.names = TRUE)
+  files <- .drop_drive_conflict_paths(
+    list.files(cache_dir, pattern = "[.]parquet$", full.names = TRUE))
   if (length(files) == 0) {
     message("validate_fundamentals_build: no parquet files found")
     return(invisible(NULL))
@@ -2126,22 +2142,32 @@ validate_fundamentals_build <- function(
 #' Load cached fundamentals for a single ticker
 #'
 #' The cache stores one row per (concept, period, filing) so reporting
-#' vintages survive re-fetches. By default this reader collapses vintages to
-#' the latest view (one row per concept x period), which matches the
-#' pre-vintage cache shape. Pass as_of for a point-in-time view, or
+#' vintages survive re-fetches. Pass as_of for a point-in-time view (the
+#' vintages are collapsed to what was public on that date), or
 #' vintages = TRUE for the raw vintage table.
+#'
+#' RF-2 (2026-07-15): the as_of = NULL "latest restated" collapse is
+#' look-ahead-contaminated (it can surface values that were only restated
+#' after the fact), so it is no longer a silent default. Calling with
+#' as_of = NULL now ERRORS unless allow_restated = TRUE is passed to opt in
+#' deliberately. PIT-correct consumers must pass as_of; readers that want
+#' the raw vintage table pass vintages = TRUE (unaffected by this guard).
 #'
 #' @param ticker Character. Ticker symbol.
 #' @param cik Character. 10-digit CIK (optional if only one match in cache).
 #' @param cache_dir Character. Cache directory.
 #' @param as_of Date or character. Collapse vintages to what was public on
-#'   this date (rows filed after as_of are dropped). NULL = latest view.
+#'   this date (rows filed after as_of are dropped). NULL requires
+#'   allow_restated = TRUE (returns the latest restated view).
 #' @param vintages Logical. TRUE returns the raw vintage table (one row per
-#'   concept x period x filing); as_of is ignored.
+#'   concept x period x filing); as_of and allow_restated are ignored.
+#' @param allow_restated Logical. Opt in to the as_of = NULL latest-restated
+#'   (non-PIT) view. Default FALSE: as_of = NULL errors.
 #' @return data.table or NULL if not cached.
 get_fundamentals <- function(ticker, cik = NULL,
                              cache_dir = "cache/fundamentals",
-                             as_of = NULL, vintages = FALSE) {
+                             as_of = NULL, vintages = FALSE,
+                             allow_restated = FALSE) {
 
   dt <- NULL
 
@@ -2153,9 +2179,10 @@ get_fundamentals <- function(ticker, cik = NULL,
       # (0001437107_DISCA also serves DISCK and WBD; UA serves UAA; NWS
       # serves NWSA; FOX serves FOXA). Any file with the same CIK prefix
       # is the same filer.
-      hits <- list.files(cache_dir,
-                         pattern = sprintf("^%s_.*\\.parquet$", cik),
-                         full.names = TRUE)
+      hits <- .drop_drive_conflict_paths(
+        list.files(cache_dir,
+                   pattern = sprintf("^%s_.*\\.parquet$", cik),
+                   full.names = TRUE))
       if (length(hits) > 1) {
         warning(sprintf(
           "get_fundamentals: multiple cache files for CIK %s, using most recent",
@@ -2184,6 +2211,13 @@ get_fundamentals <- function(ticker, cik = NULL,
 
   if (is.null(dt)) return(NULL)
   if (vintages) return(dt)
+  if (is.null(as_of) && !allow_restated) {
+    stop("get_fundamentals: as_of is required for a PIT-correct read. ",
+         "The as_of = NULL 'latest restated' view is look-ahead-contaminated ",
+         "(it can surface post-hoc restatements). Pass as_of = <Date>, or set ",
+         "allow_restated = TRUE to opt in to the latest view deliberately.",
+         call. = FALSE)
+  }
   pit_dedup(dt, as_of = as_of)
 }
 
