@@ -249,3 +249,30 @@ Norgate). If one lands: fetch the listed windows, warm splits, and
 regenerate only the affected ticker-dates.
 
 ---
+
+## Quarterly serve scope (mixed-cadence fund layer, 2026-08-14)
+
+The quarterly extension (docs/DESIGN_QUARTERLY_SERVE.md) deliberately
+serves only what is quarterly-definable without semantic invention:
+
+- **Fundamental-only ratio indicators stay annual-cadence** (roe, roa,
+  margins, turnovers, growth-vs-prior-FY, Piotroski/MS flags, multi-year
+  structures): their quarterly refresh needs either an indicator_compute
+  TTM mode or downstream computation from the served TTM stubs. On
+  quarterly fund rows these columns are NA by design (wrong-basis at Q).
+- **On days where the pass-B row is a quarterly row**: cf_me, rd_me,
+  z_score, kz_index are NA (their stubs have no quarterly construction);
+  net_payout_yield degrades to gross payout (equity_issuance stub NA).
+- **TTM stubs need 4 recoverable standalone quarters**: names/periods
+  where the Wave 3 panels cannot recover a flow (e.g. quarterly D&A for
+  many financials -> stub_ebitda NA) serve NA -- absence, never a
+  partial sum. Thin recent listings (ABNB class) may carry few or no
+  quarterly rows.
+- The FY >= 5-concept density rule applies to quarterly rows too.
+
+### Exit criteria
+
+A ruled follow-up wave adding an indicator_compute TTM mode (or the
+downstream consumer computing TTM ratios from the served stubs), plus a
+quarterly equity_issuance construction if net payout at quarterly
+cadence is ever needed.

@@ -14,7 +14,7 @@
 #   2. Per-share layer ({ticker}_pershare.parquet): sparse, one row per
 #      FILING (10-Q cadence). The authoritative as-of-filing share count
 #      (dei cover / Wave M synthetic), stamped by filed date. Fixes D1:
-#      the fund layer is annual-only, so daily market cap was computed
+#      the fund layer was annual-only, so daily market cap was computed
 #      from a share count up to ~1yr stale and never split-adjusted.
 #   3. Daily layer ({ticker}_daily.parquet): dense, one row per trading day.
 #      Stores every canonical indicator (get_indicator_names()) plus the
