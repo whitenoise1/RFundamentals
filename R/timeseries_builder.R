@@ -7,6 +7,10 @@
 #   1. Fundamentals layer ({ticker}_fund.parquet): sparse, one row per fiscal
 #      year. Stores fundamental-only indicators and accounting stubs for
 #      price-sensitive recomputation. Updates only on new filings.
+#      With quarterly = TRUE the layer is mixed-cadence: additional rows
+#      per (fiscal_year, Q1-Q3), marked by a `quarter` column ("FY" on
+#      annual rows), carrying only the natively quarterly indicators
+#      (.Q_KEPT_INDICATORS), instant stock stubs, and TTM flow stubs.
 #   2. Per-share layer ({ticker}_pershare.parquet): sparse, one row per
 #      FILING (10-Q cadence). The authoritative as-of-filing share count
 #      (dei cover / Wave M synthetic), stamped by filed date. Fixes D1:
@@ -118,6 +122,21 @@ if (!exists(".drop_drive_conflict_paths", mode = "function")) {
 .MASKED_STUB_OF <- c(
   net_debt_price = "stub_ndp_num",
   z_score        = "stub_z_prefix"
+)
+
+# Quarterly-kept indicator columns (mixed-cadence extension): the ONLY
+# compute_ticker_indicators outputs stored on a quarterly fund row. They
+# are computed from the label-free standalone-quarter panels (Wave 3
+# machinery, indicator_compute.R Section 6d) and are natively quarterly.
+# Every other indicator is an annual-bound formula that would be
+# wrong-basis at Q and stays NA on quarterly rows -- absent, never
+# plausible. In the daily layer these columns map from pass B (all fund
+# rows, latest period wins); everything else maps from pass A (annual
+# rows only).
+.Q_KEPT_INDICATORS <- c(
+  "roaq", "revenue_surprise", "earnings_surprise", "revenue_growth_qoq",
+  "ch_tax", "num_earn_increase", "fcf_stability",
+  "ms_roa_vol", "ms_rev_vol", "ing_ms_roa_vol", "ing_ms_rev_vol"
 )
 
 
@@ -234,6 +253,227 @@ if (!exists(".drop_drive_conflict_paths", mode = "function")) {
     stub_z_prefix   = pfx$z_prefix,
     stub_kz_prefix  = pfx$kz_prefix
   )
+}
+
+
+# Trailing-twelve-month value of one flow concept under a PIT as-of view:
+# the sum of the 4 standalone quarters ending at q_pe, built from the
+# Wave 3 standalone-quarter machinery (.flow_quarter_series de-cumulates
+# YTD 10-Q cash-flow items with duration guards). NEVER the wide pivot's
+# quarterly rows: those are duration-ambiguous (10-Q cash-flow items are
+# YTD-cumulative). The 3 lagged quarters resolve by nominal spacing with
+# the surprise-family tolerances; any missing quarter yields NA --
+# absence, never a fabricated partial sum.
+.q_ttm_flow <- function(fund_asof, cn, q_pe, splits = NULL,
+                        split_adjust = FALSE) {
+  ser <- tryCatch(.flow_quarter_series(fund_asof, cn, splits, split_adjust),
+                  error = function(e) NULL)
+  if (is.null(ser) || nrow(ser) < 4) return(NA_real_)
+  i <- .near_idx(ser$qend, q_pe, 10)
+  if (is.na(i)) return(NA_real_)
+  idx <- c(i, vapply(1:3, function(m) {
+    .q_lag_idx(ser$qend, i, round(m * 91.3), 40)
+  }, integer(1)))
+  if (anyNA(idx)) return(NA_real_)
+  v <- ser$value[idx]
+  if (anyNA(v)) return(NA_real_)
+  sum(v)
+}
+
+
+# TTM diluted EPS for the quarter ending at q_pe, expressed on the
+# Q-FILING-DATE split basis (the stub convention: update_ticker_daily
+# maps stub_eps from its filed-date basis onto each day's as-traded
+# basis via .split_factor). Prefers the ttm_eps.R identity
+# (YTD + FY_prev - YTD_prev, robust to a missing middle quarter),
+# computed on the PIT as-of view; falls back to summing 4 standalone
+# split-adjusted quarters from the Wave 3 panels. Both machineries
+# express values on the CURRENT split basis, so the result is converted
+# back to the q_filed basis via .split_to_current.
+.q_ttm_eps <- function(fund_asof, q_pe, q_filed, splits = NULL) {
+  v <- NA_real_
+  if (exists("build_ttm_eps_series", mode = "function")) {
+    ttm <- tryCatch(build_ttm_eps_series(fund_asof, splits),
+                    error = function(e) NULL)
+    if (!is.null(ttm) && nrow(ttm) > 0) {
+      i <- .near_idx(ttm$qend, q_pe, 10)
+      if (!is.na(i)) v <- as.numeric(ttm$eps_ttm[i])
+    }
+  }
+  if (is.na(v)) {
+    v <- .q_ttm_flow(fund_asof, "eps_diluted", q_pe, splits,
+                     split_adjust = TRUE)
+  }
+  if (is.na(v)) return(NA_real_)
+  v / .split_to_current(q_filed, splits)
+}
+
+
+#' Extract accounting stubs for one quarterly row (mixed-cadence extension)
+#'
+#' Stock stubs are the Q-row instant values as-of the quarter's original
+#' filing date (balance-sheet levels are correct-basis at any period end;
+#' .level_components applies the same identity fallbacks as the FY path,
+#' so filing-date and daily-recompute values cannot drift). Flow stubs
+#' are trailing-twelve-month sums of standalone quarters (.q_ttm_flow /
+#' .q_ttm_eps); an unrecoverable TTM is NA. Flow stubs with no quarterly
+#' TTM construction in the approved design (equity_issuance, rnd,
+#' cf_num) and the Wave 5 composite prefixes (annual mixed flow/stock
+#' terms) stay NA on quarterly rows: absence, never an annual value
+#' re-labelled as quarterly.
+#'
+#' @param qrow data.table. The quarter's wide pivot row (1 row).
+#' @param fund_asof data.table. pit_dedup view as of q_filed.
+#' @param q_pe Date. The quarter's period_end.
+#' @param q_filed Date. The quarter's original filing date.
+#' @param splits data.table or NULL. Split events.
+#' @return Named list covering .STUB_NAMES.
+.extract_stubs_q <- function(qrow, fund_asof, q_pe, q_filed, splits = NULL) {
+
+  lc <- .level_components(qrow)
+
+  cfo_ttm   <- .q_ttm_flow(fund_asof, "operating_cashflow", q_pe)
+  capex_ttm <- .q_ttm_flow(fund_asof, "capex", q_pe)
+  opinc_ttm <- .q_ttm_flow(fund_asof, "operating_income", q_pe)
+  dep_ttm   <- .q_ttm_flow(fund_asof, "depreciation", q_pe)
+
+  # Same NA policies as .derive_quantities: FCF without capex would be
+  # overstated OpCF; EBITDA without D&A would be EBIT mislabelled.
+  fcf_ttm <- if (is.na(cfo_ttm) || is.na(capex_ttm)) NA_real_ else
+    cfo_ttm - capex_ttm
+  ebitda_ttm <- if (is.na(opinc_ttm) || is.na(dep_ttm)) NA_real_ else
+    opinc_ttm + dep_ttm
+
+  list(
+    stub_shares     = .col(qrow, "shares_outstanding"),
+    stub_eps        = .q_ttm_eps(fund_asof, q_pe, q_filed, splits),
+    stub_equity     = lc$ceq,
+    stub_revenue    = .q_ttm_flow(fund_asof, "revenue", q_pe),
+    stub_fcf        = fcf_ttm,
+    stub_ebitda     = ebitda_ttm,
+    stub_total_debt = lc$td,
+    stub_net_debt   = .col(qrow, "net_debt"),
+    stub_cash       = .col(qrow, "cash"),
+    stub_dividends  = .q_ttm_flow(fund_asof, "dividends_paid", q_pe),
+    stub_buybacks   = .q_ttm_flow(fund_asof, "buybacks", q_pe),
+    stub_equity_issuance = NA_real_,
+    stub_rnd        = NA_real_,
+    stub_assets     = lc$at,
+    stub_liabilities = lc$lt,
+    stub_cf_num     = NA_real_,
+    stub_cfo        = cfo_ttm,
+    stub_che        = lc$che,
+    stub_net_cash   = lc$ncash,
+    stub_ndp_num    = lc$ndp_num,
+    stub_z_prefix   = NA_real_,
+    stub_kz_prefix  = NA_real_
+  )
+}
+
+
+#' Build quarterly fund-layer rows for one ticker (mixed-cadence extension)
+#'
+#' Enumerates (fiscal_year, Q1/Q2/Q3) from the vintage table; each
+#' quarter is computed as-of its ORIGINAL filing date: min(filed) over
+#' the quarter's plain 10-Q rows (fallback: min over all its rows when
+#' no plain 10-Q exists). Amendments filed later can neither pull the
+#' stamp earlier nor leak into the as-of view (pit_dedup as_of cuts
+#' them). Only the natively quarterly indicator columns
+#' (.Q_KEPT_INDICATORS) are stored; every other indicator column is NA.
+#' Stubs per .extract_stubs_q. A quarter whose pivot row is missing or
+#' too sparse yields no row -- degradation is absence.
+#'
+#' @param fund_v data.table. Raw XBRL vintages (get_fundamentals vintages=TRUE).
+#' @param sector Character. Sector classification.
+#' @param splits data.table or NULL. Split events.
+#' @return data.table of quarterly rows, or NULL.
+.build_quarterly_rows <- function(fund_v, sector, splits = NULL) {
+
+  qv <- fund_v[period_type %in% c("Q1", "Q2", "Q3") & !is.na(filed)]
+  if (nrow(qv) == 0) return(NULL)
+
+  keys <- unique(qv[, .(fiscal_year, period_type)])
+  keys <- keys[!is.na(fiscal_year)]
+  if (nrow(keys) == 0) return(NULL)
+  setorder(keys, fiscal_year, period_type)
+
+  ind_cols <- c(.FUNDAMENTAL_INDICATORS, .CS_INGREDIENT_COLS)
+  results  <- vector("list", nrow(keys))
+  n_ok <- 0L
+
+  for (r in seq_len(nrow(keys))) {
+    fy <- keys$fiscal_year[r]
+    qq <- keys$period_type[r]
+
+    grp  <- qv[fiscal_year == fy & period_type == qq]
+    orig <- grp[form == "10-Q"]
+    q_filed <- as.Date(min(if (nrow(orig)) orig$filed else grp$filed))
+
+    # Point-in-time view as of the quarter's original filing date
+    fund_asof <- pit_dedup(fund_v, as_of = q_filed)
+
+    wide <- pivot_fundamentals(fund_asof)
+    if (is.null(wide)) next
+    wide <- .derive_quantities(wide)
+
+    qrow <- wide[period_type == qq & fiscal_year == fy]
+    if (nrow(qrow) == 0) next
+    qrow <- qrow[1]
+    # The pivot's period_end metadata is max() over the group's concepts
+    # and is pulled PAST the quarter end by instant facts dated at the
+    # cover page (dei shares are stamped ~3 weeks after quarter end).
+    # The quarter's true period_end comes from its duration rows; the
+    # polluted metadata date is only a last-resort fallback.
+    dur <- fund_asof[fiscal_year == fy & period_type == qq &
+                       !is.na(period_start) & !is.na(period_end)]
+    q_pe <- if (nrow(dur) > 0) as.Date(max(dur$period_end)) else
+      as.Date(qrow$period_end[1])
+    if (is.na(q_pe)) next
+
+    # Same minimum-density rule as the FY loop
+    data_cols <- setdiff(names(qrow),
+                         c("fiscal_year", "period_type", "period_end", "filed"))
+    n_concepts <- sum(!is.na(as.matrix(qrow[1, ..data_cols])))
+    if (n_concepts < 5) next
+
+    indicators <- tryCatch(
+      compute_ticker_indicators(fund_asof, price_on_filed = NA_real_,
+                                sector = sector, target_fy = fy,
+                                target_period = qq, splits = splits),
+      error = function(e) NULL
+    )
+    if (is.null(indicators)) next
+
+    # Keep ONLY the natively quarterly outputs; all other indicator
+    # columns stay NA on a quarterly row (annual-bound formulas are
+    # wrong-basis at Q and must be absent, not plausible).
+    q_ind <- setNames(as.list(rep(NA_real_, length(ind_cols))), ind_cols)
+    for (nm in intersect(.Q_KEPT_INDICATORS, names(indicators))) {
+      q_ind[[nm]] <- unname(indicators[[nm]])
+    }
+
+    stubs <- .extract_stubs_q(qrow, fund_asof, q_pe, q_filed, splits)
+
+    # Same masked-stub rule as the FY loop
+    if (!is.na(sector) && sector %in% names(.SECTOR_NA_INDICATORS)) {
+      masked_here <- intersect(names(.MASKED_STUB_OF),
+                               .SECTOR_NA_INDICATORS[[sector]])
+      for (ind in masked_here) stubs[[.MASKED_STUB_OF[[ind]]]] <- NA_real_
+    }
+
+    n_ok <- n_ok + 1L
+    results[[n_ok]] <- c(
+      list(fiscal_year = as.integer(fy),
+           quarter     = qq,
+           filed_date  = q_filed,
+           period_end  = q_pe),
+      q_ind,
+      stubs
+    )
+  }
+
+  if (n_ok == 0) return(NULL)
+  rbindlist(results[seq_len(n_ok)], fill = TRUE)
 }
 
 
@@ -432,11 +672,19 @@ if (!exists(".drop_drive_conflict_paths", mode = "function")) {
 #' @param fund_dir Character. Fundamentals cache directory.
 #' @param ts_dir Character. Time series output directory.
 #' @param force Logical. Rebuild even if file exists.
+#' @param quarterly Logical. FALSE (default) reproduces the annual-only
+#'   layer byte-identically (no quarter column, gated downstream). TRUE
+#'   appends quarterly Q1-Q3 rows after the FY loop; the new `quarter`
+#'   column ("FY"/"Q1"/"Q2"/"Q3") doubles as the cadence marker (no
+#'   separate cadence column -- documented choice, cadence is quarter ==
+#'   "FY" vs not). NOTE: an existing file is returned as-is unless
+#'   force = TRUE, whatever cadence it was built with.
 #' @return data.table (the fundamentals layer), or NULL on failure.
 build_ticker_fundamentals <- function(ticker, cik, sector,
                                       fund_dir = "cache/fundamentals",
                                       ts_dir   = .TS_DIR,
-                                      force    = FALSE) {
+                                      force    = FALSE,
+                                      quarterly = FALSE) {
 
   if (!dir.exists(ts_dir)) dir.create(ts_dir, recursive = TRUE)
 
@@ -552,6 +800,24 @@ build_ticker_fundamentals <- function(ticker, cik, sector,
   dt <- rbindlist(results[seq_len(n_ok)], fill = TRUE)
   setorder(dt, fiscal_year)
 
+  # Mixed-cadence extension: quarterly rows AFTER the FY loop. The
+  # quarterly = FALSE path is untouched (no quarter column, same
+  # ordering) and stays byte-identical to the annual-only builder.
+  if (isTRUE(quarterly)) {
+    dt[, quarter := "FY"]
+    q_dt <- tryCatch(.build_quarterly_rows(fund_v, sector, splits),
+                     error = function(e) {
+                       warning(sprintf(
+                         "build_ticker_fundamentals: quarterly rows failed: %s -- %s",
+                         ticker, e$message), call. = FALSE)
+                       NULL
+                     })
+    if (!is.null(q_dt)) {
+      dt <- rbindlist(list(dt, q_dt), fill = TRUE)
+      setorder(dt, fiscal_year, quarter)   # "FY" < "Q1" < "Q2" < "Q3"
+    }
+  }
+
   .assert_output_ts(dt, "build_ticker_fundamentals", list(
     "is data.table"      = is.data.table,
     "has fiscal_year"    = function(x) "fiscal_year" %in% names(x),
@@ -627,9 +893,19 @@ build_ticker_pershare <- function(ticker, cik = NULL,
 #' Update daily time series for a single ticker
 #'
 #' Reads the fundamentals layer, identifies new trading days since the last
-#' stored date, and appends rows. Uses vectorized computation: findInterval
-#' for point-in-time filing lookup, vectorized ifelse for price-sensitive
-#' indicators.
+#' stored date, and appends rows. Uses vectorized computation with a
+#' two-pass point-in-time mapping:
+#'   PASS A (annual rows only): all indicator columns outside
+#'     .Q_KEPT_INDICATORS, plus fiscal_year and filed_date -- so
+#'     filed_date keeps meaning "latest ANNUAL filing".
+#'   PASS B (all rows, latest period_end wins where filed <= day): the
+#'     quarterly-kept indicator columns, every stub feeding
+#'     .compute_price_sensitive_vec (valuation ratios refresh
+#'     quarterly on mixed-cadence layers), and the daily column
+#'     filed_date_q = the filed_date of the pass-B row in effect.
+#' On annual-only fund layers pass B degrades to pass A's rows and the
+#' output matches the single-pass builder except the added filed_date_q
+#' column (= filed_date).
 #'
 #' @param ticker Character. Ticker symbol.
 #' @param through_date Date. Update through this date (default today).
@@ -712,38 +988,69 @@ update_ticker_daily <- function(ticker,
   new_dates  <- all_dates[new_mask]
   new_prices <- all_prices[new_mask]
 
-  # -- Point-in-time lookup: find latest fiscal year filed on or before each day --
+  # -- Point-in-time lookup, PASS A (annual rows only): find latest fiscal
+  # year filed on or before each day.
   # Must find max(fiscal_year) WHERE filed_date <= d, NOT just latest filing.
   # Simple findInterval on filed_date is wrong when prior-year amendments
   # produce non-monotonic filed_dates (e.g., FY2022 amended after FY2023 filed).
   # Fix: sort by fiscal_year DESC, iterate ~15 rows, assign greedily.
-  setorder(fund_dt, -fiscal_year)
+  # Mixed-cadence layers carry a `quarter` column; annual rows are its
+  # "FY" rows. Legacy layers (no column) are annual-only already.
+  has_q  <- "quarter" %in% names(fund_dt)
+  ann_dt <- if (has_q) fund_dt[quarter == "FY"] else fund_dt
+  if (nrow(ann_dt) == 0) return(existing_dt)
+  setorder(ann_dt, -fiscal_year)
   n_days <- length(new_dates)
   fund_idx <- rep(NA_integer_, n_days)
 
-  for (k in seq_len(nrow(fund_dt))) {
-    eligible <- is.na(fund_idx) & new_dates >= fund_dt$filed_date[k]
+  for (k in seq_len(nrow(ann_dt))) {
+    eligible <- is.na(fund_idx) & new_dates >= ann_dt$filed_date[k]
     fund_idx[eligible] <- k
   }
 
-  # Remove dates before any filing or with NA price
+  # PASS B (all rows, annual + quarterly), keyed on period_end DESC with
+  # the same greedy amendment-safe iteration: latest reported period wins
+  # where filed <= day. Feeds the quarterly-kept indicator columns, every
+  # stub entering .compute_price_sensitive_vec, and filed_date_q. On
+  # annual-only layers pass B IS pass A (same rows, same order -- one row
+  # per fiscal year makes -fiscal_year and -period_end identical sorts),
+  # so the mapping is reused rather than recomputed.
+  if (has_q) {
+    pb_dt <- copy(fund_dt)
+    pb_dt[, period_end := as.Date(period_end)]
+    setorder(pb_dt, -period_end)
+    fund_idx_b <- rep(NA_integer_, n_days)
+    for (k in seq_len(nrow(pb_dt))) {
+      eligible <- is.na(fund_idx_b) & new_dates >= pb_dt$filed_date[k]
+      fund_idx_b[eligible] <- k
+    }
+  } else {
+    pb_dt <- ann_dt
+    fund_idx_b <- fund_idx
+  }
+
+  # Remove dates before any annual filing or with NA price
   valid <- !is.na(fund_idx) & !is.na(new_prices)
   if (sum(valid) == 0) return(existing_dt)
 
   new_dates  <- new_dates[valid]
   new_prices <- new_prices[valid]
   fund_idx   <- fund_idx[valid]
+  fund_idx_b <- fund_idx_b[valid]
 
   # -- Per-share stubs on the day's split basis (D1 fix) --
   # Shares: most recent per-share layer observation with filed <= day
-  # (10-Q cadence), falling back to the FY stub for legacy layers. EPS:
-  # the FY stub (pe_trailing is annual-EPS by contract; quarterly
-  # refresh is pe_ttm's job). Both are as-filed values whose split basis
-  # is the split state at their filed date; map them onto each day's
-  # as-traded basis so mc = price x shares and pe = price / eps hold
-  # exactly across splits. .split_factor(t) is the product of ratios of
-  # splits AFTER t, so basis f -> basis d is x S(d)/S(f) for counts and
-  # x S(f)/S(d) for per-share amounts.
+  # (10-Q cadence), falling back to the pass-B row's stub (the FY stub
+  # on legacy layers; the latest filed Q/FY row on mixed-cadence
+  # layers). EPS: the pass-B row's stub (annual EPS on FY rows; TTM EPS
+  # on quarterly rows, where pe_trailing becomes an honest trailing
+  # P/E). Both are as-filed values whose split basis is the split state
+  # at their filed date; map them onto each day's as-traded basis so
+  # mc = price x shares and pe = price / eps hold exactly across
+  # splits. .split_factor(t) is the product of ratios of splits AFTER
+  # t, so basis f -> basis d is x S(d)/S(f) for counts and x S(f)/S(d)
+  # for per-share amounts. This basis mapping applies to pass-B stubs
+  # identically on both layer generations.
   n_new <- length(new_dates)
   sh_val   <- rep(NA_real_, n_new)
   sh_basis <- rep(as.Date(NA), n_new)
@@ -764,72 +1071,85 @@ update_ticker_daily <- function(ticker,
     }
   }
 
-  # FY-stub fallback, and staleness guard: when the FY stub in effect is
-  # NEWER than the last per-share observation (a stalled per-share
-  # series -- share tags dropped from later vintages), the annual count
+  # Pass-B-stub fallback, and staleness guard: when the stub in effect
+  # is NEWER than the last per-share observation (a stalled per-share
+  # series -- share tags dropped from later vintages), the stub count
   # is the fresher basis and must win. Without this, one extraction gap
   # freezes the share count forever.
-  fund_filed <- fund_dt$filed_date[fund_idx]
+  fund_filed <- pb_dt$filed_date[fund_idx_b]
   fb <- is.na(sh_val) | (!is.na(fund_filed) & sh_basis < fund_filed &
-                           !is.na(as.numeric(fund_dt$stub_shares[fund_idx])))
+                           !is.na(as.numeric(pb_dt$stub_shares[fund_idx_b])))
   if (any(fb)) {
-    sh_val[fb]   <- as.numeric(fund_dt$stub_shares[fund_idx])[fb]
+    sh_val[fb]   <- as.numeric(pb_dt$stub_shares[fund_idx_b])[fb]
     sh_basis[fb] <- fund_filed[fb]
   }
 
   sf_day    <- .split_factor(new_dates, splits)
   shares_adj <- sh_val * sf_day / .split_factor(sh_basis, splits)
 
-  eps_basis <- fund_dt$filed_date[fund_idx]
-  eps_adj   <- as.numeric(fund_dt$stub_eps[fund_idx]) *
+  eps_basis <- pb_dt$filed_date[fund_idx_b]
+  eps_adj   <- as.numeric(pb_dt$stub_eps[fund_idx_b]) *
     .split_factor(eps_basis, splits) / sf_day
 
   # -- Build result data.table --
+  # fiscal_year / filed_date come from pass A (latest ANNUAL filing);
+  # filed_date_q is the pass-B row's filing date (= filed_date on
+  # annual-only layers, steps quarterly on mixed-cadence layers).
   result_dt <- data.table(
-    date        = new_dates,
-    price       = new_prices,
-    fiscal_year = fund_dt$fiscal_year[fund_idx],
-    filed_date  = fund_dt$filed_date[fund_idx]
+    date         = new_dates,
+    price        = new_prices,
+    fiscal_year  = ann_dt$fiscal_year[fund_idx],
+    filed_date   = ann_dt$filed_date[fund_idx],
+    filed_date_q = pb_dt$filed_date[fund_idx_b]
   )
 
   # -- Map fundamental-only indicators (plus hidden cross-section
-  #    ingredients for the herf / ww_index finalization) from fund layer --
+  #    ingredients for the herf / ww_index finalization) from fund layer:
+  #    quarterly-kept columns from the pass-B row, all others from the
+  #    pass-A (annual) row --
   for (col in c(.FUNDAMENTAL_INDICATORS, .CS_INGREDIENT_COLS)) {
-    if (col %in% names(fund_dt)) {
-      set(result_dt, j = col, value = as.numeric(fund_dt[[col]][fund_idx]))
+    q_col <- col %in% .Q_KEPT_INDICATORS
+    src <- if (q_col) pb_dt else ann_dt
+    idx <- if (q_col) fund_idx_b else fund_idx
+    if (col %in% names(src)) {
+      set(result_dt, j = col, value = as.numeric(src[[col]][idx]))
     } else {
       set(result_dt, j = col, value = NA_real_)
     }
   }
 
   # -- Vectorized price-sensitive indicator computation --
-  # shares/eps arrive on the day's split basis (see above); every other
-  # stub is an aggregate dollar amount and split-invariant.
+  # ALL stubs come from the pass-B row (annual row on legacy layers;
+  # latest filed Q/FY row on mixed-cadence layers, so valuation ratios
+  # refresh quarterly). shares/eps arrive on the day's split basis (see
+  # above); every other stub is an aggregate dollar amount and
+  # split-invariant. Stubs a quarterly row leaves NA (equity_issuance,
+  # rnd, cf_num, z/kz prefixes) NA their dependents on those days.
   price_dt <- .compute_price_sensitive_vec(
     p       = new_prices,
     shares  = shares_adj,
     eps     = eps_adj,
-    equity  = as.numeric(fund_dt$stub_equity[fund_idx]),
-    rev     = as.numeric(fund_dt$stub_revenue[fund_idx]),
-    fcf_v   = as.numeric(fund_dt$stub_fcf[fund_idx]),
-    ebitda  = as.numeric(fund_dt$stub_ebitda[fund_idx]),
-    td      = as.numeric(fund_dt$stub_total_debt[fund_idx]),
-    nd      = as.numeric(fund_dt$stub_net_debt[fund_idx]),
-    div     = as.numeric(fund_dt$stub_dividends[fund_idx]),
-    buy     = as.numeric(fund_dt$stub_buybacks[fund_idx]),
+    equity  = as.numeric(pb_dt$stub_equity[fund_idx_b]),
+    rev     = as.numeric(pb_dt$stub_revenue[fund_idx_b]),
+    fcf_v   = as.numeric(pb_dt$stub_fcf[fund_idx_b]),
+    ebitda  = as.numeric(pb_dt$stub_ebitda[fund_idx_b]),
+    td      = as.numeric(pb_dt$stub_total_debt[fund_idx_b]),
+    nd      = as.numeric(pb_dt$stub_net_debt[fund_idx_b]),
+    div     = as.numeric(pb_dt$stub_dividends[fund_idx_b]),
+    buy     = as.numeric(pb_dt$stub_buybacks[fund_idx_b]),
     eps_g   = result_dt$eps_growth_yoy,  # from fundamental indicators
     # pre-Wave-2 / pre-Wave-4 fund layers lack these stubs -> NA columns
-    iss     = .stub_or_na(fund_dt, "stub_equity_issuance", fund_idx),
-    rnd     = .stub_or_na(fund_dt, "stub_rnd", fund_idx),
-    at_v    = .stub_or_na(fund_dt, "stub_assets", fund_idx),
-    lt_v    = .stub_or_na(fund_dt, "stub_liabilities", fund_idx),
-    cf_num  = .stub_or_na(fund_dt, "stub_cf_num", fund_idx),
-    cfo     = .stub_or_na(fund_dt, "stub_cfo", fund_idx),
-    che     = .stub_or_na(fund_dt, "stub_che", fund_idx),
-    ncash   = .stub_or_na(fund_dt, "stub_net_cash", fund_idx),
-    ndp_num = .stub_or_na(fund_dt, "stub_ndp_num", fund_idx),
-    z_prefix  = .stub_or_na(fund_dt, "stub_z_prefix", fund_idx),
-    kz_prefix = .stub_or_na(fund_dt, "stub_kz_prefix", fund_idx)
+    iss     = .stub_or_na(pb_dt, "stub_equity_issuance", fund_idx_b),
+    rnd     = .stub_or_na(pb_dt, "stub_rnd", fund_idx_b),
+    at_v    = .stub_or_na(pb_dt, "stub_assets", fund_idx_b),
+    lt_v    = .stub_or_na(pb_dt, "stub_liabilities", fund_idx_b),
+    cf_num  = .stub_or_na(pb_dt, "stub_cf_num", fund_idx_b),
+    cfo     = .stub_or_na(pb_dt, "stub_cfo", fund_idx_b),
+    che     = .stub_or_na(pb_dt, "stub_che", fund_idx_b),
+    ncash   = .stub_or_na(pb_dt, "stub_net_cash", fund_idx_b),
+    ndp_num = .stub_or_na(pb_dt, "stub_ndp_num", fund_idx_b),
+    z_prefix  = .stub_or_na(pb_dt, "stub_z_prefix", fund_idx_b),
+    kz_prefix = .stub_or_na(pb_dt, "stub_kz_prefix", fund_idx_b)
   )
 
   # Bind price-sensitive columns into result
