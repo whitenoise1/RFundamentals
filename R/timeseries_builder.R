@@ -9,8 +9,12 @@
 #      price-sensitive recomputation. Updates only on new filings.
 #      With quarterly = TRUE the layer is mixed-cadence: additional rows
 #      per (fiscal_year, Q1-Q3), marked by a `quarter` column ("FY" on
-#      annual rows), carrying only the natively quarterly indicators
-#      (.Q_KEPT_INDICATORS), instant stock stubs, and TTM flow stubs.
+#      annual rows), carrying the natively quarterly indicators
+#      (.Q_NATIVE_INDICATORS), the TTM-quarterly indicators
+#      (.Q_TTM_INDICATORS, annual ratio formulas recomputed on
+#      trailing-twelve-month flows), instant stock stubs, TTM flow
+#      stubs, and standalone-quarter q3m_<concept> ingredient columns
+#      (.Q3M_CONCEPTS; also stamped on FY rows of quarterly builds).
 #   2. Per-share layer ({ticker}_pershare.parquet): sparse, one row per
 #      FILING (10-Q cadence). The authoritative as-of-filing share count
 #      (dei cover / Wave M synthetic), stamped by filed date. Fixes D1:
@@ -24,7 +28,9 @@
 #      .split_factor, so mc = price x shares is exact across splits;
 #      fundamental-only carried forward; cross-section-finalized columns
 #      (ms_*, herf, ww_index, ch_inv_ia) are per-ticker NA/ingredients
-#      until a cross-section reader finalizes them.
+#      until a cross-section reader finalizes them. On mixed-cadence
+#      fund layers the daily rows also carry pass-B provenance stamps
+#      (period_end_q, quarter_q) and the layer's q3m_* columns.
 #
 # Storage:
 #   cache/timeseries/{ticker}_fund.parquet
@@ -124,19 +130,58 @@ if (!exists(".drop_drive_conflict_paths", mode = "function")) {
   z_score        = "stub_z_prefix"
 )
 
-# Quarterly-kept indicator columns (mixed-cadence extension): the ONLY
-# compute_ticker_indicators outputs stored on a quarterly fund row. They
-# are computed from the label-free standalone-quarter panels (Wave 3
-# machinery, indicator_compute.R Section 6d) and are natively quarterly.
-# Every other indicator is an annual-bound formula that would be
-# wrong-basis at Q and stays NA on quarterly rows -- absent, never
-# plausible. In the daily layer these columns map from pass B (all fund
-# rows, latest period wins); everything else maps from pass A (annual
-# rows only).
-.Q_KEPT_INDICATORS <- c(
+# Quarterly-kept indicator columns (mixed-cadence extension), split by
+# provenance. The split exists because of a wrong-basis trap: the
+# compute_ticker_indicators output at target_period = "Q*" evaluates
+# every annual-bound formula on the wide pivot's quarterly row, where
+# 10-Q cash-flow items are YTD-CUMULATIVE -- a flow-over-stock ratio
+# copied from that output would mix nine months of flows with a
+# quarter-end instant, a plausible wrong number. So:
+#
+#   .Q_NATIVE_INDICATORS: computed INSIDE compute_ticker_indicators from
+#     the label-free standalone-quarter panels (Wave 3 machinery,
+#     indicator_compute.R Section 6d), natively quarterly, and COPIED
+#     from its output on a quarterly row.
+#   .Q_TTM_INDICATORS: annual ratio formulas re-based to trailing-
+#     twelve-month flows (.q_ttm_bundle) against as-of instants,
+#     computed by .compute_ttm_indicators_q and NEVER copied from the
+#     compute_ticker_indicators output (see the trap above).
+#
+# Every indicator outside the union is an annual-bound formula with no
+# approved TTM construction (lagged rows, deltas, YoY terms) and stays
+# NA on quarterly rows -- absent, never plausible. In the daily layer
+# the union (.Q_KEPT_INDICATORS) maps from pass B (all fund rows,
+# latest period wins); everything else maps from pass A (annual rows
+# only).
+.Q_NATIVE_INDICATORS <- c(
   "roaq", "revenue_surprise", "earnings_surprise", "revenue_growth_qoq",
   "ch_tax", "num_earn_increase", "fcf_stability",
   "ms_roa_vol", "ms_rev_vol", "ing_ms_roa_vol", "ing_ms_rev_vol"
+)
+
+.Q_TTM_INDICATORS <- c(
+  "gross_margin", "operating_margin", "net_margin", "roe", "roa", "roic",
+  "asset_turnover", "inventory_turnover", "receivables_turnover",
+  "fcf_ni", "opcf_ni", "capex_revenue", "payout_ratio",
+  "debt_equity", "net_debt_ebitda", "interest_coverage",
+  "current_ratio", "quick_ratio",
+  "gpa", "pct_accruals", "effective_tax_rate",
+  "oper_prof", "book_leverage", "cash_assets", "salecash", "depr_rate"
+)
+
+.Q_KEPT_INDICATORS <- c(.Q_NATIVE_INDICATORS, .Q_TTM_INDICATORS)
+
+# Standalone-quarter flow concepts served on quarterly-built fund rows
+# as q3m_<concept> columns: the anchor quarter's OWN 3-month value from
+# the Wave 3 standalone-quarter machinery (.flow_quarter_series), never
+# the wide pivot's duration-ambiguous quarterly cell. On FY rows the
+# anchor is the standalone Q4 recovered from the FY - 3Q pairing. Raw
+# ingredients for downstream consumers, not indicators; the daily
+# mapper serves them from pass B on mixed-cadence layers only.
+.Q3M_CONCEPTS <- c(
+  "revenue", "cogs", "sga", "net_income", "operating_cashflow", "capex",
+  "operating_income", "depreciation", "dividends_paid", "buybacks",
+  "income_tax_expense", "pretax_income", "interest_expense", "rnd"
 )
 
 
@@ -281,6 +326,47 @@ if (!exists(".drop_drive_conflict_paths", mode = "function")) {
 }
 
 
+#' TTM and standalone-quarter values for all .Q3M_CONCEPTS in one pass
+#'
+#' One .flow_quarter_series scan per concept, from which BOTH sides
+#' derive: ttm_<concept> reproduces .q_ttm_flow exactly (same anchor
+#' tolerance 10 d, same lag resolution round(m * 91.3) at tol 40, NA
+#' when the series is missing/short, the anchor is missing, any lag is
+#' missing, or any value is NA); q3m_<concept> is the anchor quarter's
+#' own 3-month value (NA when no anchor resolves). Exists so the
+#' quarterly-row build does not re-scan the vintage table once per
+#' consumer (.extract_stubs_q + .compute_ttm_indicators_q + the q3m
+#' columns all read one bundle). Dollar aggregates are split-invariant,
+#' so no split adjustment (matching .extract_stubs_q's .q_ttm_flow
+#' calls; eps stays on its own dual path in .q_ttm_eps).
+#'
+#' @param fund_asof data.table. pit_dedup view as of the row's filing.
+#' @param q_pe Date. The anchor quarter's period_end.
+#' @return Named list: ttm_<concept> and q3m_<concept> per .Q3M_CONCEPTS.
+.q_ttm_bundle <- function(fund_asof, q_pe) {
+  out <- setNames(
+    as.list(rep(NA_real_, 2L * length(.Q3M_CONCEPTS))),
+    c(paste0("ttm_", .Q3M_CONCEPTS), paste0("q3m_", .Q3M_CONCEPTS)))
+  for (cn in .Q3M_CONCEPTS) {
+    ser <- tryCatch(.flow_quarter_series(fund_asof, cn, NULL, FALSE),
+                    error = function(e) NULL)
+    if (is.null(ser) || nrow(ser) == 0) next
+    i <- .near_idx(ser$qend, q_pe, 10)
+    if (is.na(i)) next
+    out[[paste0("q3m_", cn)]] <- as.numeric(ser$value[i])
+    if (nrow(ser) < 4) next
+    idx <- c(i, vapply(1:3, function(m) {
+      .q_lag_idx(ser$qend, i, round(m * 91.3), 40)
+    }, integer(1)))
+    if (anyNA(idx)) next
+    v <- ser$value[idx]
+    if (anyNA(v)) next
+    out[[paste0("ttm_", cn)]] <- sum(v)
+  }
+  out
+}
+
+
 # TTM diluted EPS for the quarter ending at q_pe, expressed on the
 # Q-FILING-DATE split basis (the stub convention: update_ticker_daily
 # maps stub_eps from its filed-date basis onto each day's as-traded
@@ -327,15 +413,34 @@ if (!exists(".drop_drive_conflict_paths", mode = "function")) {
 #' @param q_pe Date. The quarter's period_end.
 #' @param q_filed Date. The quarter's original filing date.
 #' @param splits data.table or NULL. Split events.
+#' @param ttm Named list or NULL. Precomputed .q_ttm_bundle for this
+#'   quarter; NULL falls back to per-flow .q_ttm_flow calls (identical
+#'   results, one vintage scan per flow).
+#' @param lc Named list or NULL. Precomputed .level_components(qrow);
+#'   NULL resolves it here.
 #' @return Named list covering .STUB_NAMES.
-.extract_stubs_q <- function(qrow, fund_asof, q_pe, q_filed, splits = NULL) {
+.extract_stubs_q <- function(qrow, fund_asof, q_pe, q_filed, splits = NULL,
+                             ttm = NULL, lc = NULL) {
 
-  lc <- .level_components(qrow)
+  if (is.null(lc)) lc <- .level_components(qrow)
 
-  cfo_ttm   <- .q_ttm_flow(fund_asof, "operating_cashflow", q_pe)
-  capex_ttm <- .q_ttm_flow(fund_asof, "capex", q_pe)
-  opinc_ttm <- .q_ttm_flow(fund_asof, "operating_income", q_pe)
-  dep_ttm   <- .q_ttm_flow(fund_asof, "depreciation", q_pe)
+  if (is.null(ttm)) {
+    cfo_ttm   <- .q_ttm_flow(fund_asof, "operating_cashflow", q_pe)
+    capex_ttm <- .q_ttm_flow(fund_asof, "capex", q_pe)
+    opinc_ttm <- .q_ttm_flow(fund_asof, "operating_income", q_pe)
+    dep_ttm   <- .q_ttm_flow(fund_asof, "depreciation", q_pe)
+    rev_ttm   <- .q_ttm_flow(fund_asof, "revenue", q_pe)
+    div_ttm   <- .q_ttm_flow(fund_asof, "dividends_paid", q_pe)
+    buy_ttm   <- .q_ttm_flow(fund_asof, "buybacks", q_pe)
+  } else {
+    cfo_ttm   <- ttm$ttm_operating_cashflow
+    capex_ttm <- ttm$ttm_capex
+    opinc_ttm <- ttm$ttm_operating_income
+    dep_ttm   <- ttm$ttm_depreciation
+    rev_ttm   <- ttm$ttm_revenue
+    div_ttm   <- ttm$ttm_dividends_paid
+    buy_ttm   <- ttm$ttm_buybacks
+  }
 
   # Same NA policies as .derive_quantities: FCF without capex would be
   # overstated OpCF; EBITDA without D&A would be EBIT mislabelled.
@@ -348,14 +453,14 @@ if (!exists(".drop_drive_conflict_paths", mode = "function")) {
     stub_shares     = .col(qrow, "shares_outstanding"),
     stub_eps        = .q_ttm_eps(fund_asof, q_pe, q_filed, splits),
     stub_equity     = lc$ceq,
-    stub_revenue    = .q_ttm_flow(fund_asof, "revenue", q_pe),
+    stub_revenue    = rev_ttm,
     stub_fcf        = fcf_ttm,
     stub_ebitda     = ebitda_ttm,
     stub_total_debt = lc$td,
     stub_net_debt   = .col(qrow, "net_debt"),
     stub_cash       = .col(qrow, "cash"),
-    stub_dividends  = .q_ttm_flow(fund_asof, "dividends_paid", q_pe),
-    stub_buybacks   = .q_ttm_flow(fund_asof, "buybacks", q_pe),
+    stub_dividends  = div_ttm,
+    stub_buybacks   = buy_ttm,
     stub_equity_issuance = NA_real_,
     stub_rnd        = NA_real_,
     stub_assets     = lc$at,
@@ -371,6 +476,117 @@ if (!exists(".drop_drive_conflict_paths", mode = "function")) {
 }
 
 
+#' Compute the TTM-quarterly indicators for one quarterly row
+#'
+#' Re-bases the annual ratio formulas in .Q_TTM_INDICATORS onto
+#' trailing-twelve-month flows (the .q_ttm_bundle) against the Q-row's
+#' as-of instants. Each formula MIRRORS its FY definition in
+#' indicator_compute.R (.compute_profitability, .compute_leverage,
+#' .compute_efficiency, .compute_cashflow_quality, .compute_shareholder,
+#' .compute_tier1, .compute_levels) -- same .safe_divide floors, same
+#' positivity guards (ceq > 0 for book_leverage / oper_prof), same
+#' required-vs-zero-if-na term policies, same derived-quantity NA
+#' policies (gross profit needs both terms; FCF without capex and
+#' EBITDA without D&A propagate NA, as in .derive_quantities). Values
+#' NEVER come from the compute_ticker_indicators output at a quarterly
+#' target_period: its flow cells are YTD-cumulative there (the
+#' wrong-basis trap documented at the constants).
+#'
+#' @param qrow data.table. The quarter's wide pivot row (1 row).
+#' @param ttm Named list. Output of .q_ttm_bundle for this quarter.
+#' @param lc Named list or NULL. Precomputed .level_components(qrow);
+#'   NULL resolves it here.
+#' @return Named list covering .Q_TTM_INDICATORS (NA where inputs are
+#'   unavailable).
+.compute_ttm_indicators_q <- function(qrow, ttm, lc = NULL) {
+
+  if (is.null(lc)) lc <- .level_components(qrow)
+
+  out <- setNames(as.list(rep(NA_real_, length(.Q_TTM_INDICATORS))),
+                  .Q_TTM_INDICATORS)
+
+  rev    <- ttm$ttm_revenue
+  cogs_v <- ttm$ttm_cogs
+  sga    <- ttm$ttm_sga
+  ni     <- ttm$ttm_net_income
+  cfo    <- ttm$ttm_operating_cashflow
+  capex_v <- ttm$ttm_capex
+  opinc  <- ttm$ttm_operating_income
+  dep    <- ttm$ttm_depreciation
+  div    <- ttm$ttm_dividends_paid
+  tax    <- ttm$ttm_income_tax_expense
+  pretax <- ttm$ttm_pretax_income
+  intexp <- ttm$ttm_interest_expense
+
+  # Derived TTM quantities, same NA policies as .derive_quantities:
+  # gross profit needs both terms; EBITDA without D&A would be EBIT
+  # mislabelled; FCF without capex would be overstated OpCF.
+  gp <- if (is.na(rev) || is.na(cogs_v)) NA_real_ else rev - cogs_v
+  ebitda_v <- if (is.na(opinc) || is.na(dep)) NA_real_ else opinc + dep
+  fcf_v <- if (is.na(cfo) || is.na(capex_v)) NA_real_ else cfo - capex_v
+
+  # -- Profitability (.compute_profitability): sign-guard-free, invested
+  #    capital = equity + debt - cash with NA in any component propagating
+  ic <- lc$ceq + lc$td - .col(qrow, "cash")
+  out$gross_margin     <- .safe_divide(gp, rev)
+  out$operating_margin <- .safe_divide(opinc, rev)
+  out$net_margin       <- .safe_divide(ni, rev)
+  out$roe              <- .safe_divide(ni, lc$ceq)
+  out$roa              <- .safe_divide(ni, lc$at)
+  out$roic             <- .safe_divide(ni, ic)
+
+  # -- Efficiency (.compute_efficiency) --
+  out$asset_turnover       <- .safe_divide(rev, lc$at)
+  out$inventory_turnover   <- .safe_divide(cogs_v, .col(qrow, "inventory"))
+  out$receivables_turnover <- .safe_divide(rev, .col(qrow, "accounts_receivable"))
+
+  # -- Cash flow quality (.compute_cashflow_quality) --
+  out$fcf_ni        <- .safe_divide(fcf_v, ni, min_abs_denom = 1)
+  out$opcf_ni       <- .safe_divide(cfo, ni, min_abs_denom = 1)
+  out$capex_revenue <- .safe_divide(capex_v, rev)
+
+  # -- Shareholder return (.compute_shareholder): payout allowed
+  #    negative when NI < 0 (distress signal) --
+  abs_div <- if (!is.na(div)) abs(div) else NA_real_
+  out$payout_ratio <- .safe_divide(abs_div, ni)
+
+  # -- Leverage (.compute_leverage): net_debt is the Q-row instant
+  #    derived quantity (total_debt - cash, NA propagates) --
+  ca  <- .col(qrow, "current_assets")
+  cl  <- .col(qrow, "current_liabilities")
+  inv <- .col(qrow, "inventory")
+  out$debt_equity       <- .safe_divide(lc$td, lc$ceq)
+  out$net_debt_ebitda   <- .safe_divide(.col(qrow, "net_debt"), ebitda_v)
+  out$interest_coverage <- .safe_divide(opinc, intexp, min_abs_denom = 1)
+  out$current_ratio     <- .safe_divide(ca, cl)
+  out$quick_ratio       <- .safe_divide(
+    if (!is.na(ca)) ca - (if (is.na(inv)) 0 else inv) else NA_real_, cl)
+
+  # -- Tier 1 (.compute_tier1): gpa and pct_accruals only (the lagged
+  #    constructions have no TTM basis and stay outside the set) --
+  out$gpa <- .safe_divide(gp, lc$at)
+  accrual_num <- if (!is.na(ni) && !is.na(cfo)) ni - cfo else NA_real_
+  out$pct_accruals <- .safe_divide(accrual_num, abs(ni), min_abs_denom = 1)
+
+  # -- Levels (.compute_levels) --
+  out$effective_tax_rate <- .safe_divide(tax, pretax)
+  if (!is.na(lc$ceq) && lc$ceq > 0) {
+    out$book_leverage <- .safe_divide(lc$at, lc$ceq)
+  }
+  # FF operating profitability: all four numerator inputs required,
+  # BE > 0 (W4.9)
+  if (!is.na(rev) && !is.na(cogs_v) && !is.na(sga) && !is.na(intexp) &&
+      !is.na(lc$ceq) && lc$ceq > 0) {
+    out$oper_prof <- .safe_divide(rev - cogs_v - sga - intexp, lc$ceq)
+  }
+  out$cash_assets <- .safe_divide(lc$che, lc$at)
+  out$salecash    <- .safe_divide(rev, lc$che, min_abs_denom = 1)
+  out$depr_rate   <- .safe_divide(dep, .col(qrow, "ppe_net"))
+
+  out
+}
+
+
 #' Build quarterly fund-layer rows for one ticker (mixed-cadence extension)
 #'
 #' Enumerates (fiscal_year, Q1/Q2/Q3) from the vintage table; each
@@ -378,10 +594,15 @@ if (!exists(".drop_drive_conflict_paths", mode = "function")) {
 #' the quarter's plain 10-Q rows (fallback: min over all its rows when
 #' no plain 10-Q exists). Amendments filed later can neither pull the
 #' stamp earlier nor leak into the as-of view (pit_dedup as_of cuts
-#' them). Only the natively quarterly indicator columns
-#' (.Q_KEPT_INDICATORS) are stored; every other indicator column is NA.
-#' Stubs per .extract_stubs_q. A quarter whose pivot row is missing or
-#' too sparse yields no row -- degradation is absence.
+#' them). Indicator columns stored: the natively quarterly set
+#' (.Q_NATIVE_INDICATORS, copied from the compute output) and the
+#' TTM-quarterly set (.Q_TTM_INDICATORS, recomputed by
+#' .compute_ttm_indicators_q from one .q_ttm_bundle -- never copied
+#' from the compute output, whose flow cells are YTD-cumulative at a
+#' quarterly target_period); every other indicator column is NA. Stubs
+#' per .extract_stubs_q; standalone-quarter q3m_<concept> ingredient
+#' columns from the same bundle. A quarter whose pivot row is missing
+#' or too sparse yields no row -- degradation is absence.
 #'
 #' @param fund_v data.table. Raw XBRL vintages (get_fundamentals vintages=TRUE).
 #' @param sector Character. Sector classification.
@@ -444,15 +665,30 @@ if (!exists(".drop_drive_conflict_paths", mode = "function")) {
     )
     if (is.null(indicators)) next
 
-    # Keep ONLY the natively quarterly outputs; all other indicator
-    # columns stay NA on a quarterly row (annual-bound formulas are
-    # wrong-basis at Q and must be absent, not plausible).
+    # One TTM/standalone-quarter scan and one instant resolution,
+    # shared by the TTM indicators, the stubs, and the q3m columns
+    ttm <- .q_ttm_bundle(fund_asof, q_pe)
+    lc  <- .level_components(qrow)
+
+    # Copy ONLY the natively quarterly outputs from the compute path;
+    # all other indicator columns stay NA on a quarterly row
+    # (annual-bound formulas are wrong-basis at Q and must be absent,
+    # not plausible).
     q_ind <- setNames(as.list(rep(NA_real_, length(ind_cols))), ind_cols)
-    for (nm in intersect(.Q_KEPT_INDICATORS, names(indicators))) {
+    for (nm in intersect(.Q_NATIVE_INDICATORS, names(indicators))) {
       q_ind[[nm]] <- unname(indicators[[nm]])
     }
 
-    stubs <- .extract_stubs_q(qrow, fund_asof, q_pe, q_filed, splits)
+    # TTM-quarterly indicators are recomputed on the TTM basis, never
+    # copied from the compute output (wrong-basis trap -- see the
+    # constants)
+    ttm_ind <- .compute_ttm_indicators_q(qrow, ttm, lc)
+    for (nm in intersect(.Q_TTM_INDICATORS, names(q_ind))) {
+      q_ind[[nm]] <- ttm_ind[[nm]]
+    }
+
+    stubs <- .extract_stubs_q(qrow, fund_asof, q_pe, q_filed, splits,
+                              ttm = ttm, lc = lc)
 
     # Same masked-stub rule as the FY loop
     if (!is.na(sector) && sector %in% names(.SECTOR_NA_INDICATORS)) {
@@ -468,7 +704,8 @@ if (!exists(".drop_drive_conflict_paths", mode = "function")) {
            filed_date  = q_filed,
            period_end  = q_pe),
       q_ind,
-      stubs
+      stubs,
+      ttm[paste0("q3m_", .Q3M_CONCEPTS)]
     )
   }
 
@@ -674,11 +911,12 @@ if (!exists(".drop_drive_conflict_paths", mode = "function")) {
 #' @param force Logical. Rebuild even if file exists.
 #' @param quarterly Logical. FALSE (default) reproduces the annual-only
 #'   layer byte-identically (no quarter column, gated downstream). TRUE
-#'   appends quarterly Q1-Q3 rows after the FY loop; the new `quarter`
-#'   column ("FY"/"Q1"/"Q2"/"Q3") doubles as the cadence marker (no
-#'   separate cadence column -- documented choice, cadence is quarter ==
-#'   "FY" vs not). NOTE: an existing file is returned as-is unless
-#'   force = TRUE, whatever cadence it was built with.
+#'   appends quarterly Q1-Q3 rows after the FY loop and stamps
+#'   standalone-quarter q3m_<concept> columns on FY rows too; the new
+#'   `quarter` column ("FY"/"Q1"/"Q2"/"Q3") doubles as the cadence
+#'   marker (no separate cadence column -- documented choice, cadence
+#'   is quarter == "FY" vs not). NOTE: an existing file is returned
+#'   as-is unless force = TRUE, whatever cadence it was built with.
 #' @return data.table (the fundamentals layer), or NULL on failure.
 build_ticker_fundamentals <- function(ticker, cik, sector,
                                       fund_dir = "cache/fundamentals",
@@ -785,13 +1023,24 @@ build_ticker_fundamentals <- function(ticker, cik, sector,
       for (ind in masked_here) stubs[[.MASKED_STUB_OF[[ind]]]] <- NA_real_
     }
 
+    # Mixed-cadence extension: standalone-quarter (q3m) ingredient
+    # columns on the FY row, as-of the FY filing. The anchor at the FY
+    # period_end is the standalone Q4 that .flow_quarter_series
+    # recovers from the FY - 3Q pairing. Gated: with quarterly = FALSE
+    # nothing is computed and no column exists (c() drops the NULL), so
+    # the annual-only path stays byte-identical.
+    q3m <- if (isTRUE(quarterly)) {
+      .q_ttm_bundle(fund_asof, period_end)[paste0("q3m_", .Q3M_CONCEPTS)]
+    } else NULL
+
     n_ok <- n_ok + 1L
     results[[n_ok]] <- c(
       list(fiscal_year = as.integer(fy),
            filed_date  = filed_date,
            period_end  = period_end),
       fund_only,
-      stubs
+      stubs,
+      q3m
     )
   }
 
@@ -899,10 +1148,18 @@ build_ticker_pershare <- function(ticker, cik = NULL,
 #'     .Q_KEPT_INDICATORS, plus fiscal_year and filed_date -- so
 #'     filed_date keeps meaning "latest ANNUAL filing".
 #'   PASS B (all rows, latest period_end wins where filed <= day): the
-#'     quarterly-kept indicator columns, every stub feeding
+#'     quarterly-kept indicator columns (.Q_KEPT_INDICATORS = native +
+#'     TTM-quarterly), every stub feeding
 #'     .compute_price_sensitive_vec (valuation ratios refresh
 #'     quarterly on mixed-cadence layers), and the daily column
 #'     filed_date_q = the filed_date of the pass-B row in effect.
+#' Mixed-cadence fund layers (a `quarter` column present) additionally
+#' get pass-B provenance stamps -- period_end_q and quarter_q, the
+#' period_end and quarter label of the pass-B row in effect -- and the
+#' standalone-quarter q3m_<concept> ingredient columns the layer
+#' carries, mapped from the same pass-B row. Both are gated on the
+#' `quarter` column: legacy and annual-only layers produce exactly
+#' today's columns (their output stays byte-identical).
 #' On annual-only fund layers pass B degrades to pass A's rows and the
 #' output matches the single-pass builder except the added filed_date_q
 #' column (= filed_date).
@@ -1103,6 +1360,16 @@ update_ticker_daily <- function(ticker,
     filed_date_q = pb_dt$filed_date[fund_idx_b]
   )
 
+  # Pass-B provenance stamps, mixed-cadence layers only: which reported
+  # period (and cadence) the pass-B row in effect carries. Gated on
+  # has_q so legacy and annual-only daily outputs stay byte-identical.
+  if (has_q) {
+    set(result_dt, j = "period_end_q",
+        value = as.Date(pb_dt$period_end[fund_idx_b]))
+    set(result_dt, j = "quarter_q",
+        value = as.character(pb_dt$quarter[fund_idx_b]))
+  }
+
   # -- Map fundamental-only indicators (plus hidden cross-section
   #    ingredients for the herf / ww_index finalization) from fund layer:
   #    quarterly-kept columns from the pass-B row, all others from the
@@ -1115,6 +1382,16 @@ update_ticker_daily <- function(ticker,
       set(result_dt, j = col, value = as.numeric(src[[col]][idx]))
     } else {
       set(result_dt, j = col, value = NA_real_)
+    }
+  }
+
+  # -- Standalone-quarter (q3m_*) ingredient columns from the pass-B
+  #    row: only the columns the fund layer carries (quarterly builds),
+  #    and only on mixed-cadence layers -- legacy and annual-only
+  #    layers create no q3m column at all --
+  if (has_q) {
+    for (col in grep("^q3m_", names(pb_dt), value = TRUE)) {
+      set(result_dt, j = col, value = as.numeric(pb_dt[[col]][fund_idx_b]))
     }
   }
 
