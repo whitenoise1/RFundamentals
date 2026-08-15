@@ -1029,8 +1029,17 @@ build_ticker_fundamentals <- function(ticker, cik, sector,
     # recovers from the FY - 3Q pairing. Gated: with quarterly = FALSE
     # nothing is computed and no column exists (c() drops the NULL), so
     # the annual-only path stays byte-identical.
+    # The row's period_end metadata is max() over the group's facts and
+    # is pulled PAST the fiscal year end by instant facts dated at the
+    # cover page (dei shares, ~3 weeks late) -- the same pollution the
+    # quarterly-row build resolves from duration rows. Anchoring the
+    # bundle on it starves the 10 d matcher, so the anchor derives from
+    # the FY duration rows; the served period_end column is unchanged.
     q3m <- if (isTRUE(quarterly)) {
-      .q_ttm_bundle(fund_asof, period_end)[paste0("q3m_", .Q3M_CONCEPTS)]
+      dur <- fund_asof[fiscal_year == fy & period_type == "FY" &
+                         !is.na(period_start) & !is.na(period_end)]
+      fy_pe <- if (nrow(dur) > 0) as.Date(max(dur$period_end)) else period_end
+      .q_ttm_bundle(fund_asof, fy_pe)[paste0("q3m_", .Q3M_CONCEPTS)]
     } else NULL
 
     n_ok <- n_ok + 1L
