@@ -1945,7 +1945,17 @@ build_fundamentals <- function(
   }
   master <- as.data.table(arrow::read_parquet(master_path))
 
-  # Filter to tickers with CIK
+  # Filter to tickers with CIK -- LOUDLY (U1 leg (c), SURVIVORSHIP_RULING
+  # S2(c): the silent drop hid 38 unresolved names from every build; a
+  # dropped name is counted and named, never silently absent)
+  n_na_cik <- sum(is.na(master$cik))
+  if (n_na_cik > 0) {
+    warning(sprintf(
+      "build_fundamentals: %d master ticker(s) have NO CIK and are DROPPED from the build: %s",
+      n_na_cik,
+      paste(sort(unique(master$ticker[is.na(master$cik)])), collapse = ", ")),
+      call. = FALSE)
+  }
   master <- master[!is.na(cik)]
 
   if (!is.null(tickers)) {
